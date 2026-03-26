@@ -1,8 +1,0 @@
-2026-03-23 03:10:02.5859-INFO OnClosing -> ApplicationShutdown
-2026-03-23 03:10:02.5859-INFO AppExitAsync Begin
-2026-03-23 08:08:53.5035-INFO v2rayN start up | v2rayN - V7.18.0 - X64 | E:\桌面\v2rayN-windows-64\ | E:\桌面\v2rayN-windows-64\v2rayN.exe | Microsoft Windows NT 10.0.19045.0
-2026-03-23 08:08:54.2552-INFO Setup Scheduled Tasks
-2026-03-23 08:09:51.8753-INFO AppExitAsync Begin
-2026-03-23 08:09:52.0635-INFO AppExitAsync End
-2026-03-23 08:09:57.8170-INFO v2rayN start up | v2rayN - V7.18.0 - X64 | E:\桌面\v2rayN-windows-64\ | E:\桌面\v2rayN-windows-64\v2rayN.exe | Microsoft Windows NT 10.0.19045.0
-2026-03-23 08:09:58.5568-INFO Setup Scheduled Tasks
