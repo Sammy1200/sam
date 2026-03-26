@@ -1,0 +1,27 @@
+2026-03-24 01:29:13.1298-INFO OnClosing -> ApplicationShutdown
+2026-03-24 01:29:13.1298-INFO AppExitAsync Begin
+2026-03-24 01:30:15.3307-INFO v2rayN start up | v2rayN - V7.18.0 - X64 | E:\桌面\v2rayN-windows-64\ | E:\桌面\v2rayN-windows-64\v2rayN.exe | Microsoft Windows NT 10.0.19045.0
+2026-03-24 01:30:16.0149-INFO Setup Scheduled Tasks
+2026-03-24 01:30:22.2994-INFO OnClosing -> WindowClosing
+2026-03-24 06:51:15.9437-INFO OnClosing -> ApplicationShutdown
+2026-03-24 06:51:15.9437-INFO AppExitAsync Begin
+2026-03-24 06:52:22.2913-INFO v2rayN start up | v2rayN - V7.18.0 - X64 | E:\桌面\v2rayN-windows-64\ | E:\桌面\v2rayN-windows-64\v2rayN.exe | Microsoft Windows NT 10.0.19045.0
+2026-03-24 06:52:23.0311-INFO Setup Scheduled Tasks
+2026-03-24 06:52:45.8312-INFO OnClosing -> WindowClosing
+2026-03-24 06:54:38.5031-INFO AppExitAsync Begin
+2026-03-24 06:54:38.6591-INFO AppExitAsync End
+2026-03-24 11:51:14.2629-INFO v2rayN start up | v2rayN - V7.18.0 - X64 | E:\桌面\v2rayN-windows-64\ | E:\桌面\v2rayN-windows-64\v2rayN.exe | Microsoft Windows NT 10.0.19045.0
+2026-03-24 11:51:14.9994-INFO Setup Scheduled Tasks
+2026-03-24 11:59:12.1692-INFO OnClosing -> WindowClosing
+2026-03-24 12:15:51.8616-INFO OnClosing -> WindowClosing
+2026-03-24 12:25:00.3787-INFO OnClosing -> WindowClosing
+2026-03-24 13:01:19.2306-INFO OnClosing -> ApplicationShutdown
+2026-03-24 13:01:19.2306-INFO AppExitAsync Begin
+2026-03-24 13:02:21.3377-INFO v2rayN start up | v2rayN - V7.18.0 - X64 | E:\桌面\v2rayN-windows-64\ | E:\桌面\v2rayN-windows-64\v2rayN.exe | Microsoft Windows NT 10.0.19045.0
+2026-03-24 13:02:22.0944-INFO Setup Scheduled Tasks
+2026-03-24 13:02:24.8577-INFO OnClosing -> WindowClosing
+2026-03-24 13:33:09.8275-INFO OnClosing -> ApplicationShutdown
+2026-03-24 13:33:09.8275-INFO AppExitAsync Begin
+2026-03-24 13:37:11.1989-INFO v2rayN start up | v2rayN - V7.18.0 - X64 | E:\桌面\v2rayN-windows-64\ | E:\桌面\v2rayN-windows-64\v2rayN.exe | Microsoft Windows NT 10.0.19045.0
+2026-03-24 13:37:11.9359-INFO Setup Scheduled Tasks
+2026-03-24 13:38:13.3974-INFO OnClosing -> WindowClosing

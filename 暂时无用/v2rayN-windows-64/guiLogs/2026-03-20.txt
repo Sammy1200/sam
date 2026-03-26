@@ -1,0 +1,23 @@
+2026-03-20 10:51:59.4024-INFO v2rayN start up | v2rayN - V7.18.0 - X64 | C:\Users\Administrator\Downloads\v2rayN-windows-64\ | C:\Users\Administrator\Downloads\v2rayN-windows-64\v2rayN.exe | Microsoft Windows NT 10.0.19045.0
+2026-03-20 10:52:00.2574-INFO Setup Scheduled Tasks
+2026-03-20 10:52:05.3839-INFO OnClosing -> WindowClosing
+2026-03-20 11:08:15.9813-DEBUG ConfigHandler,IO_FileNotFound_FileName, C:\Users\Administrator\Downloads\v2rayN-windows-64\guiConfigs\guiNConfig.json_temp
+2026-03-20 11:08:15.9813-DEBUG    at System.IO.File.Move(String sourceFileName, String destFileName, Boolean overwrite)
+   at ServiceLib.Handler.ConfigHandler.SaveConfig(Config config) in /home/runner/work/v2rayN/v2rayN/v2rayN/ServiceLib/Handler/ConfigHandler.cs:line 198
+2026-03-20 11:11:30.3960-DEBUG GetCliWrapOutput,Command execution failed, see the inner exception for details.
+
+Standard error:
+
+2026-03-20 11:11:30.3960-DEBUG    at CliWrap.Buffered.BufferedCommandExtensions.<>c__DisplayClass1_0.<<ExecuteBufferedAsync>b__0>d.MoveNext() in /_/CliWrap/Buffered/BufferedCommandExtensions.cs:line 66
+--- End of stack trace from previous location ---
+   at ServiceLib.Common.Utils.GetCliWrapOutput(String filePath, IEnumerable`1 args) in /home/runner/work/v2rayN/v2rayN/v2rayN/ServiceLib/Common/Utils.cs:line 862
+2026-03-20 11:11:30.3960-ERROR CliWrap.Exceptions.CommandExecutionException: Command execution failed because the underlying process (pnputil.exe#89596) returned a non-zero exit code (-536870389).
+
+Command:
+C:\Windows\System32\pnputil.exe  /remove-device  "SWD\Wintun\{b738a021-9842-444c-10b0-a4e3f65ab5b6}" 
+
+You can suppress this validation by calling `WithValidation(CommandResultValidation.None)` on the command.
+2026-03-20 14:49:11.9352-INFO AppExitAsync Begin
+2026-03-20 14:49:12.1133-INFO AppExitAsync End
+2026-03-20 15:34:15.4448-INFO v2rayN start up | v2rayN - V7.18.0 - X64 | E:\桌面\v2rayN-windows-64\ | E:\桌面\v2rayN-windows-64\v2rayN.exe | Microsoft Windows NT 10.0.19045.0
+2026-03-20 15:34:16.2171-INFO Setup Scheduled Tasks
