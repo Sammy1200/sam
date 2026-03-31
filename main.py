@@ -1,0 +1,635 @@
+﻿"""
+唯一入口：初始化、加载资源并启动自动化流程。
+"""
+import ctypes
+import sys
+import os
+import time
+from datetime import datetime, timedelta
+import cv2
+
+
+# ===== 0. 自动提权 =====
+def is_admin():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+
+if os.environ.get("CODEX_SKIP_ELEVATE") != "1" and not is_admin():
+    print("正在申请管理员权限...")
+    ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", sys.executable,
+        f'"{os.path.abspath(__file__)}"', None, 1)
+    sys.exit()
+
+
+try:
+    from rapidocr_onnxruntime import RapidOCR
+except ImportError:
+    print("缺少 rapidocr_onnxruntime，请运行: pip install rapidocr-onnxruntime")
+    os.system('pause')
+    sys.exit()
+
+
+import dxcam
+import config
+import state
+from config import (
+    MONITOR_JIAOYIHANG, MONITOR_SHOP,
+    FIX_SHOP_POS1, FIX_SHOP_POS2,
+    ACCOUNT_LIMIT_COOLDOWN_SECONDS,
+)
+from account_db import (
+    CANONICAL_ACCOUNT_STATS_TABLE,
+    find_canonical_account_stats_store,
+    normalize_canonical_round_status_values,
+    read_canonical_account_stats_record,
+)
+from round_persistence import (
+    persist_final_round_snapshot,
+    refresh_account_limit_reached_at,
+    reset_round_runtime_state,
+    resolve_shutdown_final_status,
+)
+from utils import safe_sleep, safe_get_frame, safe_imread, fast_click, gc_checkpoint
+from utils import async_push_msg, logger
+from vision import is_image_present, load_digit_templates
+from overlay import start_overlay, ui_print
+from listing import execute_listing_routine
+from purchase import run_purchase_loop, reset_purchase_counters
+from switch import (
+    startup_from_launcher,
+)
+
+
+# 保留原有的定时配置流程。
+def setup_schedule():
+    while True:
+        print("\n" + "=" * 40)
+        print(" 请选择启动模式：")
+        print(" [1] 设置定时自动暂停")
+        print(" [回车] 先自动上架，再开始抢购")
+        print("=" * 40)
+        choice = input("直接回车或输入选项: ").strip()
+
+        if choice == '1':
+            while True:
+                time_str = input("请输入运行时间（例如 1.30 表示 1 小时 30 分）: ").strip()
+                try:
+                    if '.' in time_str:
+                        h, m = time_str.split('.')
+                        hours = int(h) if h else 0
+                        minutes = int(m) if m else 0
+                    else:
+                        hours = int(time_str)
+                        minutes = 0
+                    state.target_stop_seconds = hours * 3600 + minutes * 60
+                    if state.target_stop_seconds <= 0:
+                        continue
+                    print(f"设置成功：脚本将在 {hours} 小时 {minutes} 分后自动暂停。")
+                    state.start_mode = 1
+                    return
+                except ValueError:
+                    pass
+        else:
+            print("已确认：先执行一轮自动上架，再开始抢购。")
+            state.start_mode = 2
+            return
+
+
+def run_automation():
+    setup_schedule()
+    start_overlay()
+
+    if os.name == 'nt':
+        try:
+            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            ctypes.windll.kernel32.SetPriorityClass(handle, 0x00000100)
+            ctypes.windll.kernel32.SetProcessAffinityMask(handle, 0x0055)
+        except:
+            pass
+
+    try:
+        state.ocr_engine = RapidOCR()
+        ui_print("本地文字识别引擎已加载")
+    except Exception as e:
+        ui_print(f"文字识别引擎加载失败: {e}")
+        time.sleep(5)
+        return
+
+    templates = {str(i): safe_imread(("logo", "jiage", f"{i}.png"), 0) for i in range(10)}
+    temp_success = safe_imread(("logo", "tezhengtu", "chenggong.png"), 0)
+    temp_shop = safe_imread(("logo", "tezhengtu", "dianpu.png"), 0)
+    state.temp_shop = temp_shop
+    state.temp_jiaoyi = safe_imread(("logo", "tezhengtu", "jiaoyihang.png"), 0)
+    temp_goumai = safe_imread(("logo", "tezhengtu", "goumai.png"), 0)
+    temp_meihuo = safe_imread(("logo", "tezhengtu", "meihuo.png"), 0)
+    temp_diyici = safe_imread(("logo", "tezhengtu", "diyici.png"), 0)
+    state.TEMP_ITEM = safe_imread(("logo", "shangjia", "pojiaoshi.png"), cv2.IMREAD_COLOR)
+    state.TEMP_TISHI = safe_imread(("logo", "shangjia", "tishi.png"), 0)
+    state.TEMP_POPUP = safe_imread(("logo", "shangjia", "shangjiatan.png"), 0)
+
+    missing = []
+    if any(v is None for v in templates.values()):
+        missing.append("logo/jiage/0.png - 9.png")
+    if temp_success is None:
+        missing.append("logo/tezhengtu/chenggong.png")
+    if temp_shop is None:
+        missing.append("logo/tezhengtu/dianpu.png")
+    if state.temp_jiaoyi is None:
+        missing.append("logo/tezhengtu/jiaoyihang.png")
+    if temp_goumai is None:
+        missing.append("logo/tezhengtu/goumai.png")
+    if temp_meihuo is None:
+        missing.append("logo/tezhengtu/meihuo.png")
+    if temp_diyici is None:
+        missing.append("logo/tezhengtu/diyici.png")
+    if state.TEMP_ITEM is None:
+        missing.append("logo/shangjia/pojiaoshi.png")
+    if state.TEMP_TISHI is None:
+        missing.append("logo/shangjia/tishi.png")
+
+    if missing:
+        ui_print(f"素材缺失: {', '.join(missing)}", save_log=True)
+        time.sleep(10)
+        return
+
+    if state.TEMP_POPUP is not None:
+        ui_print("上架弹窗检测：模板匹配模式")
+    else:
+        ui_print("上架弹窗检测：帧差异模式")
+
+    if load_digit_templates():
+        ui_print("容量识别：模板匹配模式")
+    else:
+        ui_print("容量识别：文字识别模式")
+
+    try:
+        camera = dxcam.create(output_color="BGRA")
+        camera.start(target_fps=144)
+    except Exception as e:
+        ui_print(f"截图引擎启动失败: {e}")
+        time.sleep(5)
+        return
+
+    if state.start_mode == 2:
+        safe_sleep(2.0)
+        ui_print("正在检查交易行场景...")
+        while True:
+            if state.IS_PAUSED:
+                time.sleep(0.5)
+                continue
+            f_start = safe_get_frame(camera)
+            if f_start is None:
+                time.sleep(0.1)
+                continue
+            if (is_image_present(f_start, MONITOR_JIAOYIHANG, state.temp_jiaoyi, 0.7) and
+                    is_image_present(f_start, MONITOR_SHOP, temp_shop, 0.7)):
+                ui_print("已确认当前位于交易行。", save_log=True)
+                break
+            else:
+                ui_print("当前不在交易行，尝试自动恢复...", save_log=True)
+                fast_click(FIX_SHOP_POS1)
+                safe_sleep(1.0)
+                fast_click(FIX_SHOP_POS2)
+                safe_sleep(1.5)
+
+        ui_print("开始执行预上架流程...")
+        execute_listing_routine(camera)
+        reset_purchase_counters("上架完成")
+
+    run_purchase_loop(camera, templates, temp_success, temp_shop,
+                      temp_goumai, temp_meihuo, temp_diyici)
+
+
+def _prompt_main_mode():
+    while True:
+        print("\n" + "=" * 40)
+        print(" 请选择启动方式：")
+        print(" [1] 从启动器开始（选区 -> 进游戏 -> 交易行）")
+        print(" [2] 已在交易行，直接开始抢购")
+        print("=" * 40)
+        choice = input("请输入选项编号: ").strip()
+        if choice in ("1", "2"):
+            return choice
+        print("请输入 1 或 2。")
+
+
+def _prompt_current_nickname():
+    while True:
+        nickname = input("请输入当前账号昵称: ").strip()
+        if nickname:
+            return nickname
+        print("昵称不能为空。")
+
+
+def _prompt_server_index():
+    server_count = len(config.SERVER_COORDS)
+    while True:
+        raw = input(f"请输入目标大区编号(1-{server_count}): ").strip()
+        try:
+            server_number = int(raw)
+        except ValueError:
+            print(f"请输入 1 到 {server_count} 的数字编号。")
+            continue
+        if 1 <= server_number <= server_count:
+            return server_number - 1
+        print(f"请输入 1 到 {server_count} 之间的大区编号。")
+
+
+def _format_account_time(value):
+    if value is None:
+        return "无"
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _freeze_purchase_timer():
+    was_active = state.purchase_timer_active
+    if was_active and not state.IS_PAUSED and state.last_resume_time is not None:
+        refresh_account_limit_reached_at()
+        state.total_running_time += (time.time() - state.last_resume_time)
+    state.last_resume_time = None
+    state.purchase_timer_active = False
+    return was_active
+
+
+def _resume_purchase_timer(should_resume):
+    state.purchase_timer_active = should_resume
+    if state.IS_PAUSED or not should_resume:
+        state.last_resume_time = None
+    else:
+        state.last_resume_time = time.time()
+
+
+def _format_timer_state():
+    last_resume_text = "None"
+    if state.last_resume_time is not None:
+        last_resume_text = f"{state.last_resume_time:.3f}"
+    return (
+        f"total_running_time={state.total_running_time:.3f}, "
+        f"purchase_timer_active={state.purchase_timer_active}, "
+        f"last_resume_time={last_resume_text}"
+    )
+
+
+def _set_account_state_defaults():
+    state.success_count = 0
+    state.fail_count = 0
+    state.total_listed_count = 0
+    state.total_running_time = 0.0
+    state.last_resume_time = None
+    state.purchase_timer_active = False
+    state.current_balance = "获取中..."
+    state.last_valid_balance = ""
+    state.baseline_item_count = 0
+    state.last_limit_time = None
+    state.last_account_end_time = None
+    state.updated_at = None
+    state.account_db_path = ""
+    state.account_db_table_name = ""
+    state.account_record_loaded = False
+    state.account_allow_purchase = False
+    state.account_allow_start_time = None
+    state.account_read_status = ""
+    state.account_is_waiting = False
+    state.account_read_error = ""
+    state.round_purchase_success_count = 0
+    state.round_listing_success_count = 0
+    state.round_purchase_fail_count = 0
+    state.round_current_balance = ""
+    state.round_purchase_running_seconds = 0.0
+    state.round_status = "手动结束"
+    state.overlay_status = ""
+    state.account_round_end_status = ""
+    state.account_round_finalized = False
+    state.account_round_writeback_failed = False
+    state.account_round_writeback_error = ""
+    state.account_limit_reached_at = None
+
+
+def _load_current_account_context():
+    nickname = (state.current_nickname or "").strip()
+    _set_account_state_defaults()
+    state.current_nickname = nickname
+
+    if not nickname:
+        state.account_read_status = "nickname_missing"
+        state.account_read_error = "当前账号昵称为空，无法读取 SQLite。"
+        state.overlay_status = "未知异常"
+        print(f"[账号数据] 读取失败：{state.account_read_error}")
+        logger.error(f"[账号数据] 读取失败：{state.account_read_error}")
+        return False
+
+    database_path, table_name = find_canonical_account_stats_store()
+    if not database_path:
+        state.account_read_status = "db_unavailable"
+        state.account_read_error = (
+            f"未找到包含 {CANONICAL_ACCOUNT_STATS_TABLE} 表的本地 SQLite 文件。"
+        )
+        state.overlay_status = "未知异常"
+        print(f"[账号数据] 读取失败：{state.account_read_error}")
+        logger.error(f"[账号数据] 读取失败：{state.account_read_error}")
+        return False
+
+    normalized_count = normalize_canonical_round_status_values(database_path, table_name)
+    if normalized_count > 0:
+        print(f"[账号数据] 已归一旧 round_status 样本数据：{normalized_count} 条")
+        logger.info("[账号数据] 已归一旧 round_status 样本数据：%s 条", normalized_count)
+
+    record = read_canonical_account_stats_record(database_path, nickname, table_name)
+    if record is None:
+        state.account_read_status = "account_not_found"
+        state.account_read_error = f"SQLite 中未找到昵称为 {nickname} 的账号记录。"
+        state.account_db_path = database_path
+        state.account_db_table_name = table_name
+        state.overlay_status = "账号未建档"
+        print(f"[账号数据] 读取失败：{state.account_read_error}")
+        logger.error(f"[账号数据] 读取失败：{state.account_read_error}")
+        return False
+
+    now = datetime.now()
+    allow_start_time = now
+    allow_purchase = True
+
+    if record.last_limit_time is not None:
+        allow_start_time = record.last_limit_time + timedelta(seconds=ACCOUNT_LIMIT_COOLDOWN_SECONDS)
+        allow_purchase = now >= allow_start_time
+
+    state.current_nickname = record.nickname
+    state.baseline_item_count = record.baseline_item_count
+    state.last_limit_time = record.last_limit_time
+    state.last_account_end_time = record.last_account_end_time
+    state.updated_at = record.updated_at
+    if record.current_execution_slot is not None:
+        state.current_execution_slot = record.current_execution_slot
+    state.round_purchase_success_count = record.round_purchase_success_count
+    state.round_listing_success_count = record.round_listing_success_count
+    state.round_purchase_fail_count = record.round_purchase_fail_count
+    state.round_current_balance = record.current_balance
+    state.round_purchase_running_seconds = float(record.purchase_running_seconds)
+    state.round_status = record.round_status
+    state.account_db_path = database_path
+    state.account_db_table_name = table_name
+    state.account_record_loaded = True
+    state.account_allow_purchase = allow_purchase
+    state.account_allow_start_time = allow_start_time
+    state.account_read_status = "ready" if allow_purchase else "waiting_limit_time"
+    state.account_is_waiting = not allow_purchase
+    state.account_read_error = ""
+    state.overlay_status = "抢购中" if allow_purchase else "等待抢购时间"
+
+    print(
+        "[账号数据] 昵称={0}，基线初始数量={1}，最后一次限制时间={2}，最后下号时间={3}，更新时间={4}，执行位={5}，允许开始时间={6}，当前可抢购={7}".format(
+            state.current_nickname,
+            state.baseline_item_count,
+            _format_account_time(state.last_limit_time),
+            _format_account_time(state.last_account_end_time),
+            _format_account_time(state.updated_at),
+            state.current_execution_slot,
+            _format_account_time(state.account_allow_start_time),
+            "是" if state.account_allow_purchase else "否",
+        )
+    )
+    logger.info(
+        "[账号数据] 昵称=%s 基线初始数量=%s 最后一次限制时间=%s 最后下号时间=%s 更新时间=%s 执行位=%s 允许开始时间=%s 当前可抢购=%s 来源=%s:%s",
+        state.current_nickname,
+        state.baseline_item_count,
+        _format_account_time(state.last_limit_time),
+        _format_account_time(state.last_account_end_time),
+        _format_account_time(state.updated_at),
+        state.current_execution_slot,
+        _format_account_time(state.account_allow_start_time),
+        state.account_allow_purchase,
+        database_path,
+        table_name,
+    )
+    return True
+
+
+def _wait_until_account_ready():
+    if state.account_allow_purchase:
+        return True
+
+    resume_timer_after_wait = _freeze_purchase_timer()
+    state.account_read_status = "waiting_limit_time"
+    state.account_is_waiting = True
+    state.overlay_status = "等待抢购时间"
+
+    print(f"[账号数据] 进入等待状态，冻结后计时器状态：{_format_timer_state()}")
+    logger.info("[账号数据] 进入等待状态，冻结后计时器状态：%s", _format_timer_state())
+    print(f"[账号数据] 当前账号冷却中，交易行等待至 {_format_account_time(state.account_allow_start_time)} 后再进入抢购。")
+    logger.info("[账号数据] 当前账号冷却中，等待至 %s 后再进入抢购。", _format_account_time(state.account_allow_start_time))
+
+    while True:
+        if state.account_allow_start_time is None:
+            break
+
+        now = datetime.now()
+        if now >= state.account_allow_start_time:
+            break
+
+        remaining = (state.account_allow_start_time - now).total_seconds()
+        time.sleep(0.5 if state.IS_PAUSED else min(1.0, max(0.1, remaining)))
+
+    state.account_allow_purchase = True
+    state.account_read_status = "ready"
+    state.account_is_waiting = False
+    state.overlay_status = "抢购中"
+    _resume_purchase_timer(resume_timer_after_wait)
+
+    print(f"[账号数据] 解除等待，恢复后计时器状态：{_format_timer_state()}")
+    logger.info("[账号数据] 解除等待，恢复后计时器状态：%s", _format_timer_state())
+    print("[账号数据] 冷却等待结束，允许进入抢购循环。")
+    logger.info("[账号数据] 冷却等待结束，允许进入抢购循环。")
+    return True
+
+
+def _run_pre_listing_flow(camera):
+    if not _load_current_account_context():
+        return False
+    ui_print("开始执行预上架流程...")
+    execute_listing_routine(camera)
+    reset_round_runtime_state("预上架完成")
+    reset_purchase_counters("上架完成")
+    return _wait_until_account_ready()
+
+
+def _run_direct_account_flow(camera):
+    if not _load_current_account_context():
+        return False
+    if not state.account_allow_purchase:
+        ui_print("当前账号未到允许抢购时间，先执行预上架流程...")
+        execute_listing_routine(camera)
+        reset_round_runtime_state("mode2 冷却等待前上架完成")
+        reset_purchase_counters("上架完成")
+        print(f"[账号数据] 上架完成，当前时刻={_format_account_time(datetime.now())}，计时器状态：{_format_timer_state()}")
+        logger.info("[账号数据] 上架完成，当前时刻=%s，计时器状态：%s", _format_account_time(datetime.now()), _format_timer_state())
+        return _wait_until_account_ready()
+    reset_round_runtime_state("已加载当前账号")
+    return _wait_until_account_ready()
+
+
+def _prepare_launcher_start(camera):
+    return startup_from_launcher(camera, state.current_server_index)
+
+
+def _finalize_current_account_round(default_status):
+    if not state.account_record_loaded and state.account_read_status == "":
+        return True
+    _freeze_purchase_timer()
+    final_status = resolve_shutdown_final_status(default_status)
+    result = persist_final_round_snapshot(final_status)
+    if result.status == "success":
+        return True
+
+    print(f"[账号数据] 最终写回失败：{result.reason}")
+    logger.error("[账号数据] 最终写回失败：%s", result.reason)
+    return False
+
+
+def main():
+    mode = _prompt_main_mode()
+    state.current_nickname = _prompt_current_nickname()
+    if mode == "1":
+        state.current_server_index = _prompt_server_index()
+    start_overlay()
+
+    if os.name == 'nt':
+        try:
+            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            ctypes.windll.kernel32.SetPriorityClass(handle, 0x00000100)
+            ctypes.windll.kernel32.SetProcessAffinityMask(handle, 0x0055)
+        except:
+            pass
+
+    try:
+        state.ocr_engine = RapidOCR()
+        ui_print("文字识别引擎已加载")
+    except Exception as e:
+        ui_print(f"文字识别引擎加载失败: {e}")
+        time.sleep(5)
+        return
+
+    templates = {str(i): safe_imread(("logo", "jiage", f"{i}.png"), 0) for i in range(10)}
+    temp_success = safe_imread(("logo", "tezhengtu", "chenggong.png"), 0)
+    temp_shop = safe_imread(("logo", "tezhengtu", "dianpu.png"), 0)
+    state.temp_shop = temp_shop
+    state.temp_jiaoyi = safe_imread(("logo", "tezhengtu", "jiaoyihang.png"), 0)
+    temp_goumai = safe_imread(("logo", "tezhengtu", "goumai.png"), 0)
+    temp_meihuo = safe_imread(("logo", "tezhengtu", "meihuo.png"), 0)
+    temp_diyici = safe_imread(("logo", "tezhengtu", "diyici.png"), 0)
+    state.TEMP_ITEM = safe_imread(("logo", "shangjia", "pojiaoshi.png"), cv2.IMREAD_COLOR)
+    state.TEMP_TISHI = safe_imread(("logo", "shangjia", "tishi.png"), 0)
+    state.TEMP_POPUP = safe_imread(("logo", "shangjia", "shangjiatan.png"), 0)
+
+    missing = []
+    if any(v is None for v in templates.values()):
+        missing.append("logo/jiage/0.png - 9.png")
+    if temp_success is None:
+        missing.append("logo/tezhengtu/chenggong.png")
+    if temp_shop is None:
+        missing.append("logo/tezhengtu/dianpu.png")
+    if state.temp_jiaoyi is None:
+        missing.append("logo/tezhengtu/jiaoyihang.png")
+    if temp_goumai is None:
+        missing.append("logo/tezhengtu/goumai.png")
+    if temp_meihuo is None:
+        missing.append("logo/tezhengtu/meihuo.png")
+    if temp_diyici is None:
+        missing.append("logo/tezhengtu/diyici.png")
+    if state.TEMP_ITEM is None:
+        missing.append("logo/shangjia/pojiaoshi.png")
+    if state.TEMP_TISHI is None:
+        missing.append("logo/shangjia/tishi.png")
+
+    if missing:
+        ui_print(f"素材缺失: {', '.join(missing)}", save_log=True)
+        time.sleep(10)
+        return
+
+    if state.TEMP_POPUP is not None:
+        ui_print("上架弹窗检测：模板匹配模式")
+    else:
+        ui_print("上架弹窗检测：帧差异模式")
+
+    if load_digit_templates():
+        ui_print("容量识别：模板匹配模式")
+    else:
+        ui_print("容量识别：文字识别模式")
+
+    camera = None
+    try:
+        camera = dxcam.create(output_color="BGRA")
+        camera.start(target_fps=144)
+    except Exception as e:
+        ui_print(f"截图引擎启动失败: {e}")
+        time.sleep(5)
+        return
+
+    try:
+        if mode == "1":
+            if not _prepare_launcher_start(camera):
+                ui_print("从启动器进入游戏流程失败")
+                return
+            if not _run_pre_listing_flow(camera):
+                return
+        else:
+            if not _run_direct_account_flow(camera):
+                return
+
+        state.need_switch_server = False
+        print(f"[账号数据] 准备进入抢购循环，当前时刻={_format_account_time(datetime.now())}，计时器状态：{_format_timer_state()}")
+        logger.info("[账号数据] 准备进入抢购循环，当前时刻=%s，计时器状态：%s", _format_account_time(datetime.now()), _format_timer_state())
+        run_purchase_loop(
+            camera,
+            templates,
+            temp_success,
+            temp_shop,
+            temp_goumai,
+            temp_meihuo,
+            temp_diyici,
+        )
+
+        if state.account_round_writeback_failed:
+            print(f"[账号数据] SQLite 写回失败：{state.account_round_writeback_error}")
+            logger.error("[账号数据] SQLite 写回失败：%s", state.account_round_writeback_error)
+            _finalize_current_account_round("未知异常")
+            return
+
+        if not _finalize_current_account_round("未知异常"):
+            return
+
+        if state.need_switch_server:
+            ui_print("当前基线已移除线程6执行位/自动换号主控，本轮结束后停止运行。", save_log=True)
+            print("[总控基线] 已移除线程6执行位/自动换号主控，当前账号结束后停止运行。")
+            logger.info("[总控基线] 已移除线程6执行位/自动换号主控，当前账号结束后停止运行。")
+    finally:
+        if camera is not None:
+            camera.stop()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except SystemExit:
+        pass
+    except KeyboardInterrupt:
+        _finalize_current_account_round("手动结束")
+        sys.exit()
+    except Exception as e:
+        _finalize_current_account_round("未知异常")
+        import traceback
+        error_msg = traceback.format_exc()
+        print("\n" + "=" * 50)
+        print("致命错误")
+        print("=" * 50)
+        print(error_msg)
+        try:
+            with open("crash_log.txt", "w", encoding="utf-8") as f:
+                f.write(error_msg)
+            print("崩溃日志已保存到 crash_log.txt")
+        except:
+            pass
+        os.system('pause')

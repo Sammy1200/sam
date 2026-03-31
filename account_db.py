@@ -1,0 +1,1056 @@
+"""SQLite account lookup and round write-back helpers."""
+from dataclasses import dataclass
+from datetime import datetime
+import json
+import os
+import sqlite3
+
+from config import ACCOUNT_STATS_DB_PATH, SCRIPT_DIR, THREAD6_RUNTIME_DB_PATH
+
+
+_DB_SUFFIXES = (".db", ".sqlite", ".sqlite3")
+_DB_HINT_NAMES = (
+    "accounts",
+    "account",
+    "account_data",
+    "account_stats",
+    "stats",
+    "data",
+    "gameclicker",
+)
+_TABLE_HINTS = (
+    "accounts",
+    "account",
+    "account_data",
+    "account_stats",
+    "stats",
+    "users",
+    "roles",
+    "\u8d26\u53f7",
+    "\u8d26\u53f7\u6570\u636e",
+)
+_NICKNAME_ALIASES = {
+    "nickname",
+    "nick_name",
+    "current_nickname",
+    "account_nickname",
+    "player_nickname",
+    "name",
+    "\u6635\u79f0",
+    "\u8d26\u53f7\u6635\u79f0",
+    "\u89d2\u8272\u6635\u79f0",
+    "\u8d26\u53f7\u540d",
+    "\u89d2\u8272\u540d",
+}
+_BASELINE_ALIASES = {
+    "baseline_initial_count",
+    "baseline_count",
+    "baseline_item_count",
+    "initial_count",
+    "item_count",
+    "base_count",
+    "\u57fa\u7ebf\u521d\u59cb\u6570\u91cf",
+    "\u57fa\u7ebf\u6570\u91cf",
+    "\u521d\u59cb\u6570\u91cf",
+    "\u521d\u59cb\u9053\u5177\u6570\u91cf",
+    "\u9053\u5177\u57fa\u7ebf\u6570\u91cf",
+}
+_LAST_LIMIT_ALIASES = {
+    "last_limit_time",
+    "last_restricted_time",
+    "last_limit_at",
+    "last_account_limit_time",
+    "limit_time",
+    "\u6700\u540e\u4e00\u6b21\u9650\u5236\u65f6\u95f4",
+    "\u6700\u540e\u9650\u5236\u65f6\u95f4",
+    "\u9650\u5236\u65f6\u95f4",
+}
+_LAST_ACCOUNT_END_ALIASES = {
+    "last_account_end_time",
+    "last_logout_time",
+    "last_sign_out_time",
+    "last_exit_time",
+    "last_end_time",
+    "\u6700\u540e\u4e0b\u53f7\u65f6\u95f4",
+    "\u6700\u540e\u4e00\u6b21\u4e0b\u53f7\u65f6\u95f4",
+    "\u6700\u540e\u79bb\u53f7\u65f6\u95f4",
+}
+_UPDATED_AT_ALIASES = {
+    "updated_at",
+    "update_time",
+    "updated_time",
+    "last_update_time",
+    "modified_at",
+    "\u66f4\u65b0\u65f6\u95f4",
+    "\u6700\u8fd1\u66f4\u65b0\u65f6\u95f4",
+}
+_CURRENT_EXECUTION_SLOT_ALIASES = {
+    "current_execution_slot",
+    "execution_slot",
+    "slot_index",
+    "current_slot",
+    "run_slot",
+    "\u5f53\u524d\u6267\u884c\u4f4d",
+    "\u6267\u884c\u4f4d",
+}
+_ROUND_PURCHASE_SUCCESS_ALIASES = {
+    "round_purchase_success_count",
+    "round_purchase_success",
+    "purchase_success_count",
+    "round_success_count",
+    "\u672c\u8f6e\u62a2\u8d2d\u6210\u529f\u6570",
+    "\u672c\u8f6e\u6210\u529f\u6570",
+    "\u62a2\u8d2d\u6210\u529f\u6570",
+}
+_ROUND_LISTING_SUCCESS_ALIASES = {
+    "round_listing_success_count",
+    "round_listing_success",
+    "listing_success_count",
+    "round_list_success_count",
+    "\u672c\u8f6e\u4e0a\u67b6\u6210\u529f\u6570",
+    "\u672c\u8f6e\u4e0a\u67b6\u6570",
+    "\u4e0a\u67b6\u6210\u529f\u6570",
+}
+_ROUND_PURCHASE_FAIL_ALIASES = {
+    "round_purchase_fail_count",
+    "round_purchase_fail",
+    "purchase_fail_count",
+    "round_fail_count",
+    "\u672c\u8f6e\u62a2\u8d2d\u5931\u8d25\u6570",
+    "\u672c\u8f6e\u5931\u8d25\u6570",
+    "\u62a2\u8d2d\u5931\u8d25\u6570",
+}
+_CURRENT_BALANCE_ALIASES = {
+    "round_current_balance",
+    "current_balance",
+    "balance",
+    "account_balance",
+    "\u5f53\u524d\u4f59\u989d",
+    "\u4f59\u989d",
+}
+_PURCHASE_RUNNING_SECONDS_ALIASES = {
+    "round_purchase_running_seconds",
+    "purchase_running_seconds",
+    "round_running_seconds",
+    "running_seconds",
+    "\u62a2\u8d2d\u8fd0\u884c\u65f6\u95f4",
+    "\u672c\u8f6e\u8fd0\u884c\u65f6\u95f4",
+    "\u8fd0\u884c\u65f6\u95f4",
+}
+_ROUND_STATUS_ALIASES = {
+    "round_status",
+    "current_round_status",
+    "status",
+    "\u672c\u8f6e\u72b6\u6001",
+    "\u72b6\u6001",
+}
+
+ROUND_STATUS_RUNNING = "\u8fd0\u884c\u4e2d"
+ROUND_STATUS_LIMITED = "\u8d26\u53f7\u9650\u5236"
+ROUND_STATUS_BALANCE_LOW = "\u4f59\u989d\u4e0d\u8db3"
+ROUND_STATUS_NORMAL_END = "\u6b63\u5e38\u7ed3\u675f"
+ROUND_STATUS_UNKNOWN = "\u672a\u77e5\u5f02\u5e38"
+ROUND_STATUS_MANUAL_END = "\u624b\u52a8\u7ed3\u675f"
+
+ROUND_STATUS_VALUES = (
+    ROUND_STATUS_RUNNING,
+    ROUND_STATUS_LIMITED,
+    ROUND_STATUS_BALANCE_LOW,
+    ROUND_STATUS_NORMAL_END,
+    ROUND_STATUS_UNKNOWN,
+    ROUND_STATUS_MANUAL_END,
+)
+ROUND_STATUS_VALUE_ALIASES = {
+    ROUND_STATUS_RUNNING: ROUND_STATUS_RUNNING,
+    ROUND_STATUS_LIMITED: ROUND_STATUS_LIMITED,
+    ROUND_STATUS_BALANCE_LOW: ROUND_STATUS_BALANCE_LOW,
+    ROUND_STATUS_NORMAL_END: ROUND_STATUS_NORMAL_END,
+    ROUND_STATUS_UNKNOWN: ROUND_STATUS_UNKNOWN,
+    ROUND_STATUS_MANUAL_END: ROUND_STATUS_MANUAL_END,
+    "\u62a2\u8d2d\u4e2d": ROUND_STATUS_RUNNING,
+    "running": ROUND_STATUS_RUNNING,
+    "account_limited": ROUND_STATUS_LIMITED,
+    "limited": ROUND_STATUS_LIMITED,
+    "balance_low": ROUND_STATUS_BALANCE_LOW,
+    "insufficient_balance": ROUND_STATUS_BALANCE_LOW,
+    "normal_end": ROUND_STATUS_NORMAL_END,
+    "unknown": ROUND_STATUS_UNKNOWN,
+    "unknown_error": ROUND_STATUS_UNKNOWN,
+    "manual_end": ROUND_STATUS_MANUAL_END,
+}
+
+CANONICAL_ACCOUNT_STATS_TABLE = "account_stats"
+CANONICAL_ACCOUNT_STATS_COLUMNS = (
+    "nickname",
+    "baseline_item_count",
+    "last_limit_time",
+    "last_account_end_time",
+    "updated_at",
+    "current_execution_slot",
+    "round_purchase_success_count",
+    "round_listing_success_count",
+    "round_purchase_fail_count",
+    "current_balance",
+    "purchase_running_seconds",
+    "round_status",
+)
+CANONICAL_BASELINE_FIELDS = (
+    "nickname",
+    "baseline_item_count",
+    "current_execution_slot",
+)
+CANONICAL_ROUND_FIELDS = (
+    "round_purchase_success_count",
+    "round_listing_success_count",
+    "round_purchase_fail_count",
+    "current_balance",
+)
+CANONICAL_STATUS_FIELDS = (
+    "round_status",
+)
+CANONICAL_TIME_FIELDS = (
+    "purchase_running_seconds",
+    "last_limit_time",
+    "last_account_end_time",
+    "updated_at",
+)
+CANONICAL_DB_HINT_PATHS = (
+    ACCOUNT_STATS_DB_PATH,
+    THREAD6_RUNTIME_DB_PATH,
+    os.path.join(SCRIPT_DIR, "account_stats.sqlite3"),
+    os.path.join(SCRIPT_DIR, "account_stats.db"),
+    os.path.join(SCRIPT_DIR, "account_data.sqlite3"),
+    os.path.join(SCRIPT_DIR, "account_data.db"),
+)
+
+
+@dataclass
+class AccountRecord:
+    nickname: str
+    baseline_item_count: int
+    last_limit_time: datetime | None
+    database_path: str
+    table_name: str
+    last_account_end_time: datetime | None = None
+    updated_at: datetime | None = None
+    current_execution_slot: int | None = None
+
+
+@dataclass
+class AccountLookupResult:
+    status: str
+    reason: str
+    record: AccountRecord | None = None
+
+
+@dataclass
+class AccountRoundWritePayload:
+    baseline_item_count: int
+    round_purchase_success_count: int
+    round_listing_success_count: int
+    round_purchase_fail_count: int
+    current_balance: str
+    purchase_running_seconds: int
+    round_status: str
+    updated_at: datetime
+    last_limit_time: datetime | None = None
+    update_last_limit_time: bool = False
+    last_account_end_time: datetime | None = None
+    update_last_account_end_time: bool = False
+    current_execution_slot: int | None = None
+
+
+@dataclass
+class AccountStatsRecord:
+    nickname: str
+    baseline_item_count: int = 0
+    last_limit_time: datetime | None = None
+    last_account_end_time: datetime | None = None
+    updated_at: datetime | None = None
+    current_execution_slot: int | None = None
+    round_purchase_success_count: int = 0
+    round_listing_success_count: int = 0
+    round_purchase_fail_count: int = 0
+    current_balance: str = ""
+    purchase_running_seconds: int = 0
+    round_status: str = ROUND_STATUS_MANUAL_END
+
+
+@dataclass
+class AccountWriteResult:
+    status: str
+    reason: str
+    new_baseline_item_count: int | None = None
+
+
+def compute_item_quantity(
+    baseline_item_count,
+    round_purchase_success_count,
+    round_listing_success_count,
+):
+    """线程 2 统一“道具数量”公式。"""
+    return (
+        int(baseline_item_count)
+        + int(round_purchase_success_count)
+        - int(round_listing_success_count)
+    )
+
+
+def compute_new_baseline_item_count(
+    baseline_item_count,
+    round_purchase_success_count,
+    round_listing_success_count,
+):
+    """线程 2 统一“新基线数量”公式。"""
+    return compute_item_quantity(
+        baseline_item_count,
+        round_purchase_success_count,
+        round_listing_success_count,
+    )
+
+
+def build_canonical_account_stats_table_sql(table_name=CANONICAL_ACCOUNT_STATS_TABLE):
+    """返回线程 2 统一字段表结构。"""
+    escaped_status_values = ", ".join(
+        "'" + value.replace("'", "''") + "'" for value in ROUND_STATUS_VALUES
+    )
+    return f"""
+        CREATE TABLE IF NOT EXISTS {_quote_identifier(table_name)} (
+            nickname TEXT PRIMARY KEY,
+            baseline_item_count INTEGER NOT NULL DEFAULT 0,
+            last_limit_time TEXT,
+            last_account_end_time TEXT,
+            updated_at TEXT,
+            current_execution_slot INTEGER,
+            round_purchase_success_count INTEGER NOT NULL DEFAULT 0,
+            round_listing_success_count INTEGER NOT NULL DEFAULT 0,
+            round_purchase_fail_count INTEGER NOT NULL DEFAULT 0,
+            current_balance TEXT NOT NULL DEFAULT '',
+            purchase_running_seconds INTEGER NOT NULL DEFAULT 0,
+            round_status TEXT NOT NULL DEFAULT '{ROUND_STATUS_MANUAL_END}'
+                CHECK (round_status IN ({escaped_status_values}))
+        )
+    """
+
+
+@dataclass
+class RuntimeExecutionState:
+    current_execution_slot: int | None = None
+    current_nickname: str = ""
+    current_account_index: int | None = None
+    current_server_index: int | None = None
+    slot_nicknames: dict | None = None
+    updated_at: datetime | None = None
+
+
+def _normalize_name(value):
+    if value is None:
+        return ""
+    return "".join(ch.lower() for ch in str(value) if ch.isalnum())
+
+
+_TABLE_HINT_NORMALIZED = {_normalize_name(value) for value in _TABLE_HINTS}
+_COLUMN_ALIAS_SETS = {
+    "nickname": {_normalize_name(value) for value in _NICKNAME_ALIASES},
+    "baseline": {_normalize_name(value) for value in _BASELINE_ALIASES},
+    "last_limit": {_normalize_name(value) for value in _LAST_LIMIT_ALIASES},
+    "last_account_end": {_normalize_name(value) for value in _LAST_ACCOUNT_END_ALIASES},
+    "updated_at": {_normalize_name(value) for value in _UPDATED_AT_ALIASES},
+    "current_execution_slot": {_normalize_name(value) for value in _CURRENT_EXECUTION_SLOT_ALIASES},
+    "round_purchase_success": {_normalize_name(value) for value in _ROUND_PURCHASE_SUCCESS_ALIASES},
+    "round_listing_success": {_normalize_name(value) for value in _ROUND_LISTING_SUCCESS_ALIASES},
+    "round_purchase_fail": {_normalize_name(value) for value in _ROUND_PURCHASE_FAIL_ALIASES},
+    "current_balance": {_normalize_name(value) for value in _CURRENT_BALANCE_ALIASES},
+    "purchase_running_seconds": {_normalize_name(value) for value in _PURCHASE_RUNNING_SECONDS_ALIASES},
+    "round_status": {_normalize_name(value) for value in _ROUND_STATUS_ALIASES},
+}
+_WRITE_REQUIRED_KEYS = (
+    "nickname",
+    "baseline",
+    "last_limit",
+    "last_account_end",
+    "updated_at",
+    "round_purchase_success",
+    "round_listing_success",
+    "round_purchase_fail",
+    "current_balance",
+    "purchase_running_seconds",
+    "round_status",
+)
+
+
+def _quote_identifier(name):
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _iter_candidate_db_paths():
+    seen = set()
+
+    for name in _DB_HINT_NAMES:
+        for suffix in _DB_SUFFIXES:
+            path = os.path.join(SCRIPT_DIR, f"{name}{suffix}")
+            if os.path.isfile(path) and path not in seen:
+                seen.add(path)
+                yield path
+
+    for root, _, files in os.walk(SCRIPT_DIR):
+        for file_name in files:
+            if not file_name.lower().endswith(_DB_SUFFIXES):
+                continue
+            path = os.path.join(root, file_name)
+            if path in seen:
+                continue
+            seen.add(path)
+            yield path
+
+
+def _resolve_column_mapping(column_names):
+    mapping = {}
+    for column_name in column_names:
+        normalized = _normalize_name(column_name)
+        for logical_name, alias_set in _COLUMN_ALIAS_SETS.items():
+            if logical_name in mapping:
+                continue
+            if normalized in alias_set:
+                mapping[logical_name] = column_name
+                break
+    return mapping
+
+
+def _inspect_table(conn, table_name):
+    pragma_sql = f"PRAGMA table_info({_quote_identifier(table_name)})"
+    columns = conn.execute(pragma_sql).fetchall()
+    if not columns:
+        return None
+    return _resolve_column_mapping([column[1] for column in columns])
+
+
+def _find_matching_table(conn):
+    cursor = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    )
+    candidates = []
+
+    for (table_name,) in cursor.fetchall():
+        mapping = _inspect_table(conn, table_name)
+        if not mapping:
+            continue
+        if "nickname" not in mapping or "baseline" not in mapping:
+            continue
+
+        score = 0
+        if _normalize_name(table_name) in _TABLE_HINT_NORMALIZED:
+            score += 2
+        score += len(mapping)
+        candidates.append((score, table_name, mapping))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    _, table_name, mapping = candidates[0]
+    return table_name, mapping
+
+
+def _parse_datetime(raw_value):
+    if raw_value in (None, ""):
+        return None
+
+    if isinstance(raw_value, datetime):
+        return raw_value
+
+    if isinstance(raw_value, (int, float)):
+        timestamp = float(raw_value)
+        if timestamp > 10**12:
+            timestamp /= 1000.0
+        return datetime.fromtimestamp(timestamp)
+
+    text = str(raw_value).strip()
+    if not text:
+        return None
+
+    if text.isdigit():
+        timestamp = float(text)
+        if timestamp > 10**12:
+            timestamp /= 1000.0
+        return datetime.fromtimestamp(timestamp)
+
+    normalized = text.replace("T", " ").replace("Z", "")
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        pass
+
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y/%m/%d %H:%M",
+    ):
+        try:
+            return datetime.strptime(normalized, fmt)
+        except ValueError:
+            continue
+
+    return None
+
+
+def _parse_int(raw_value):
+    if raw_value in (None, ""):
+        return 0
+    if isinstance(raw_value, int):
+        return raw_value
+    if isinstance(raw_value, float):
+        return int(raw_value)
+
+    text = "".join(ch for ch in str(raw_value) if ch.isdigit() or ch == "-")
+    if not text:
+        return 0
+    return int(text)
+
+
+def _serialize_datetime(value):
+    if value is None:
+        return None
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _canonical_table_exists(conn, table_name):
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _ensure_runtime_state_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS thread6_runtime_state (
+            state_key TEXT PRIMARY KEY,
+            current_execution_slot INTEGER,
+            current_nickname TEXT,
+            current_account_index INTEGER,
+            current_server_index INTEGER,
+            slot_nicknames_json TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+
+
+def read_runtime_execution_state():
+    if not THREAD6_RUNTIME_DB_PATH or not os.path.isfile(THREAD6_RUNTIME_DB_PATH):
+        return RuntimeExecutionState(slot_nicknames={})
+
+    try:
+        conn = sqlite3.connect(f"file:{THREAD6_RUNTIME_DB_PATH}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return RuntimeExecutionState(slot_nicknames={})
+
+    try:
+        row = conn.execute(
+            """
+            SELECT
+                current_execution_slot,
+                current_nickname,
+                current_account_index,
+                current_server_index,
+                slot_nicknames_json,
+                updated_at
+            FROM thread6_runtime_state
+            WHERE state_key = 'default'
+            LIMIT 1
+            """
+        ).fetchone()
+        if row is None:
+            return RuntimeExecutionState(slot_nicknames={})
+
+        try:
+            slot_nicknames = json.loads(row[4]) if row[4] else {}
+        except json.JSONDecodeError:
+            slot_nicknames = {}
+
+        return RuntimeExecutionState(
+            current_execution_slot=_parse_int(row[0]) or None,
+            current_nickname=str(row[1] or "").strip(),
+            current_account_index=_parse_int(row[2]) if row[2] not in (None, "") else None,
+            current_server_index=_parse_int(row[3]) if row[3] not in (None, "") else None,
+            slot_nicknames=slot_nicknames,
+            updated_at=_parse_datetime(row[5]),
+        )
+    except sqlite3.Error:
+        return RuntimeExecutionState(slot_nicknames={})
+    finally:
+        conn.close()
+
+
+def write_runtime_execution_state(
+    current_execution_slot,
+    current_nickname,
+    current_account_index,
+    current_server_index,
+    slot_nicknames,
+):
+    os.makedirs(os.path.dirname(THREAD6_RUNTIME_DB_PATH), exist_ok=True)
+
+    try:
+        conn = sqlite3.connect(THREAD6_RUNTIME_DB_PATH)
+    except sqlite3.Error as exc:
+        return AccountWriteResult("db_unavailable", str(exc))
+
+    try:
+        _ensure_runtime_state_table(conn)
+        payload = (
+            int(current_execution_slot),
+            str(current_nickname or "").strip(),
+            int(current_account_index),
+            int(current_server_index),
+            json.dumps(slot_nicknames or {}, ensure_ascii=False),
+            _serialize_datetime(datetime.now()),
+        )
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """
+            INSERT INTO thread6_runtime_state (
+                state_key,
+                current_execution_slot,
+                current_nickname,
+                current_account_index,
+                current_server_index,
+                slot_nicknames_json,
+                updated_at
+            ) VALUES ('default', ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(state_key) DO UPDATE SET
+                current_execution_slot = excluded.current_execution_slot,
+                current_nickname = excluded.current_nickname,
+                current_account_index = excluded.current_account_index,
+                current_server_index = excluded.current_server_index,
+                slot_nicknames_json = excluded.slot_nicknames_json,
+                updated_at = excluded.updated_at
+            """,
+            payload,
+        )
+        conn.commit()
+        return AccountWriteResult("success", "")
+    except sqlite3.Error as exc:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return AccountWriteResult("write_failed", str(exc))
+    finally:
+        conn.close()
+
+
+def read_account_by_nickname(nickname):
+    nickname = (nickname or "").strip()
+    if not nickname:
+        return AccountLookupResult("nickname_missing", "current nickname is empty")
+
+    schema_errors = []
+    db_errors = []
+    matched_schema = False
+
+    for db_path in _iter_candidate_db_paths():
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        except sqlite3.Error as exc:
+            db_errors.append(f"{db_path}: {exc}")
+            continue
+
+        try:
+            match = _find_matching_table(conn)
+            if match is None:
+                schema_errors.append(f"{db_path}: schema not found")
+                continue
+
+            matched_schema = True
+            table_name, columns = match
+            select_columns = [
+                _quote_identifier(columns["nickname"]),
+                _quote_identifier(columns["baseline"]),
+            ]
+            if "last_limit" in columns:
+                select_columns.append(_quote_identifier(columns["last_limit"]))
+            else:
+                select_columns.append("NULL")
+            if "last_account_end" in columns:
+                select_columns.append(_quote_identifier(columns["last_account_end"]))
+            else:
+                select_columns.append("NULL")
+            if "updated_at" in columns:
+                select_columns.append(_quote_identifier(columns["updated_at"]))
+            else:
+                select_columns.append("NULL")
+            if "current_execution_slot" in columns:
+                select_columns.append(_quote_identifier(columns["current_execution_slot"]))
+            else:
+                select_columns.append("NULL")
+
+            sql = (
+                f"SELECT {', '.join(select_columns)} "
+                f"FROM {_quote_identifier(table_name)} "
+                f"WHERE {_quote_identifier(columns['nickname'])} = ? "
+                "LIMIT 1"
+            )
+            row = conn.execute(sql, (nickname,)).fetchone()
+            if row is None:
+                continue
+
+            record = AccountRecord(
+                nickname=str(row[0]).strip(),
+                baseline_item_count=_parse_int(row[1]),
+                last_limit_time=_parse_datetime(row[2]),
+                database_path=db_path,
+                table_name=table_name,
+                last_account_end_time=_parse_datetime(row[3]),
+                updated_at=_parse_datetime(row[4]),
+                current_execution_slot=_parse_int(row[5]) if row[5] not in (None, "") else None,
+            )
+            return AccountLookupResult("ready", "", record)
+        except sqlite3.Error as exc:
+            db_errors.append(f"{db_path}: {exc}")
+        finally:
+            conn.close()
+
+    if matched_schema:
+        return AccountLookupResult(
+            "account_not_found",
+            f"account record not found for nickname: {nickname}",
+        )
+
+    if schema_errors:
+        return AccountLookupResult("schema_not_found", "; ".join(schema_errors))
+
+    if db_errors:
+        return AccountLookupResult("db_unavailable", "; ".join(db_errors))
+
+    return AccountLookupResult("db_unavailable", "no sqlite database file found")
+
+
+def _validate_round_status(round_status):
+    return normalize_round_status_value(round_status) in ROUND_STATUS_VALUES
+
+
+def normalize_round_status_value(round_status):
+    text = str(round_status or "").strip()
+    if not text:
+        return ""
+    return ROUND_STATUS_VALUE_ALIASES.get(text, text)
+
+
+def _row_to_account_stats_record(row):
+    if row is None:
+        return None
+
+    round_status = normalize_round_status_value(row["round_status"])
+    if round_status not in ROUND_STATUS_VALUES:
+        round_status = ROUND_STATUS_MANUAL_END
+
+    return AccountStatsRecord(
+        nickname=str(row["nickname"] or "").strip(),
+        baseline_item_count=_parse_int(row["baseline_item_count"]),
+        last_limit_time=_parse_datetime(row["last_limit_time"]),
+        last_account_end_time=_parse_datetime(row["last_account_end_time"]),
+        updated_at=_parse_datetime(row["updated_at"]),
+        current_execution_slot=(
+            _parse_int(row["current_execution_slot"])
+            if row["current_execution_slot"] not in (None, "")
+            else None
+        ),
+        round_purchase_success_count=_parse_int(row["round_purchase_success_count"]),
+        round_listing_success_count=_parse_int(row["round_listing_success_count"]),
+        round_purchase_fail_count=_parse_int(row["round_purchase_fail_count"]),
+        current_balance=str(row["current_balance"] or "").strip(),
+        purchase_running_seconds=_parse_int(row["purchase_running_seconds"]),
+        round_status=round_status,
+    )
+
+
+def normalize_canonical_round_status_values(
+    database_path,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+):
+    """将测试库中的旧状态值归一为当前正式口径。"""
+    if not database_path or not os.path.isfile(database_path):
+        return 0
+
+    try:
+        conn = sqlite3.connect(database_path)
+    except sqlite3.Error:
+        return 0
+
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _canonical_table_exists(conn, table_name):
+            return 0
+
+        rows = conn.execute(
+            f"SELECT rowid, {_quote_identifier('round_status')} "
+            f"FROM {_quote_identifier(table_name)}"
+        ).fetchall()
+
+        updates = []
+        for row in rows:
+            raw_status = str(row["round_status"] or "").strip()
+            normalized_status = normalize_round_status_value(raw_status)
+            if normalized_status not in ROUND_STATUS_VALUES:
+                continue
+            if normalized_status == raw_status:
+                continue
+            updates.append((normalized_status, row["rowid"]))
+
+        if not updates:
+            return 0
+
+        conn.execute("BEGIN IMMEDIATE")
+        conn.executemany(
+            f"UPDATE {_quote_identifier(table_name)} "
+            f"SET {_quote_identifier('round_status')} = ? "
+            "WHERE rowid = ?",
+            updates,
+        )
+        conn.commit()
+        return len(updates)
+    except sqlite3.Error:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return 0
+    finally:
+        conn.close()
+
+
+def ensure_canonical_account_stats_table(
+    database_path,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+):
+    """创建线程 2 统一字段表结构。"""
+    if not database_path:
+        raise ValueError("database_path is empty")
+
+    directory = os.path.dirname(database_path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    conn = sqlite3.connect(database_path)
+    try:
+        conn.execute(build_canonical_account_stats_table_sql(table_name))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def find_canonical_account_stats_store(table_name=CANONICAL_ACCOUNT_STATS_TABLE):
+    seen = set()
+
+    for db_path in CANONICAL_DB_HINT_PATHS:
+        if not db_path or not os.path.isfile(db_path) or db_path in seen:
+            continue
+        seen.add(db_path)
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        except sqlite3.Error:
+            continue
+        try:
+            if _canonical_table_exists(conn, table_name):
+                return db_path, table_name
+        finally:
+            conn.close()
+
+    for db_path in _iter_candidate_db_paths():
+        if db_path in seen:
+            continue
+        seen.add(db_path)
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        except sqlite3.Error:
+            continue
+        try:
+            if _canonical_table_exists(conn, table_name):
+                return db_path, table_name
+        finally:
+            conn.close()
+
+    return None, table_name
+
+
+def read_canonical_account_stats_record(
+    database_path,
+    nickname,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+):
+    """读取线程 2 统一字段记录。"""
+    if not database_path or not os.path.isfile(database_path):
+        return None
+
+    try:
+        conn = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _canonical_table_exists(conn, table_name):
+            return None
+        row = conn.execute(
+            f"SELECT {', '.join(_quote_identifier(name) for name in CANONICAL_ACCOUNT_STATS_COLUMNS)} "
+            f"FROM {_quote_identifier(table_name)} "
+            f"WHERE {_quote_identifier('nickname')} = ? "
+            "LIMIT 1",
+            ((nickname or "").strip(),),
+        ).fetchone()
+        return _row_to_account_stats_record(row)
+    finally:
+        conn.close()
+
+
+def save_canonical_account_stats_record(
+    database_path,
+    record,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+):
+    """保存线程 2 统一字段记录。"""
+    if not isinstance(record, AccountStatsRecord):
+        raise TypeError("record must be AccountStatsRecord")
+    if not record.nickname or not str(record.nickname).strip():
+        raise ValueError("nickname is empty")
+    normalized_round_status = normalize_round_status_value(record.round_status)
+    if not _validate_round_status(normalized_round_status):
+        raise ValueError(f"invalid round_status: {record.round_status}")
+
+    ensure_canonical_account_stats_table(database_path, table_name)
+
+    sql = f"""
+        INSERT INTO {_quote_identifier(table_name)} (
+            {', '.join(_quote_identifier(name) for name in CANONICAL_ACCOUNT_STATS_COLUMNS)}
+        ) VALUES (
+            {', '.join('?' for _ in CANONICAL_ACCOUNT_STATS_COLUMNS)}
+        )
+        ON CONFLICT({_quote_identifier('nickname')}) DO UPDATE SET
+            {_quote_identifier('baseline_item_count')} = excluded.{_quote_identifier('baseline_item_count')},
+            {_quote_identifier('last_limit_time')} = excluded.{_quote_identifier('last_limit_time')},
+            {_quote_identifier('last_account_end_time')} = excluded.{_quote_identifier('last_account_end_time')},
+            {_quote_identifier('updated_at')} = excluded.{_quote_identifier('updated_at')},
+            {_quote_identifier('current_execution_slot')} = excluded.{_quote_identifier('current_execution_slot')},
+            {_quote_identifier('round_purchase_success_count')} = excluded.{_quote_identifier('round_purchase_success_count')},
+            {_quote_identifier('round_listing_success_count')} = excluded.{_quote_identifier('round_listing_success_count')},
+            {_quote_identifier('round_purchase_fail_count')} = excluded.{_quote_identifier('round_purchase_fail_count')},
+            {_quote_identifier('current_balance')} = excluded.{_quote_identifier('current_balance')},
+            {_quote_identifier('purchase_running_seconds')} = excluded.{_quote_identifier('purchase_running_seconds')},
+            {_quote_identifier('round_status')} = excluded.{_quote_identifier('round_status')}
+    """
+    values = (
+        str(record.nickname).strip(),
+        int(record.baseline_item_count),
+        _serialize_datetime(record.last_limit_time),
+        _serialize_datetime(record.last_account_end_time),
+        _serialize_datetime(record.updated_at),
+        int(record.current_execution_slot) if record.current_execution_slot is not None else None,
+        int(record.round_purchase_success_count),
+        int(record.round_listing_success_count),
+        int(record.round_purchase_fail_count),
+        str(record.current_balance or ""),
+        int(record.purchase_running_seconds),
+        normalized_round_status,
+    )
+
+    conn = sqlite3.connect(database_path)
+    try:
+        conn.execute(sql, values)
+        conn.commit()
+    finally:
+        conn.close()
+
+    return AccountWriteResult(
+        "success",
+        "",
+        int(record.baseline_item_count),
+    )
+
+
+def write_account_round_record(database_path, table_name, nickname, payload):
+    nickname = (nickname or "").strip()
+    if not nickname:
+        return AccountWriteResult("nickname_missing", "current nickname is empty")
+
+    if not database_path or not os.path.isfile(database_path):
+        return AccountWriteResult("db_unavailable", f"database file not found: {database_path}")
+
+    try:
+        conn = sqlite3.connect(database_path)
+    except sqlite3.Error as exc:
+        return AccountWriteResult("db_unavailable", str(exc))
+
+    try:
+        mapping = _inspect_table(conn, table_name)
+        if not mapping or "nickname" not in mapping or "baseline" not in mapping:
+            return AccountWriteResult("schema_not_found", f"schema not found in table: {table_name}")
+
+        missing_keys = [key for key in _WRITE_REQUIRED_KEYS if key not in mapping]
+        if missing_keys:
+            return AccountWriteResult(
+                "schema_incomplete",
+                f"table {table_name} missing columns: {', '.join(missing_keys)}",
+            )
+
+        exists_sql = (
+            f"SELECT 1 FROM {_quote_identifier(table_name)} "
+            f"WHERE {_quote_identifier(mapping['nickname'])} = ? LIMIT 1"
+        )
+        if conn.execute(exists_sql, (nickname,)).fetchone() is None:
+            return AccountWriteResult(
+                "account_not_found",
+                f"account record not found for nickname: {nickname}",
+            )
+
+        assignments = [
+            ("baseline", payload.baseline_item_count),
+            ("round_purchase_success", payload.round_purchase_success_count),
+            ("round_listing_success", payload.round_listing_success_count),
+            ("round_purchase_fail", payload.round_purchase_fail_count),
+            ("current_balance", payload.current_balance),
+            ("purchase_running_seconds", payload.purchase_running_seconds),
+            ("round_status", payload.round_status),
+            ("updated_at", _serialize_datetime(payload.updated_at)),
+        ]
+
+        if payload.update_last_limit_time:
+            assignments.append(("last_limit", _serialize_datetime(payload.last_limit_time)))
+        if payload.update_last_account_end_time:
+            assignments.append(("last_account_end", _serialize_datetime(payload.last_account_end_time)))
+
+        set_clauses = []
+        params = []
+        for logical_name, value in assignments:
+            set_clauses.append(f"{_quote_identifier(mapping[logical_name])} = ?")
+            params.append(value)
+        params.append(nickname)
+
+        sql = (
+            f"UPDATE {_quote_identifier(table_name)} "
+            f"SET {', '.join(set_clauses)} "
+            f"WHERE {_quote_identifier(mapping['nickname'])} = ?"
+        )
+
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.execute(sql, params)
+        if cursor.rowcount <= 0:
+            conn.rollback()
+            return AccountWriteResult(
+                "account_not_found",
+                f"account record not found for nickname: {nickname}",
+            )
+        conn.commit()
+        return AccountWriteResult("success", "", payload.baseline_item_count)
+    except sqlite3.Error as exc:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return AccountWriteResult("write_failed", str(exc))
+    finally:
+        conn.close()

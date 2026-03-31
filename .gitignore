@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+logs/
+.codex_backups/
+crash_log.txt
+thread6_runtime.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
