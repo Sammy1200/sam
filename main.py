@@ -46,6 +46,7 @@ from account_db import (
     find_canonical_account_stats_store,
     normalize_canonical_round_status_values,
     read_canonical_account_stats_record,
+    read_canonical_account_stats_record_by_execution_slot,
 )
 from round_persistence import (
     persist_final_round_snapshot,
@@ -61,6 +62,7 @@ from listing import execute_listing_routine
 from purchase import run_purchase_loop, reset_purchase_counters
 from switch import (
     startup_from_launcher,
+    switch_account_after_slot_boundary,
 )
 
 
@@ -245,6 +247,16 @@ def _format_account_time(value):
     return value.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _parse_slot_from_nickname_hint(nickname):
+    raw = (nickname or "").strip()
+    if not raw.isdigit():
+        return None
+    slot_number = int(raw)
+    if 1 <= slot_number <= len(config.EXECUTION_SLOT_ACCOUNT_IDS):
+        return slot_number
+    return None
+
+
 def _freeze_purchase_timer():
     was_active = state.purchase_timer_active
     if was_active and not state.IS_PAUSED and state.last_resume_time is not None:
@@ -339,6 +351,25 @@ def _load_current_account_context():
         logger.info("[账号数据] 已归一旧 round_status 样本数据：%s 条", normalized_count)
 
     record = read_canonical_account_stats_record(database_path, nickname, table_name)
+    if record is None:
+        slot_hint = _parse_slot_from_nickname_hint(nickname)
+        if slot_hint is not None:
+            record = read_canonical_account_stats_record_by_execution_slot(
+                database_path,
+                slot_hint,
+                table_name,
+            )
+            if record is not None:
+                print(
+                    f"[账号数据] 昵称 {nickname} 未直接命中，已按执行位 {slot_hint} "
+                    f"兼容读取为昵称 {record.nickname}。"
+                )
+                logger.info(
+                    "[账号数据] 昵称 %s 未直接命中，已按执行位 %s 兼容读取为昵称 %s。",
+                    nickname,
+                    slot_hint,
+                    record.nickname,
+                )
     if record is None:
         state.account_read_status = "account_not_found"
         state.account_read_error = f"SQLite 中未找到昵称为 {nickname} 的账号记录。"
@@ -579,32 +610,45 @@ def main():
             if not _run_direct_account_flow(camera):
                 return
 
-        state.need_switch_server = False
-        print(f"[账号数据] 准备进入抢购循环，当前时刻={_format_account_time(datetime.now())}，计时器状态：{_format_timer_state()}")
-        logger.info("[账号数据] 准备进入抢购循环，当前时刻=%s，计时器状态：%s", _format_account_time(datetime.now()), _format_timer_state())
-        run_purchase_loop(
-            camera,
-            templates,
-            temp_success,
-            temp_shop,
-            temp_goumai,
-            temp_meihuo,
-            temp_diyici,
-        )
+        while True:
+            state.need_switch_server = False
+            print(f"[账号数据] 准备进入抢购循环，当前时刻={_format_account_time(datetime.now())}，计时器状态：{_format_timer_state()}")
+            logger.info("[账号数据] 准备进入抢购循环，当前时刻=%s，计时器状态：%s", _format_account_time(datetime.now()), _format_timer_state())
+            run_purchase_loop(
+                camera,
+                templates,
+                temp_success,
+                temp_shop,
+                temp_goumai,
+                temp_meihuo,
+                temp_diyici,
+            )
 
-        if state.account_round_writeback_failed:
-            print(f"[账号数据] SQLite 写回失败：{state.account_round_writeback_error}")
-            logger.error("[账号数据] SQLite 写回失败：%s", state.account_round_writeback_error)
-            _finalize_current_account_round("未知异常")
-            return
+            if state.account_round_writeback_failed:
+                print(f"[账号数据] SQLite 写回失败：{state.account_round_writeback_error}")
+                logger.error("[账号数据] SQLite 写回失败：%s", state.account_round_writeback_error)
+                _finalize_current_account_round("未知异常")
+                return
 
-        if not _finalize_current_account_round("未知异常"):
-            return
+            if not _finalize_current_account_round("未知异常"):
+                return
 
-        if state.need_switch_server:
+            if not state.need_switch_server:
+                break
+
+            if state.current_execution_slot in config.EXECUTION_SLOT_SWITCH_TARGETS:
+                ui_print("检测到 4/8 执行位边界，进入线程6小阶段换号链路。", save_log=True)
+                logger.info("[线程6] 检测到 4/8 执行位边界，进入小阶段换号链路。")
+                if not switch_account_after_slot_boundary(camera):
+                    return
+                if not _run_pre_listing_flow(camera):
+                    return
+                continue
+
             ui_print("当前基线已移除线程6执行位/自动换号主控，本轮结束后停止运行。", save_log=True)
             print("[总控基线] 已移除线程6执行位/自动换号主控，当前账号结束后停止运行。")
             logger.info("[总控基线] 已移除线程6执行位/自动换号主控，当前账号结束后停止运行。")
+            break
     finally:
         if camera is not None:
             camera.stop()

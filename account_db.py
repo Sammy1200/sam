@@ -908,6 +908,41 @@ def read_canonical_account_stats_record(
         conn.close()
 
 
+def read_canonical_account_stats_record_by_execution_slot(
+    database_path,
+    execution_slot,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+):
+    """按执行位兼容读取统一账号记录。"""
+    if not database_path or not os.path.isfile(database_path):
+        return None
+
+    try:
+        slot_value = int(execution_slot)
+    except (TypeError, ValueError):
+        return None
+
+    try:
+        conn = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _canonical_table_exists(conn, table_name):
+            return None
+        row = conn.execute(
+            f"SELECT {', '.join(_quote_identifier(name) for name in CANONICAL_ACCOUNT_STATS_COLUMNS)} "
+            f"FROM {_quote_identifier(table_name)} "
+            f"WHERE {_quote_identifier('current_execution_slot')} = ? "
+            "LIMIT 1",
+            (slot_value,),
+        ).fetchone()
+        return _row_to_account_stats_record(row)
+    finally:
+        conn.close()
+
+
 def save_canonical_account_stats_record(
     database_path,
     record,
