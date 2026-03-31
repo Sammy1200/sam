@@ -9,6 +9,7 @@ import time
 from datetime import datetime
 import keyboard
 import state
+from account_db import compute_new_baseline_item_count
 from utils import (
     get_current_elapsed,
     OVERLAY_NORMAL_GEOMETRY,
@@ -19,6 +20,9 @@ from utils import (
     OVERLAY_SCORE_LABEL_PACK,
     OVERLAY_LOG_LABEL_PACK,
 )
+
+
+DEFAULT_OVERLAY_STATUS_TEXT = "状态待更新"
 
 
 def fit_overlay_to_content(position_override=None):
@@ -35,13 +39,71 @@ def fit_overlay_to_content(position_override=None):
         pass
 
 
+def _format_duration(seconds):
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _format_account_time(value):
+    if value is None:
+        return "--"
+    if hasattr(value, "strftime"):
+        return value.strftime("%H:%M:%S")
+    return str(value)
+
+
+def _format_remaining_time(target_time):
+    if target_time is None:
+        return "--"
+    remaining_seconds = int((target_time - datetime.now()).total_seconds())
+    if remaining_seconds <= 0:
+        return "00:00:00"
+    return _format_duration(remaining_seconds)
+
+
+def _get_overlay_status_text():
+    status_text = str(state.overlay_status or "").strip()
+    if status_text:
+        return status_text
+    return DEFAULT_OVERLAY_STATUS_TEXT
+
+
+def _get_balance_display_text():
+    balance_text = str(state.round_current_balance or "").strip()
+    if balance_text:
+        return balance_text
+    fallback_text = str(state.current_balance or "").strip()
+    return fallback_text or "获取中..."
+
+
+def _get_runtime_item_estimate():
+    return compute_new_baseline_item_count(
+        state.baseline_item_count,
+        state.round_purchase_success_count,
+        state.round_listing_success_count,
+    )
+
+
 def update_score_text():
     if state.overlay_root and state.score_var:
-        elapsed = int(get_current_elapsed())
-        h, m, s = elapsed // 3600, (elapsed % 3600) // 60, elapsed % 60
-        bal_str = str(state.current_balance)
-        msg = (f"⏱️ 运行: {h:02d}:{m:02d}:{s:02d}      |  💰 金额: [ {bal_str} ]\n"
-               f" ✔ 抢购: [ {state.success_count:<2} ] ✖ 漏掉: [ {state.fail_count:<2} ] |  📦 上架: [ {state.total_listed_count:<2} ] 件")
+        elapsed_text = _format_duration(get_current_elapsed())
+        status_text = _get_overlay_status_text()
+        nickname_text = str(state.current_nickname or "").strip() or "未设置"
+        slot_text = str(state.current_execution_slot or "--")
+        wait_flag_text = "是" if state.account_is_waiting else "否"
+        allow_start_text = _format_account_time(state.account_allow_start_time)
+        remaining_text = _format_remaining_time(state.account_allow_start_time) if state.account_is_waiting else "无需等待"
+        balance_text = _get_balance_display_text()
+        runtime_item_estimate = _get_runtime_item_estimate()
+        msg = (
+            f"🧭 执行位: {slot_text} | 昵称: {nickname_text} | 状态: {status_text}\n"
+            f"⏳ 冷却中: {wait_flag_text} | 可开抢: {allow_start_text} | 剩余: {remaining_text}\n"
+            f"⏱️ 抢购运行: {elapsed_text} | 💰 当前余额: [ {balance_text} ]\n"
+            f"✔ 本轮抢购成功: [ {state.round_purchase_success_count:<2} ] | ✖ 本轮抢购失败: [ {state.round_purchase_fail_count:<2} ] | 📦 本轮上架成功: [ {state.round_listing_success_count:<2} ]\n"
+            f"📚 已加载基线数量: [ {state.baseline_item_count:<2} ] | 🧮 运行中道具推算值: [ {runtime_item_estimate:<2} ]"
+        )
         try:
             state.score_var.set(msg)
             fit_overlay_to_content()
