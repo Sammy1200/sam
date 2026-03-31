@@ -41,7 +41,7 @@ _TPL_FILES = {
     "kg": "kongge.png",
     "1tc": "1tanchuang.png",
     "gumu": "gumudating.png",
-    "weixin": "weixin.png",
+    "qiehuan": "qiehuan.png",
     "denglu": "denglu.png",
     "heping": "hepingjingying.png",
 }
@@ -188,6 +188,32 @@ def _pause_switch_flow(title, detail):
         toggle_pause()
 
 
+def _wait_for_boundary_start_qidong(camera):
+    """边界换号时，先确认是否已回到启动页面。"""
+    _log_switch_waits(
+        "boundary start qidong check",
+        retry_count=config.SWITCH_BOUNDARY_START_QIDONG_RETRY_COUNT,
+        retry_interval=config.SWITCH_BOUNDARY_START_QIDONG_RETRY_INTERVAL_SECONDS,
+    )
+    for attempt in range(1, config.SWITCH_BOUNDARY_START_QIDONG_RETRY_COUNT + 1):
+        if _match(
+            camera,
+            "qd",
+            config.SWITCH_BOUNDARY_START_QIDONG_REGION,
+            threshold=config.SWITCH_UI_MATCH_THRESHOLD,
+        ):
+            print(f"[switch] boundary start qidong matched at attempt {attempt}.")
+            logger.info("[switch] boundary start qidong matched at attempt %s.", attempt)
+            return True
+        safe_sleep(config.SWITCH_BOUNDARY_START_QIDONG_RETRY_INTERVAL_SECONDS)
+
+    _pause_switch_flow(
+        "[switch] boundary start qidong not found",
+        "[switch] qidong.png was not matched in boundary start region after exit-game wait loop.",
+    )
+    return False
+
+
 def _resolve_switch_target(current_execution_slot):
     """根据当前执行位解析小阶段目标执行位。"""
     try:
@@ -212,33 +238,50 @@ def _digits_only(value):
     return "".join(ch for ch in str(value or "") if ch.isdigit())
 
 
+def _log_switch_waits(step_name, **kwargs):
+    details = ", ".join(f"{key}={value}" for key, value in kwargs.items())
+    message = f"[switch] {step_name} waits: {details}"
+    print(message)
+    logger.info(message)
+
+
 def _click_switch_user_and_wait_login(camera):
     """打开账号列表并进入切号登录页面。"""
+    _log_switch_waits(
+        "switch-user entry",
+        click_wait=config.SWITCH_ACCOUNT_LIST_CLICK_WAIT_SECONDS,
+        entry_timeout=config.SWITCH_USER_ENTRY_MATCH_TIMEOUT_SECONDS,
+        login_click_wait=config.SWITCH_SWITCH_USER_CLICK_WAIT_SECONDS,
+        login_timeout=config.SWITCH_LOGIN_PAGE_MATCH_TIMEOUT_SECONDS,
+    )
     fast_click(config.SWITCH_ACCOUNT_LIST_BUTTON_POS)
-    safe_sleep(1.0)
+    safe_sleep(config.SWITCH_ACCOUNT_LIST_CLICK_WAIT_SECONDS)
+
+    logger.info("[switch] switch-user entry template: qiehuan.png")
+    print("[switch] switch-user entry template: qiehuan.png")
 
     center = _wait_for_match_center(
         camera,
-        "weixin",
+        "qiehuan",
         config.SWITCH_USER_TEMPLATE_REGION,
-        timeout=10,
+        timeout=config.SWITCH_USER_ENTRY_MATCH_TIMEOUT_SECONDS,
         threshold=config.SWITCH_UI_MATCH_THRESHOLD,
     )
     if center is None:
         _pause_switch_flow(
             "[switch] missing switch user entry",
-            "[switch] account list opened but switch-user entry was not matched.",
+            "[switch] qiehuan.png was not matched in switch-user region after clicking account list button.",
         )
         return None
 
     fast_click(center)
-    safe_sleep(1.0)
+    safe_sleep(config.SWITCH_SWITCH_USER_CLICK_WAIT_SECONDS)
 
     login_center = _wait_for_match_center(
         camera,
         "denglu",
         config.SWITCH_LOGIN_TEMPLATE_REGION,
-        timeout=10,
+        timeout=config.SWITCH_LOGIN_PAGE_MATCH_TIMEOUT_SECONDS,
         threshold=config.SWITCH_UI_MATCH_THRESHOLD,
     )
     if login_center is None:
@@ -253,16 +296,20 @@ def _click_switch_user_and_wait_login(camera):
 
 def _input_and_verify_account(account_id):
     """输入账号并用剪贴板校验。"""
+    _log_switch_waits(
+        "account input verify",
+        verify_wait=config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS,
+    )
     fast_click(config.SWITCH_ACCOUNT_INPUT_POS)
-    safe_sleep(0.2)
+    safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
     hotkey(0x11, 0x41)
-    safe_sleep(0.1)
+    safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
     type_digits(str(account_id))
-    safe_sleep(0.2)
+    safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
     hotkey(0x11, 0x41)
-    safe_sleep(0.1)
+    safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
     hotkey(0x11, 0x43)
-    safe_sleep(0.15)
+    safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
 
     actual = _digits_only(get_clipboard_text())
     expected = _digits_only(account_id)
@@ -277,11 +324,17 @@ def _input_and_verify_account(account_id):
 
 def _confirm_account_switched(camera):
     """确认切号后已回到可换区页面。"""
+    _log_switch_waits(
+        "heping verify",
+        login_click_wait=config.SWITCH_LOGIN_CLICK_WAIT_SECONDS,
+        heping_timeout=config.SWITCH_HEPING_MATCH_TIMEOUT_SECONDS,
+        maximize_wait=config.SWITCH_MAXIMIZE_WAIT_SECONDS,
+    )
     if _wait_for(
         camera,
         "heping",
         config.SWITCH_HEPING_REGION_PRIMARY,
-        timeout=30,
+        timeout=config.SWITCH_HEPING_MATCH_TIMEOUT_SECONDS,
         threshold=config.SWITCH_UI_MATCH_THRESHOLD,
     ):
         fast_click((45, 277))
@@ -295,12 +348,12 @@ def _confirm_account_switched(camera):
         threshold=config.SWITCH_UI_MATCH_THRESHOLD,
     ):
         pyautogui.hotkey("winleft", "up")
-        safe_sleep(1.0)
+        safe_sleep(config.SWITCH_MAXIMIZE_WAIT_SECONDS)
         if _wait_for(
             camera,
             "heping",
             config.SWITCH_HEPING_REGION_PRIMARY,
-            timeout=10,
+            timeout=config.SWITCH_HEPING_MATCH_TIMEOUT_SECONDS,
             threshold=config.SWITCH_UI_MATCH_THRESHOLD,
         ):
             fast_click((45, 277))
@@ -322,8 +375,12 @@ def _switch_account_for_slot(camera, account_id):
     if not _input_and_verify_account(account_id):
         return False
 
+    _log_switch_waits(
+        "denglu click",
+        login_click_wait=config.SWITCH_LOGIN_CLICK_WAIT_SECONDS,
+    )
     fast_click(login_center)
-    safe_sleep(1.0)
+    safe_sleep(config.SWITCH_LOGIN_CLICK_WAIT_SECONDS)
     return _confirm_account_switched(camera)
 
 
@@ -349,7 +406,13 @@ def _verify_slot_nickname(camera, slot_number):
         )
         return False
 
-    end = time.time() + 8
+    _log_switch_waits(
+        "nickname verify",
+        select_wait=config.SWITCH_SERVER_SELECT_WAIT_SECONDS,
+        verify_timeout=config.SWITCH_NICKNAME_VERIFY_TIMEOUT_SECONDS,
+    )
+    safe_sleep(config.SWITCH_SERVER_SELECT_WAIT_SECONDS)
+    end = time.time() + config.SWITCH_NICKNAME_VERIFY_TIMEOUT_SECONDS
     while time.time() < end:
         if _match_image(
             camera,
@@ -383,11 +446,15 @@ def _step01_exit(camera):
 def _step02_server_list(camera):
     """步骤2：打开大区列表。"""
     update_overlay_mini("[switch] step2 open server list")
-    time.sleep(5)
+    _log_switch_waits(
+        "server list",
+        open_wait=config.SWITCH_SERVER_LIST_OPEN_WAIT_SECONDS,
+        qidong_timeout=config.SWITCH_QIDONG_MATCH_TIMEOUT_SECONDS,
+    )
+    safe_sleep(config.SWITCH_SERVER_LIST_OPEN_WAIT_SECONDS)
     pyautogui.click(1500, 990)
-    time.sleep(1)
 
-    if not _wait_for(camera, "qd", config.RGN_QD, timeout=30):
+    if not _wait_for(camera, "qd", config.RGN_QD, timeout=config.SWITCH_QIDONG_MATCH_TIMEOUT_SECONDS):
         async_push_msg("[switch] qidong not found", "[switch] qidong button not found within 30 seconds.")
         return False
     return True
@@ -400,15 +467,19 @@ def _step03_select(camera, idx):
         async_push_msg("[switch] invalid server index", f"[switch] invalid server index: {idx}.")
         return False
 
+    _log_switch_waits(
+        "server select",
+        select_wait=config.SWITCH_SERVER_SELECT_WAIT_SECONDS,
+    )
     coord = config.SERVER_COORDS[idx]
     pyautogui.click(*coord)
-    time.sleep(2)
+    safe_sleep(config.SWITCH_SERVER_SELECT_WAIT_SECONDS)
 
     if _match(camera, "qd", config.RGN_QD):
         return True
 
     pyautogui.click(*coord)
-    time.sleep(2)
+    safe_sleep(config.SWITCH_SERVER_SELECT_WAIT_SECONDS)
 
     if _match(camera, "qd", config.RGN_QD):
         return True
@@ -603,6 +674,9 @@ def switch_account_after_slot_boundary(camera):
         _pause_switch_flow("[switch] exit game failed", "[switch] failed before entering account switch flow.")
         return False
 
+    if not _wait_for_boundary_start_qidong(camera):
+        return False
+
     if not _switch_account_for_slot(camera, target["account_id"]):
         return False
 
@@ -617,19 +691,44 @@ def switch_account_after_slot_boundary(camera):
     if not _verify_slot_nickname(camera, target["next_slot"]):
         return False
 
+    resume_steps = [
+        ("step4 launch", lambda: _step04_launch(camera)),
+        ("step5 kongge", lambda: _step05_space(camera)),
+        ("step6 ads", lambda: _step06_ads(camera)),
+        ("step7 gumu", lambda: _step07_gumu(camera)),
+        ("step8 gold", lambda: _step08_gold(camera)),
+        ("step9 close", lambda: _step09_close(camera)),
+        ("step10 trade", lambda: _step10_trade(camera)),
+    ]
+    for name, fn in resume_steps:
+        logger.info("[switch] %s ...", name)
+        if not fn():
+            detail = f"[switch] failed during boundary post-select flow: {name}."
+            print(detail)
+            logger.error(detail)
+            restore_overlay()
+            state.switch_flow_paused = True
+            state.switch_last_unknown_detail = detail
+            state.overlay_status = "未知异常"
+            if not state.IS_PAUSED:
+                toggle_pause()
+            return False
+        logger.info("[switch] %s done", name)
+
     state.current_execution_slot = target["next_slot"]
     state.current_server_index = target["server_coord_index"]
     state.current_account_index = 0 if target["next_slot"] <= 4 else 1
+    state.current_nickname = str(target["next_slot"])
     state.need_switch_server = False
     state.switch_flow_paused = False
     state.switch_last_unknown_detail = ""
     restore_overlay()
     print(
         f"[switch] boundary flow done: next slot={target['next_slot']} "
-        f"account={target['account_id']}"
+        f"account={target['account_id']} trade_ready=true"
     )
     logger.info(
-        "[switch] boundary flow done: next slot=%s account=%s",
+        "[switch] boundary flow done: next slot=%s account=%s trade_ready=true",
         target["next_slot"],
         target["account_id"],
     )
