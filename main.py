@@ -61,6 +61,7 @@ from listing import execute_listing_routine
 from purchase import run_purchase_loop, reset_purchase_counters
 from switch import (
     startup_from_launcher,
+    switch_account_after_slot_boundary,
 )
 
 
@@ -602,9 +603,14 @@ def main():
             return
 
         if state.need_switch_server:
-            ui_print("当前基线已移除线程6执行位/自动换号主控，本轮结束后停止运行。", save_log=True)
-            print("[总控基线] 已移除线程6执行位/自动换号主控，当前账号结束后停止运行。")
-            logger.info("[总控基线] 已移除线程6执行位/自动换号主控，当前账号结束后停止运行。")
+            if state.current_execution_slot in config.EXECUTION_SLOT_SWITCH_TARGETS:
+                ui_print("检测到 4/8 执行位边界，进入线程6小阶段换号链路。", save_log=True)
+                logger.info("[线程6] 检测到 4/8 执行位边界，进入小阶段换号链路。")
+                switch_account_after_slot_boundary(camera)
+            else:
+                ui_print("当前基线已移除线程6执行位/自动换号主控，本轮结束后停止运行。", save_log=True)
+                print("[总控基线] 已移除线程6执行位/自动换号主控，当前账号结束后停止运行。")
+                logger.info("[总控基线] 已移除线程6执行位/自动换号主控，当前账号结束后停止运行。")
     finally:
         if camera is not None:
             camera.stop()
