@@ -61,6 +61,8 @@ from overlay import start_overlay, ui_print
 from listing import execute_listing_routine
 from purchase import run_purchase_loop, reset_purchase_counters
 from switch import (
+    resolve_execution_slot_transition,
+    switch_server_within_account_after_slot_boundary,
     startup_from_launcher,
     switch_account_after_slot_boundary,
 )
@@ -520,49 +522,57 @@ def _finalize_current_account_round(default_status):
     return False
 
 
-def _resolve_next_execution_slot(current_execution_slot):
-    try:
-        current_slot = int(current_execution_slot)
-    except (TypeError, ValueError):
-        return None
-
-    slot_count = len(config.EXECUTION_SLOT_ACCOUNT_IDS)
-    if slot_count <= 0 or current_slot < 1 or current_slot > slot_count:
-        return None
-    return current_slot + 1 if current_slot < slot_count else 1
-
-
 def _handle_execution_slot_dispatch(camera):
-    current_slot = state.current_execution_slot
-    next_slot = _resolve_next_execution_slot(current_slot)
-    if next_slot is None:
-        ui_print(f"线程6调度：当前执行位 {current_slot} 无效，停止运行。", save_log=True)
-        print(f"[线程6调度] 当前执行位 {current_slot} 无效，无法解析下一目标执行位。")
-        logger.error("[线程6调度] 当前执行位 %s 无效，无法解析下一目标执行位。", current_slot)
+    transition = resolve_execution_slot_transition(state.current_execution_slot)
+    if transition is None:
+        ui_print(f"线程6调度：当前执行位 {state.current_execution_slot} 无效，停止运行。", save_log=True)
+        print(f"[线程6调度] 当前执行位 {state.current_execution_slot} 无效，无法解析下一目标执行位。")
+        logger.error("[线程6调度] 当前执行位 %s 无效，无法解析下一目标执行位。", state.current_execution_slot)
         state.need_switch_server = False
         return "stop"
 
     ui_print(
-        f"线程6调度：执行位 {current_slot} 本轮结束，下一目标执行位 {next_slot}。",
+        f"线程6调度：执行位 {transition['current_slot']} 本轮结束，下一目标执行位 {transition['next_slot']}。",
         save_log=True,
     )
-    print(f"[线程6调度] 执行位 {current_slot} 本轮结束，下一目标执行位 {next_slot}。")
-    logger.info("[线程6调度] 执行位 %s 本轮结束，下一目标执行位 %s。", current_slot, next_slot)
+    print(
+        f"[线程6调度] 执行位 {transition['current_slot']} 本轮结束，"
+        f"下一目标执行位 {transition['next_slot']}。"
+    )
+    logger.info(
+        "[线程6调度] 执行位 %s 本轮结束，下一目标执行位 %s。",
+        transition["current_slot"],
+        transition["next_slot"],
+    )
 
-    if current_slot in config.EXECUTION_SLOT_SWITCH_TARGETS:
-        ui_print(f"线程6调度：命中 {current_slot}->{next_slot} 自动衔接边界，继续沿用原链路。", save_log=True)
-        logger.info("[线程6调度] 命中 %s->%s 自动衔接边界，继续沿用原链路。", current_slot, next_slot)
+    if transition["requires_account_switch"]:
+        ui_print(
+            f"线程6调度：命中 {transition['current_slot']}->{transition['next_slot']} 自动衔接边界，继续沿用原链路。",
+            save_log=True,
+        )
+        logger.info(
+            "[线程6调度] 命中 %s->%s 自动衔接边界，继续沿用原链路。",
+            transition["current_slot"],
+            transition["next_slot"],
+        )
         if not switch_account_after_slot_boundary(camera):
             return "abort"
-        if not _run_pre_listing_flow(camera):
+    else:
+        ui_print(
+            f"线程6调度：命中 {transition['current_slot']}->{transition['next_slot']} 同账号跨区切换，进入真实页面自动切换。",
+            save_log=True,
+        )
+        logger.info(
+            "[线程6调度] 命中 %s->%s 同账号跨区切换，进入真实页面自动切换。",
+            transition["current_slot"],
+            transition["next_slot"],
+        )
+        if not switch_server_within_account_after_slot_boundary(camera, transition):
             return "abort"
-        return "continue"
 
-    ui_print(f"线程6调度：{current_slot}->{next_slot} 当前只落调度骨架，按设计受控停止。", save_log=True)
-    print(f"[线程6调度] {current_slot}->{next_slot} 当前只落调度骨架，记录目标执行位后受控停止。")
-    logger.info("[线程6调度] %s->%s 当前只落调度骨架，记录目标执行位后受控停止。", current_slot, next_slot)
-    state.need_switch_server = False
-    return "stop"
+    if not _run_pre_listing_flow(camera):
+        return "abort"
+    return "continue"
 
 
 def main():
