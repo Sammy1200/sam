@@ -50,6 +50,7 @@ _TPL_FILES = {
     "qiehuan": "qiehuan.png",
     "denglu": "denglu.png",
     "heping": "hepingjingying.png",
+    "shoucan": "shoucan.png",
 }
 
 
@@ -174,10 +175,11 @@ def _pixels_white(camera):
 
 
 def _confirm_white(camera):
-    """1 秒后再次确认白色像素。"""
+    """0.5 秒后再次确认白色像素。"""
     if not _pixels_white(camera):
         return False
-    safe_sleep(1)
+    # 白点刚出现时页面可能还在轻微过渡，这里缩短为 0.5 秒复检，既保留二次确认又减少阻塞。
+    safe_sleep(config.SWITCH_WHITE_CONFIRM_INTERVAL_SECONDS)
     return _pixels_white(camera)
 
 
@@ -264,6 +266,8 @@ def _wait_for_boundary_start_qidong(camera):
         "boundary start qidong check",
         retry_count=config.SWITCH_BOUNDARY_START_QIDONG_RETRY_COUNT,
         retry_interval=config.SWITCH_BOUNDARY_START_QIDONG_RETRY_INTERVAL_SECONDS,
+        fixup_retry_count=config.SWITCH_BOUNDARY_START_QIDONG_FIXUP_RETRY_COUNT,
+        fixup_retry_interval=config.SWITCH_BOUNDARY_START_QIDONG_FIXUP_RETRY_INTERVAL_SECONDS,
     )
     for attempt in range(1, config.SWITCH_BOUNDARY_START_QIDONG_RETRY_COUNT + 1):
         if _match(
@@ -276,6 +280,22 @@ def _wait_for_boundary_start_qidong(camera):
             logger.info("[switch] boundary start qidong matched at attempt %s.", attempt)
             return True
         safe_sleep(config.SWITCH_BOUNDARY_START_QIDONG_RETRY_INTERVAL_SECONDS)
+
+    # 原等待上限内仍未看到启动按钮时，先尝试窗口最大化修复一次，再补 5 次识别，避免只是窗口状态导致误判失败。
+    print("[switch] boundary start qidong not found, try win+up fixup.")
+    logger.info("[switch] boundary start qidong not found, try win+up fixup.")
+    pyautogui.hotkey("winleft", "up")
+    for attempt in range(1, config.SWITCH_BOUNDARY_START_QIDONG_FIXUP_RETRY_COUNT + 1):
+        if _match(
+            camera,
+            "qd",
+            config.SWITCH_BOUNDARY_START_QIDONG_REGION,
+            threshold=config.SWITCH_UI_MATCH_THRESHOLD,
+        ):
+            print(f"[switch] boundary start qidong matched after fixup at attempt {attempt}.")
+            logger.info("[switch] boundary start qidong matched after fixup at attempt %s.", attempt)
+            return True
+        safe_sleep(config.SWITCH_BOUNDARY_START_QIDONG_FIXUP_RETRY_INTERVAL_SECONDS)
 
     return pause_thread6_failure(
         "返回启动页确认",
@@ -525,6 +545,7 @@ def _step02_server_list(camera, suppress_failure_output=False):
         open_wait=config.SWITCH_SERVER_LIST_OPEN_WAIT_SECONDS,
         qidong_timeout=config.SWITCH_QIDONG_MATCH_TIMEOUT_SECONDS,
     )
+    # 启动器刚回到前台时控件可能还没稳定，先等 3 秒再点，避免点在页面过渡阶段导致后续选区失效。
     safe_sleep(config.SWITCH_SERVER_LIST_OPEN_WAIT_SECONDS)
     pyautogui.click(1500, 990)
 
@@ -582,38 +603,46 @@ def _step04_launch(camera, suppress_failure_output=False):
 def _step05_space(camera, suppress_failure_output=False):
     """步骤5：处理启动弹窗。"""
     update_overlay_mini("[switch] step5 handle kongge")
-    center = _wait_for_match_center(camera, "kg", config.RGN_KG, timeout=60)
+    center = _wait_for_match_center(
+        camera,
+        "kg",
+        config.RGN_KG,
+        timeout=config.SWITCH_SPACE_MATCH_TIMEOUT_SECONDS,
+    )
     if center is None:
         if not suppress_failure_output:
-            async_push_msg("[switch] kongge not found", "[switch] kongge popup not found within 60 seconds.")
+            async_push_msg("[switch] kongge not found", "[switch] kongge popup not found within 30 seconds.")
         return False
-    time.sleep(1)
+    # 弹窗刚识别到时按钮可能还没完全可点，点击前后各留 1 秒，避免点空或页面还没吃到输入。
+    time.sleep(config.SWITCH_SPACE_BEFORE_CLICK_WAIT_SECONDS)
     fast_click(center)
-    time.sleep(1)
+    time.sleep(config.SWITCH_SPACE_AFTER_CLICK_WAIT_SECONDS)
     press_key(0x20)
-    time.sleep(10)
+    # 按空格后保留 5 秒固定等待，让启动过渡页完成切换，避免后面广告清理过早进入。
+    time.sleep(config.SWITCH_SPACE_AFTER_PRESS_WAIT_SECONDS)
     return True
 
 
 def _step06_ads(camera, suppress_failure_output=False):
     """步骤6：持续按 ESC 清理广告流程。"""
     update_overlay_mini("[switch] step6 clear ads")
-    end = time.time() + 120
+    end = time.time() + config.SWITCH_ADS_TIMEOUT_SECONDS
     while time.time() < end:
         center = _match_center(camera, "1tc", config.RGN_1TC)
         if center is not None:
-            time.sleep(1)
+            # 广告弹窗刚被识别到时常有轻微动画，先等 0.5 秒再点，减少识图过早导致的空点。
+            time.sleep(config.SWITCH_ADS_POPUP_BEFORE_CLICK_WAIT_SECONDS)
             fast_click(center)
             if _wait_for(camera, "gumu", config.RGN_GUMU, timeout=30):
                 return True
         pyautogui.press("escape")
-        time.sleep(1.5)
-        time.sleep(2)
+        # ESC 后统一等待 2 秒，再做白点复检，避免刚退出遮挡层就立刻误判页面已稳定。
+        time.sleep(config.SWITCH_ADS_AFTER_ESC_WAIT_SECONDS)
         if _confirm_white(camera):
             return True
 
     if not suppress_failure_output:
-        async_push_msg("[switch] ads clear timeout", "[switch] failed to clear ads within 120 seconds.")
+        async_push_msg("[switch] ads clear timeout", "[switch] failed to clear ads within 160 seconds.")
     return False
 
 
@@ -635,25 +664,28 @@ def _step07_gumu(camera, suppress_failure_output=False):
 def _step08_gold(camera):
     """步骤8：领取金币。"""
     update_overlay_mini("[switch] step8 gold")
+    # 领取金币是连续点固定入口，间隔太短容易前一步动画没收完，统一压到 0.8 秒减少空点。
     pyautogui.click(1868, 1044)
-    time.sleep(1)
+    time.sleep(config.SWITCH_GOLD_CLICK_WAIT_SECONDS)
     pyautogui.click(1767, 824)
-    time.sleep(1)
+    time.sleep(config.SWITCH_GOLD_CLICK_WAIT_SECONDS)
     pyautogui.click(1650, 1000)
-    time.sleep(1)
+    time.sleep(config.SWITCH_GOLD_CLICK_WAIT_SECONDS)
     return True
 
 
 def _step09_close(camera, suppress_failure_output=False):
     """步骤9：关闭面板并确认仍在古墓大厅。"""
     update_overlay_mini("[switch] step9 close panels")
-    for _ in range(5):
+    # 这里连续按 ESC 的目的只是稳定收起面板，按太多会拖慢节奏，按太快又可能没被页面吃到。
+    for _ in range(config.SWITCH_CLOSE_PANEL_ESC_COUNT):
         pyautogui.press("escape")
-        time.sleep(0.5)
-    time.sleep(1)
+        time.sleep(config.SWITCH_CLOSE_PANEL_ESC_INTERVAL_SECONDS)
+    time.sleep(config.SWITCH_CLOSE_PANEL_AFTER_ESC_WAIT_SECONDS)
 
+    # ESC 收完后再点一次中间位置，让焦点真正回到大厅，再等 0.5 秒避免马上识图过早。
     pyautogui.click(830, 690)
-    time.sleep(1)
+    time.sleep(config.SWITCH_CLOSE_PANEL_AFTER_CLICK_WAIT_SECONDS)
 
     if not _wait_for(camera, "gumu", config.RGN_GUMU, timeout=5):
         if not suppress_failure_output:
@@ -665,12 +697,33 @@ def _step09_close(camera, suppress_failure_output=False):
 def _step10_trade(camera):
     """步骤10：从古墓大厅前往交易行。"""
     update_overlay_mini("[switch] step10 trade")
+    # 第一步是打开通往交易行的入口，等待 1.8 秒让页面切到下一层，避免第二次点击打在旧界面。
     pyautogui.click(1470, 1032)
-    time.sleep(2)
-    pyautogui.click(470, 50)
-    time.sleep(2)
+    time.sleep(config.SWITCH_TRADE_FIRST_CLICK_WAIT_SECONDS)
+
+    # 第二步最容易因为页面还没稳定而点空，这里补“收藏”模板识图；若没识别到就重复第二次点击，最多 3 次。
+    trade_ready = False
+    for attempt in range(1, config.SWITCH_TRADE_SECOND_CLICK_MAX_RETRY + 1):
+        pyautogui.click(470, 50)
+        time.sleep(config.SWITCH_TRADE_SECOND_CLICK_WAIT_SECONDS)
+        if _match(
+            camera,
+            "shoucan",
+            config.SWITCH_TRADE_SHOUCAN_REGION,
+            threshold=config.SWITCH_UI_MATCH_THRESHOLD,
+        ):
+            trade_ready = True
+            break
+        if attempt < config.SWITCH_TRADE_SECOND_CLICK_MAX_RETRY:
+            print(f"[switch] trade second click retry {attempt} because shoucan not matched yet.")
+            logger.info("[switch] trade second click retry %s because shoucan not matched yet.", attempt)
+
+    if not trade_ready:
+        logger.info("[switch] shoucan not matched after second click retries, continue with existing trade flow.")
+
+    # 第三步继续进入交易行，仍保留固定等待 1.8 秒，避免最后一次点击后立刻切回业务链路。
     pyautogui.click(1850, 350)
-    time.sleep(5)
+    time.sleep(config.SWITCH_TRADE_THIRD_CLICK_WAIT_SECONDS)
     restore_overlay()
     return True
 
