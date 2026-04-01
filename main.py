@@ -57,10 +57,11 @@ from round_persistence import (
 from utils import safe_sleep, safe_get_frame, safe_imread, fast_click, gc_checkpoint
 from utils import async_push_msg, logger
 from vision import is_image_present, load_digit_templates
-from overlay import start_overlay, ui_print
+from overlay import shutdown_overlay, start_overlay, ui_print
 from listing import execute_listing_routine
 from purchase import run_purchase_loop, reset_purchase_counters
 from switch import (
+    pause_thread6_failure,
     resolve_execution_slot_transition,
     switch_server_within_account_after_slot_boundary,
     startup_from_launcher,
@@ -508,6 +509,15 @@ def _prepare_launcher_start(camera):
     return startup_from_launcher(camera, state.current_server_index)
 
 
+def _pause_after_launcher_start_failure():
+    """启动器链路失败时，保留现场并等待人工确认。"""
+    message = "从启动器进入游戏流程失败，脚本暂停等待人工处理。"
+    ui_print(message, save_log=True)
+    print(f"[启动器] {message}")
+    logger.error("[启动器] %s", message)
+    os.system('pause')
+
+
 def _finalize_current_account_round(default_status):
     if not state.account_record_loaded and state.account_read_status == "":
         return True
@@ -523,56 +533,66 @@ def _finalize_current_account_round(default_status):
 
 
 def _handle_execution_slot_dispatch(camera):
-    transition = resolve_execution_slot_transition(state.current_execution_slot)
-    if transition is None:
-        ui_print(f"线程6调度：当前执行位 {state.current_execution_slot} 无效，停止运行。", save_log=True)
-        print(f"[线程6调度] 当前执行位 {state.current_execution_slot} 无效，无法解析下一目标执行位。")
-        logger.error("[线程6调度] 当前执行位 %s 无效，无法解析下一目标执行位。", state.current_execution_slot)
-        state.need_switch_server = False
-        return "stop"
+    try:
+        transition = resolve_execution_slot_transition(state.current_execution_slot)
+        if transition is None:
+            pause_thread6_failure("解析下一目标执行位", f"当前执行位 {state.current_execution_slot} 无效，无法解析下一目标执行位。")
+            state.need_switch_server = False
+            return "abort"
 
-    ui_print(
-        f"线程6调度：执行位 {transition['current_slot']} 本轮结束，下一目标执行位 {transition['next_slot']}。",
-        save_log=True,
-    )
-    print(
-        f"[线程6调度] 执行位 {transition['current_slot']} 本轮结束，"
-        f"下一目标执行位 {transition['next_slot']}。"
-    )
-    logger.info(
-        "[线程6调度] 执行位 %s 本轮结束，下一目标执行位 %s。",
-        transition["current_slot"],
-        transition["next_slot"],
-    )
-
-    if transition["requires_account_switch"]:
         ui_print(
-            f"线程6调度：命中 {transition['current_slot']}->{transition['next_slot']} 自动衔接边界，继续沿用原链路。",
+            f"线程6调度：执行位 {transition['current_slot']} 本轮结束，下一目标执行位 {transition['next_slot']}。",
             save_log=True,
         )
+        print(
+            f"[线程6调度] 执行位 {transition['current_slot']} 本轮结束，"
+            f"下一目标执行位 {transition['next_slot']}。"
+        )
         logger.info(
-            "[线程6调度] 命中 %s->%s 自动衔接边界，继续沿用原链路。",
+            "[线程6调度] 执行位 %s 本轮结束，下一目标执行位 %s。",
             transition["current_slot"],
             transition["next_slot"],
         )
-        if not switch_account_after_slot_boundary(camera):
-            return "abort"
-    else:
-        ui_print(
-            f"线程6调度：命中 {transition['current_slot']}->{transition['next_slot']} 同账号跨区切换，进入真实页面自动切换。",
-            save_log=True,
-        )
-        logger.info(
-            "[线程6调度] 命中 %s->%s 同账号跨区切换，进入真实页面自动切换。",
-            transition["current_slot"],
-            transition["next_slot"],
-        )
-        if not switch_server_within_account_after_slot_boundary(camera, transition):
-            return "abort"
 
-    if not _run_pre_listing_flow(camera):
+        if transition["requires_account_switch"]:
+            ui_print(
+                f"线程6调度：命中 {transition['current_slot']}->{transition['next_slot']} 自动衔接边界，继续沿用原链路。",
+                save_log=True,
+            )
+            logger.info(
+                "[线程6调度] 命中 %s->%s 自动衔接边界，继续沿用原链路。",
+                transition["current_slot"],
+                transition["next_slot"],
+            )
+            if not switch_account_after_slot_boundary(camera) and not state.switch_flow_paused:
+                pause_thread6_failure("跨账号边界切换链路", "链路返回失败，但未命中步骤级或链路级失败出口。")
+                return "abort"
+            if state.switch_flow_paused:
+                return "abort"
+        else:
+            ui_print(
+                f"线程6调度：命中 {transition['current_slot']}->{transition['next_slot']} 同账号跨区切换，进入真实页面自动切换。",
+                save_log=True,
+            )
+            logger.info(
+                "[线程6调度] 命中 %s->%s 同账号跨区切换，进入真实页面自动切换。",
+                transition["current_slot"],
+                transition["next_slot"],
+            )
+            if not switch_server_within_account_after_slot_boundary(camera, transition) and not state.switch_flow_paused:
+                pause_thread6_failure("同账号跨区切换链路", "链路返回失败，但未命中步骤级或链路级失败出口。")
+                return "abort"
+            if state.switch_flow_paused:
+                return "abort"
+
+        if not _run_pre_listing_flow(camera):
+            if not state.switch_flow_paused:
+                pause_thread6_failure("切换后预上架衔接", "线程 6 切换完成后未能完成预上架与账号状态衔接。")
+            return "abort"
+        return "continue"
+    except Exception as exc:
+        pause_thread6_failure("线程6调度入口", f"线程 6 调度入口出现未处理异常：{exc}")
         return "abort"
-    return "continue"
 
 
 def main():
@@ -581,125 +601,127 @@ def main():
     if mode == "1":
         state.current_server_index = _prompt_server_index()
     start_overlay()
+    try:
+        if os.name == 'nt':
+            try:
+                handle = ctypes.windll.kernel32.GetCurrentProcess()
+                ctypes.windll.kernel32.SetPriorityClass(handle, 0x00000100)
+                ctypes.windll.kernel32.SetProcessAffinityMask(handle, 0x0055)
+            except:
+                pass
 
-    if os.name == 'nt':
         try:
-            handle = ctypes.windll.kernel32.GetCurrentProcess()
-            ctypes.windll.kernel32.SetPriorityClass(handle, 0x00000100)
-            ctypes.windll.kernel32.SetProcessAffinityMask(handle, 0x0055)
-        except:
-            pass
+            state.ocr_engine = RapidOCR()
+            ui_print("文字识别引擎已加载")
+        except Exception as e:
+            ui_print(f"文字识别引擎加载失败: {e}")
+            time.sleep(5)
+            return
 
-    try:
-        state.ocr_engine = RapidOCR()
-        ui_print("文字识别引擎已加载")
-    except Exception as e:
-        ui_print(f"文字识别引擎加载失败: {e}")
-        time.sleep(5)
-        return
+        templates = {str(i): safe_imread(("logo", "jiage", f"{i}.png"), 0) for i in range(10)}
+        temp_success = safe_imread(("logo", "tezhengtu", "chenggong.png"), 0)
+        temp_shop = safe_imread(("logo", "tezhengtu", "dianpu.png"), 0)
+        state.temp_shop = temp_shop
+        state.temp_jiaoyi = safe_imread(("logo", "tezhengtu", "jiaoyihang.png"), 0)
+        temp_goumai = safe_imread(("logo", "tezhengtu", "goumai.png"), 0)
+        temp_meihuo = safe_imread(("logo", "tezhengtu", "meihuo.png"), 0)
+        temp_diyici = safe_imread(("logo", "tezhengtu", "diyici.png"), 0)
+        state.TEMP_ITEM = safe_imread(("logo", "shangjia", "pojiaoshi.png"), cv2.IMREAD_COLOR)
+        state.TEMP_TISHI = safe_imread(("logo", "shangjia", "tishi.png"), 0)
+        state.TEMP_POPUP = safe_imread(("logo", "shangjia", "shangjiatan.png"), 0)
 
-    templates = {str(i): safe_imread(("logo", "jiage", f"{i}.png"), 0) for i in range(10)}
-    temp_success = safe_imread(("logo", "tezhengtu", "chenggong.png"), 0)
-    temp_shop = safe_imread(("logo", "tezhengtu", "dianpu.png"), 0)
-    state.temp_shop = temp_shop
-    state.temp_jiaoyi = safe_imread(("logo", "tezhengtu", "jiaoyihang.png"), 0)
-    temp_goumai = safe_imread(("logo", "tezhengtu", "goumai.png"), 0)
-    temp_meihuo = safe_imread(("logo", "tezhengtu", "meihuo.png"), 0)
-    temp_diyici = safe_imread(("logo", "tezhengtu", "diyici.png"), 0)
-    state.TEMP_ITEM = safe_imread(("logo", "shangjia", "pojiaoshi.png"), cv2.IMREAD_COLOR)
-    state.TEMP_TISHI = safe_imread(("logo", "shangjia", "tishi.png"), 0)
-    state.TEMP_POPUP = safe_imread(("logo", "shangjia", "shangjiatan.png"), 0)
+        missing = []
+        if any(v is None for v in templates.values()):
+            missing.append("logo/jiage/0.png - 9.png")
+        if temp_success is None:
+            missing.append("logo/tezhengtu/chenggong.png")
+        if temp_shop is None:
+            missing.append("logo/tezhengtu/dianpu.png")
+        if state.temp_jiaoyi is None:
+            missing.append("logo/tezhengtu/jiaoyihang.png")
+        if temp_goumai is None:
+            missing.append("logo/tezhengtu/goumai.png")
+        if temp_meihuo is None:
+            missing.append("logo/tezhengtu/meihuo.png")
+        if temp_diyici is None:
+            missing.append("logo/tezhengtu/diyici.png")
+        if state.TEMP_ITEM is None:
+            missing.append("logo/shangjia/pojiaoshi.png")
+        if state.TEMP_TISHI is None:
+            missing.append("logo/shangjia/tishi.png")
 
-    missing = []
-    if any(v is None for v in templates.values()):
-        missing.append("logo/jiage/0.png - 9.png")
-    if temp_success is None:
-        missing.append("logo/tezhengtu/chenggong.png")
-    if temp_shop is None:
-        missing.append("logo/tezhengtu/dianpu.png")
-    if state.temp_jiaoyi is None:
-        missing.append("logo/tezhengtu/jiaoyihang.png")
-    if temp_goumai is None:
-        missing.append("logo/tezhengtu/goumai.png")
-    if temp_meihuo is None:
-        missing.append("logo/tezhengtu/meihuo.png")
-    if temp_diyici is None:
-        missing.append("logo/tezhengtu/diyici.png")
-    if state.TEMP_ITEM is None:
-        missing.append("logo/shangjia/pojiaoshi.png")
-    if state.TEMP_TISHI is None:
-        missing.append("logo/shangjia/tishi.png")
+        if missing:
+            ui_print(f"素材缺失: {', '.join(missing)}", save_log=True)
+            time.sleep(10)
+            return
 
-    if missing:
-        ui_print(f"素材缺失: {', '.join(missing)}", save_log=True)
-        time.sleep(10)
-        return
-
-    if state.TEMP_POPUP is not None:
-        ui_print("上架弹窗检测：模板匹配模式")
-    else:
-        ui_print("上架弹窗检测：帧差异模式")
-
-    if load_digit_templates():
-        ui_print("容量识别：模板匹配模式")
-    else:
-        ui_print("容量识别：文字识别模式")
-
-    camera = None
-    try:
-        camera = dxcam.create(output_color="BGRA")
-        camera.start(target_fps=144)
-    except Exception as e:
-        ui_print(f"截图引擎启动失败: {e}")
-        time.sleep(5)
-        return
-
-    try:
-        if mode == "1":
-            if not _prepare_launcher_start(camera):
-                ui_print("从启动器进入游戏流程失败")
-                return
-            if not _run_pre_listing_flow(camera):
-                return
+        if state.TEMP_POPUP is not None:
+            ui_print("上架弹窗检测：模板匹配模式")
         else:
-            if not _run_direct_account_flow(camera):
-                return
+            ui_print("上架弹窗检测：帧差异模式")
 
-        while True:
-            state.need_switch_server = False
-            print(f"[账号数据] 准备进入抢购循环，当前时刻={_format_account_time(datetime.now())}，计时器状态：{_format_timer_state()}")
-            logger.info("[账号数据] 准备进入抢购循环，当前时刻=%s，计时器状态：%s", _format_account_time(datetime.now()), _format_timer_state())
-            run_purchase_loop(
-                camera,
-                templates,
-                temp_success,
-                temp_shop,
-                temp_goumai,
-                temp_meihuo,
-                temp_diyici,
-            )
+        if load_digit_templates():
+            ui_print("容量识别：模板匹配模式")
+        else:
+            ui_print("容量识别：文字识别模式")
 
-            if state.account_round_writeback_failed:
-                print(f"[账号数据] SQLite 写回失败：{state.account_round_writeback_error}")
-                logger.error("[账号数据] SQLite 写回失败：%s", state.account_round_writeback_error)
-                _finalize_current_account_round("未知异常")
-                return
+        camera = None
+        try:
+            camera = dxcam.create(output_color="BGRA")
+            camera.start(target_fps=144)
+        except Exception as e:
+            ui_print(f"截图引擎启动失败: {e}")
+            time.sleep(5)
+            return
 
-            if not _finalize_current_account_round("未知异常"):
-                return
+        try:
+            if mode == "1":
+                if not _prepare_launcher_start(camera):
+                    _pause_after_launcher_start_failure()
+                    return
+                if not _run_pre_listing_flow(camera):
+                    return
+            else:
+                if not _run_direct_account_flow(camera):
+                    return
 
-            if not state.need_switch_server:
+            while True:
+                state.need_switch_server = False
+                print(f"[账号数据] 准备进入抢购循环，当前时刻={_format_account_time(datetime.now())}，计时器状态：{_format_timer_state()}")
+                logger.info("[账号数据] 准备进入抢购循环，当前时刻=%s，计时器状态：%s", _format_account_time(datetime.now()), _format_timer_state())
+                run_purchase_loop(
+                    camera,
+                    templates,
+                    temp_success,
+                    temp_shop,
+                    temp_goumai,
+                    temp_meihuo,
+                    temp_diyici,
+                )
+
+                if state.account_round_writeback_failed:
+                    print(f"[账号数据] SQLite 写回失败：{state.account_round_writeback_error}")
+                    logger.error("[账号数据] SQLite 写回失败：%s", state.account_round_writeback_error)
+                    _finalize_current_account_round("未知异常")
+                    return
+
+                if not _finalize_current_account_round("未知异常"):
+                    return
+
+                if not state.need_switch_server:
+                    break
+
+                dispatch_action = _handle_execution_slot_dispatch(camera)
+                if dispatch_action == "continue":
+                    continue
+                if dispatch_action == "abort":
+                    return
                 break
-
-            dispatch_action = _handle_execution_slot_dispatch(camera)
-            if dispatch_action == "continue":
-                continue
-            if dispatch_action == "abort":
-                return
-            break
+        finally:
+            if camera is not None:
+                camera.stop()
     finally:
-        if camera is not None:
-            camera.stop()
+        shutdown_overlay()
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import ctypes
 import time
 import gc
 import logging
+import queue
 from datetime import datetime
 import tkinter as tk
 import numpy as np
@@ -12,6 +13,7 @@ import cv2
 import os
 import threading
 import requests
+import sys
 import config
 import state
 from config import SCROLL_POS, PRE_EXIT_CLICK_DELAY, SCRIPT_DIR
@@ -80,6 +82,54 @@ def setup_logger():
 
 
 logger = setup_logger()
+_OVERLAY_TASK_QUEUE = queue.Queue()
+
+
+def flush_logger_handlers():
+    """强制刷新日志处理器，尽量确保日志已落盘。"""
+    for handler in list(logger.handlers):
+        try:
+            handler.flush()
+        except:
+            pass
+        try:
+            stream = getattr(handler, "stream", None)
+            if stream is not None and hasattr(stream, "flush"):
+                stream.flush()
+            if stream is not None and hasattr(stream, "fileno"):
+                os.fsync(stream.fileno())
+        except:
+            pass
+    try:
+        sys.stdout.flush()
+    except:
+        pass
+    try:
+        sys.stderr.flush()
+    except:
+        pass
+
+
+def enqueue_overlay_task(callback, *args, **kwargs):
+    """将悬浮窗操作投递到 Tk 线程执行。"""
+    if callback is None:
+        return
+    _OVERLAY_TASK_QUEUE.put((callback, args, kwargs))
+
+
+def drain_overlay_tasks(max_tasks=100):
+    """在 Tk 线程中批量执行待处理的悬浮窗操作。"""
+    processed = 0
+    while processed < max_tasks:
+        try:
+            callback, args, kwargs = _OVERLAY_TASK_QUEUE.get_nowait()
+        except queue.Empty:
+            break
+        try:
+            callback(*args, **kwargs)
+        except Exception:
+            logger.exception("执行悬浮窗队列任务失败")
+        processed += 1
 
 
 def _wait_overlay_root(timeout=2.0):
@@ -184,7 +234,7 @@ def set_overlay_mini(text):
         root._overlay_is_mini = True
 
     try:
-        root.after(0, _apply)
+        enqueue_overlay_task(_apply)
         logger.info(f"悬浮窗已切换为精简模式：{text}")
     except Exception:
         logger.exception("切换悬浮窗精简模式失败")
@@ -210,7 +260,7 @@ def update_overlay_mini(text):
         root.update()
 
     try:
-        root.after(0, _apply)
+        enqueue_overlay_task(_apply)
     except Exception:
         logger.exception("更新精简悬浮窗文字失败")
 
@@ -259,7 +309,7 @@ def restore_overlay():
         root.update()
 
     try:
-        root.after(0, _apply)
+        enqueue_overlay_task(_apply)
         logger.info("悬浮窗已恢复为正常模式")
     except Exception:
         logger.exception("恢复悬浮窗正常模式失败")
@@ -414,16 +464,22 @@ def _get_battle_report():
     )
 
 
+def push_msg_sync(title, content=""):
+    report = _get_battle_report()
+    full_content = f"{content}\n\n{report}" if content else report
+    token = "59653da98d3049adb1deb19660767621"
+    url = "http://www.pushplus.plus/send"
+    data = {"token": token, "title": title, "content": full_content, "template": "txt"}
+    requests.post(url, json=data, timeout=3)
+
+
 def async_push_msg(title, content=""):
     report = _get_battle_report()
     full_content = f"{content}\n\n{report}" if content else report
 
     def send():
-        token = "59653da98d3049adb1deb19660767621"
-        url = "http://www.pushplus.plus/send"
-        data = {"token": token, "title": title, "content": full_content, "template": "txt"}
         try:
-            requests.post(url, json=data, timeout=3)
+            push_msg_sync(title, content)
         except:
             pass
 
