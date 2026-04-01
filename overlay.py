@@ -6,11 +6,13 @@ import threading
 import ctypes
 import os
 import time
+import atexit
 from datetime import datetime
-import keyboard
 import state
 from account_db import compute_new_baseline_item_count
 from utils import (
+    drain_overlay_tasks,
+    enqueue_overlay_task,
     get_current_elapsed,
     OVERLAY_NORMAL_GEOMETRY,
     OVERLAY_NORMAL_BG,
@@ -23,6 +25,10 @@ from utils import (
 
 
 DEFAULT_OVERLAY_STATUS_TEXT = "状态待更新"
+F12_VK = 0x7B
+_pause_hotkey_listener_started = False
+_overlay_shutdown_requested = False
+_overlay_closed_event = threading.Event()
 
 
 def fit_overlay_to_content(position_override=None):
@@ -112,12 +118,16 @@ def update_score_text():
 
 
 def tick_timer():
+    drain_overlay_tasks()
     update_score_text()
     if state.overlay_root:
         state.overlay_root.after(1000, tick_timer)
 
 
 def create_overlay():
+    global _overlay_shutdown_requested
+    _overlay_closed_event.clear()
+    _overlay_shutdown_requested = False
     state.overlay_root = tk.Tk()
     root = state.overlay_root
     root.overrideredirect(True)
@@ -156,10 +166,19 @@ def create_overlay():
     state.last_resume_time = time.time()
     tick_timer()
     fit_overlay_to_content()
-    root.mainloop()
+    try:
+        root.mainloop()
+    finally:
+        state.overlay_root = None
+        state.log_text_var = None
+        state.score_var = None
+        _overlay_closed_event.set()
 
 
 def start_overlay():
+    global _overlay_shutdown_requested
+    _overlay_shutdown_requested = False
+    _start_pause_hotkey_listener()
     t = threading.Thread(target=create_overlay, daemon=True)
     t.start()
 
@@ -199,7 +218,7 @@ def ui_print(msg, is_replace=False, save_log=False, show_console=True):
                 state.log_text_var.set(log_text)
                 fit_overlay_to_content()
 
-            state.overlay_root.after(0, _apply_log_text, "\n".join(state.log_lines))
+            enqueue_overlay_task(_apply_log_text, "\n".join(state.log_lines))
         except:
             pass
 
@@ -213,20 +232,78 @@ def toggle_pause():
         ui_print("⏸️ 脚本已暂停（按 F12 恢复）")
         if state.overlay_root:
             try:
-                state.overlay_root.after(0, state.overlay_root.withdraw)
+                enqueue_overlay_task(state.overlay_root.withdraw)
             except:
                 pass
     else:
         state.last_resume_time = time.time()
         if state.overlay_root:
             try:
-                state.overlay_root.after(0, state.overlay_root.deiconify)
+                enqueue_overlay_task(state.overlay_root.deiconify)
             except:
                 pass
         ui_print("▶️ 脚本已恢复！（按 F12 暂停）")
 
 
-keyboard.add_hotkey("f12", toggle_pause)
+def _pause_hotkey_loop():
+    """使用轮询监听 F12，避免全局键盘钩子影响输入法和文字输入。"""
+    last_down = False
+    while not _overlay_shutdown_requested:
+        try:
+            is_down = bool(ctypes.windll.user32.GetAsyncKeyState(F12_VK) & 0x8000)
+            if is_down and not last_down:
+                toggle_pause()
+            last_down = is_down
+        except Exception:
+            pass
+        time.sleep(0.05)
+
+
+def _start_pause_hotkey_listener():
+    global _pause_hotkey_listener_started
+    if _pause_hotkey_listener_started:
+        return
+
+    listener = threading.Thread(target=_pause_hotkey_loop, daemon=True)
+    listener.start()
+    _pause_hotkey_listener_started = True
+
+
+def shutdown_overlay(wait_timeout=1.5):
+    """关闭悬浮窗并尽量等待 Tk 线程退出。"""
+    global _overlay_shutdown_requested
+    _overlay_shutdown_requested = True
+
+    root = state.overlay_root
+    if root is None:
+        _overlay_closed_event.set()
+        return
+
+    def _close_root():
+        current_root = state.overlay_root
+        if current_root is None:
+            return
+        try:
+            current_root.quit()
+        except:
+            pass
+        try:
+            current_root.destroy()
+        except:
+            pass
+
+    try:
+        enqueue_overlay_task(_close_root)
+    except Exception:
+        try:
+            root.after(0, _close_root)
+        except:
+            pass
+
+    _overlay_closed_event.wait(wait_timeout)
+
+
+atexit.register(shutdown_overlay)
 
 
 def move_overlay(geometry_str):
@@ -241,6 +318,6 @@ def move_overlay(geometry_str):
                 else:
                     state.overlay_root.geometry(geometry_str)
 
-            state.overlay_root.after(0, _apply_move)
+            enqueue_overlay_task(_apply_move)
         except:
             pass

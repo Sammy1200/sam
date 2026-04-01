@@ -1,4 +1,4 @@
-"""
+﻿"""
 Switch helpers for launcher/server/account flow.
 
 Public APIs:
@@ -6,6 +6,7 @@ Public APIs:
   full_switch_server(camera, server_index)
   is_at_gumu(camera)
   navigate_to_trade(camera)
+  pause_thread6_failure(step_name, detail)
   resolve_execution_slot_transition(current_execution_slot)
   switch_server_within_account_after_slot_boundary(camera)
   switch_account_after_slot_boundary(camera)
@@ -13,6 +14,7 @@ Public APIs:
 
 import os
 import time
+import traceback
 
 import cv2
 import pyautogui
@@ -23,10 +25,12 @@ from overlay import toggle_pause
 from utils import (
     async_push_msg,
     fast_click,
+    flush_logger_handlers,
     get_clipboard_text,
     hotkey,
     logger,
     press_key,
+    push_msg_sync,
     restore_overlay,
     safe_get_frame,
     safe_sleep,
@@ -184,10 +188,74 @@ def _pause_switch_flow(title, detail):
     state.overlay_status = "未知异常"
     print(detail)
     logger.error(detail)
-    async_push_msg(title, detail)
     restore_overlay()
     if not state.IS_PAUSED:
         toggle_pause()
+    flush_logger_handlers()
+    try:
+        push_msg_sync(title, detail)
+    except Exception as exc:
+        push_fail_message = f"[线程6] 微信推送失败：{exc}"
+        print(push_fail_message)
+        logger.error(push_fail_message)
+        flush_logger_handlers()
+    block_message = "[线程6] 已进入阻塞停机，请人工确认后按任意键继续。"
+    print(block_message)
+    logger.error(block_message)
+    flush_logger_handlers()
+    os.system('pause')
+
+
+def pause_thread6_failure(step_name, detail):
+    """线程 6 统一失败出口：日志、微信推送、暂停。"""
+    message = f"[\u7ebf\u7a0b6] \u5931\u8d25\u6b65\u9aa4\uff1a{step_name}\uff1b{detail}"
+    _pause_switch_flow(f"[\u7ebf\u7a0b6] {step_name}\u5931\u8d25", message)
+    return False
+
+
+def _pause_thread6_exception(step_name, exc):
+    """线程 6 异常统一失败出口。"""
+    logger.error("[线程6] 步骤 %s 出现未处理异常：%s", step_name, exc)
+    logger.error(traceback.format_exc())
+    return pause_thread6_failure(step_name, f"出现未处理异常：{exc}")
+
+
+def _run_thread6_step(step_name, detail, fn):
+    """线程 6 步骤级统一守卫。"""
+    logger.info("[线程6] 步骤开始：%s", step_name)
+    try:
+        result = fn()
+    except Exception as exc:
+        return _pause_thread6_exception(step_name, exc)
+
+    if result:
+        logger.info("[线程6] 步骤完成：%s", step_name)
+        return True
+
+    if state.switch_flow_paused:
+        logger.info("[线程6] 步骤失败已由下层处理：%s", step_name)
+        return False
+
+    return pause_thread6_failure(step_name, detail)
+
+
+def _run_thread6_chain(chain_name, fn):
+    """线程 6 链路级统一守卫。"""
+    logger.info("[线程6] 链路开始：%s", chain_name)
+    try:
+        result = fn()
+    except Exception as exc:
+        return _pause_thread6_exception(chain_name, exc)
+
+    if result:
+        logger.info("[线程6] 链路完成：%s", chain_name)
+        return True
+
+    if state.switch_flow_paused:
+        logger.info("[线程6] 链路失败已由下层处理：%s", chain_name)
+        return False
+
+    return pause_thread6_failure(chain_name, "链路执行失败，但未命中具体步骤级失败出口。")
 
 
 def _wait_for_boundary_start_qidong(camera):
@@ -209,11 +277,10 @@ def _wait_for_boundary_start_qidong(camera):
             return True
         safe_sleep(config.SWITCH_BOUNDARY_START_QIDONG_RETRY_INTERVAL_SECONDS)
 
-    _pause_switch_flow(
-        "[switch] boundary start qidong not found",
-        "[switch] qidong.png was not matched in boundary start region after exit-game wait loop.",
+    return pause_thread6_failure(
+        "返回启动页确认",
+        "未能在边界切换前确认回到启动页（qidong.png 未匹配）。",
     )
-    return False
 
 
 def resolve_execution_slot_transition(current_execution_slot):
@@ -279,9 +346,9 @@ def _click_switch_user_and_wait_login(camera):
         threshold=config.SWITCH_UI_MATCH_THRESHOLD,
     )
     if center is None:
-        _pause_switch_flow(
-            "[switch] missing switch user entry",
-            "[switch] qiehuan.png was not matched in switch-user region after clicking account list button.",
+        pause_thread6_failure(
+            "切换账号入口",
+            "点击账号列表后未匹配到切换账号入口（qiehuan.png）。",
         )
         return None
 
@@ -296,9 +363,9 @@ def _click_switch_user_and_wait_login(camera):
         threshold=config.SWITCH_UI_MATCH_THRESHOLD,
     )
     if login_center is None:
-        _pause_switch_flow(
-            "[switch] login page not reached",
-            "[switch] denglu.png was not matched after clicking switch-user entry.",
+        pause_thread6_failure(
+            "进入登录页",
+            "点击切换账号入口后未匹配到登录页（denglu.png）。",
         )
         return None
 
@@ -325,11 +392,10 @@ def _input_and_verify_account(account_id):
     actual = _digits_only(get_clipboard_text())
     expected = _digits_only(account_id)
     if actual != expected:
-        _pause_switch_flow(
-            "[switch] account input verify failed",
-            f"[switch] expected account={expected}, actual clipboard={actual or 'empty'}.",
+        return pause_thread6_failure(
+            "账号输入校验",
+            f"账号输入校验失败，期望账号 {expected}，实际剪贴板为 {actual or 'empty'}。",
         )
-        return False
     return True
 
 
@@ -371,11 +437,10 @@ def _confirm_account_switched(camera):
             safe_sleep(0.8)
             return True
 
-    _pause_switch_flow(
-        "[switch] heping page verify failed",
-        "[switch] hepingjingying.png was not matched after account login.",
+    return pause_thread6_failure(
+        "确认账号切换结果",
+        "账号登录后未匹配到和平精英页（hepingjingying.png）。",
     )
-    return False
 
 
 def _switch_account_for_slot(camera, account_id):
@@ -411,11 +476,10 @@ def _verify_slot_nickname(camera, slot_number):
     update_overlay_mini(f"[switch] verify nickname slot {slot_number}")
     template, template_path = _load_nickname_template(slot_number)
     if template is None:
-        _pause_switch_flow(
-            "[switch] nickname template missing",
-            f"[switch] nickname template missing: {template_path or 'unresolved path'}.",
+        return pause_thread6_failure(
+            "加载昵称模板",
+            f"昵称模板缺失：{template_path or 'unresolved path'}。",
         )
-        return False
 
     _log_switch_waits(
         "nickname verify",
@@ -436,11 +500,10 @@ def _verify_slot_nickname(camera, slot_number):
             return True
         safe_sleep(0.5)
 
-    _pause_switch_flow(
-        "[switch] nickname template mismatch",
-        f"[switch] nickname template mismatch for slot {slot_number}: {template_path}.",
+    return pause_thread6_failure(
+        "昵称模板校验",
+        f"执行位 {slot_number} 的昵称模板校验失败：{template_path}。",
     )
-    return False
 
 
 def _step01_exit(camera):
@@ -454,7 +517,7 @@ def _step01_exit(camera):
     return True
 
 
-def _step02_server_list(camera):
+def _step02_server_list(camera, suppress_failure_output=False):
     """步骤2：打开大区列表。"""
     update_overlay_mini("[switch] step2 open server list")
     _log_switch_waits(
@@ -466,16 +529,18 @@ def _step02_server_list(camera):
     pyautogui.click(1500, 990)
 
     if not _wait_for(camera, "qd", config.RGN_QD, timeout=config.SWITCH_QIDONG_MATCH_TIMEOUT_SECONDS):
-        async_push_msg("[switch] qidong not found", "[switch] qidong button not found within 30 seconds.")
+        if not suppress_failure_output:
+            async_push_msg("[switch] qidong not found", "[switch] qidong button not found within 30 seconds.")
         return False
     return True
 
 
-def _step03_select(camera, idx):
+def _step03_select(camera, idx, suppress_failure_output=False):
     """步骤3：点击目标大区。"""
     update_overlay_mini("[switch] step3 select server")
     if idx < 0 or idx >= len(config.SERVER_COORDS):
-        async_push_msg("[switch] invalid server index", f"[switch] invalid server index: {idx}.")
+        if not suppress_failure_output:
+            async_push_msg("[switch] invalid server index", f"[switch] invalid server index: {idx}.")
         return False
 
     _log_switch_waits(
@@ -495,16 +560,18 @@ def _step03_select(camera, idx):
     if _match(camera, "qd", config.RGN_QD):
         return True
 
-    async_push_msg("[switch] server select failed", "[switch] qidong button not found after selecting server.")
+    if not suppress_failure_output:
+        async_push_msg("[switch] server select failed", "[switch] qidong button not found after selecting server.")
     return False
 
 
-def _step04_launch(camera):
+def _step04_launch(camera, suppress_failure_output=False):
     """步骤4：点击启动游戏。"""
     update_overlay_mini("[switch] step4 launch game")
     center = _wait_for_match_center(camera, "qd", config.RGN_QD, timeout=15)
     if center is None:
-        async_push_msg("[switch] qidong not found", "[switch] qidong button not found within 15 seconds.")
+        if not suppress_failure_output:
+            async_push_msg("[switch] qidong not found", "[switch] qidong button not found within 15 seconds.")
         return False
     fast_click(center)
     time.sleep(0.5)
@@ -512,12 +579,13 @@ def _step04_launch(camera):
     return True
 
 
-def _step05_space(camera):
+def _step05_space(camera, suppress_failure_output=False):
     """步骤5：处理启动弹窗。"""
     update_overlay_mini("[switch] step5 handle kongge")
     center = _wait_for_match_center(camera, "kg", config.RGN_KG, timeout=60)
     if center is None:
-        async_push_msg("[switch] kongge not found", "[switch] kongge popup not found within 60 seconds.")
+        if not suppress_failure_output:
+            async_push_msg("[switch] kongge not found", "[switch] kongge popup not found within 60 seconds.")
         return False
     time.sleep(1)
     fast_click(center)
@@ -527,7 +595,7 @@ def _step05_space(camera):
     return True
 
 
-def _step06_ads(camera):
+def _step06_ads(camera, suppress_failure_output=False):
     """步骤6：持续按 ESC 清理广告流程。"""
     update_overlay_mini("[switch] step6 clear ads")
     end = time.time() + 120
@@ -544,11 +612,12 @@ def _step06_ads(camera):
         if _confirm_white(camera):
             return True
 
-    async_push_msg("[switch] ads clear timeout", "[switch] failed to clear ads within 120 seconds.")
+    if not suppress_failure_output:
+        async_push_msg("[switch] ads clear timeout", "[switch] failed to clear ads within 120 seconds.")
     return False
 
 
-def _step07_gumu(camera):
+def _step07_gumu(camera, suppress_failure_output=False):
     """步骤7：传送到古墓大厅。"""
     update_overlay_mini("[switch] step7 gumu")
     if is_at_gumu(camera):
@@ -557,7 +626,8 @@ def _step07_gumu(camera):
     time.sleep(1)
 
     if not _wait_for(camera, "gumu", config.RGN_GUMU, timeout=30):
-        async_push_msg("[switch] gumu not reached", "[switch] gumu not reached within 30 seconds.")
+        if not suppress_failure_output:
+            async_push_msg("[switch] gumu not reached", "[switch] gumu not reached within 30 seconds.")
         return False
     return True
 
@@ -574,7 +644,7 @@ def _step08_gold(camera):
     return True
 
 
-def _step09_close(camera):
+def _step09_close(camera, suppress_failure_output=False):
     """步骤9：关闭面板并确认仍在古墓大厅。"""
     update_overlay_mini("[switch] step9 close panels")
     for _ in range(5):
@@ -586,7 +656,8 @@ def _step09_close(camera):
     time.sleep(1)
 
     if not _wait_for(camera, "gumu", config.RGN_GUMU, timeout=5):
-        async_push_msg("[switch] close panel failed", "[switch] gumu not visible after closing panels.")
+        if not suppress_failure_output:
+            async_push_msg("[switch] close panel failed", "[switch] gumu not visible after closing panels.")
         return False
     return True
 
@@ -663,164 +734,168 @@ def navigate_to_trade(camera):
     return _step10_trade(camera)
 
 
+def _run_thread6_resume_steps(camera):
+    resume_steps = [
+        ("启动游戏", lambda: _step04_launch(camera, suppress_failure_output=True), "未匹配到启动按钮或启动点击失败。"),
+        ("处理空格弹窗", lambda: _step05_space(camera, suppress_failure_output=True), "未匹配到空格弹窗或处理失败。"),
+        ("进入游戏场景", lambda: _step06_ads(camera, suppress_failure_output=True), "未能完成进入游戏场景前的页面清理。"),
+        ("确认古墓大厅", lambda: _step07_gumu(camera, suppress_failure_output=True), "未能进入或确认古墓大厅。"),
+        ("领取金币", lambda: _step08_gold(camera), "领取金币步骤执行失败。"),
+        ("关闭面板", lambda: _step09_close(camera, suppress_failure_output=True), "关闭面板后未能确认仍在古墓大厅。"),
+        ("返回交易行", lambda: _step10_trade(camera), "未能完成返回交易行步骤。"),
+    ]
+    for step_name, fn, detail in resume_steps:
+        if not _run_thread6_step(step_name, detail, fn):
+            return False
+    return True
+
+
 def switch_server_within_account_after_slot_boundary(camera, transition=None):
     """线程 6 小阶段：非 4/8 边界切到下一执行位并做昵称校验。"""
-    target = transition or resolve_execution_slot_transition(state.current_execution_slot)
-    if target is None or target["requires_account_switch"]:
-        return False
+    def _chain_impl():
+        target = transition or resolve_execution_slot_transition(state.current_execution_slot)
+        if target is None:
+            return pause_thread6_failure("解析目标执行位", "同账号跨区切换时未能解析下一目标执行位。")
+        if target["requires_account_switch"]:
+            return pause_thread6_failure("校验切换类型", "同账号跨区切换链路收到了需要跨账号切换的目标。")
 
-    set_overlay_mini("[switch] prepare boundary server switch")
-    print(
-        f"[switch] current slot={target['current_slot']}, "
-        f"next slot={target['next_slot']}, server_index={target['server_coord_index']}"
-    )
-    logger.info(
-        "[switch] current slot=%s next slot=%s server_index=%s",
-        target["current_slot"],
-        target["next_slot"],
-        target["server_coord_index"],
-    )
+        set_overlay_mini("[switch] prepare boundary server switch")
+        print(
+            f"[switch] current slot={target['current_slot']}, "
+            f"next slot={target['next_slot']}, server_index={target['server_coord_index']}"
+        )
+        logger.info(
+            "[switch] current slot=%s next slot=%s server_index=%s",
+            target["current_slot"],
+            target["next_slot"],
+            target["server_coord_index"],
+        )
 
-    if not _step01_exit(camera):
-        _pause_switch_flow("[switch] exit game failed", "[switch] failed before entering server switch flow.")
-        return False
-
-    if not _wait_for_boundary_start_qidong(camera):
-        return False
-
-    if not _step02_server_list(camera):
-        _pause_switch_flow("[switch] server list open failed", "[switch] failed to open server list before server switch.")
-        return False
-
-    if not _step03_select(camera, target["server_coord_index"]):
-        _pause_switch_flow("[switch] server select failed", "[switch] failed to select target server during boundary switch.")
-        return False
-
-    if not _verify_slot_nickname(camera, target["next_slot"]):
-        return False
-
-    resume_steps = [
-        ("step4 launch", lambda: _step04_launch(camera)),
-        ("step5 kongge", lambda: _step05_space(camera)),
-        ("step6 ads", lambda: _step06_ads(camera)),
-        ("step7 gumu", lambda: _step07_gumu(camera)),
-        ("step8 gold", lambda: _step08_gold(camera)),
-        ("step9 close", lambda: _step09_close(camera)),
-        ("step10 trade", lambda: _step10_trade(camera)),
-    ]
-    for name, fn in resume_steps:
-        logger.info("[switch] %s ...", name)
-        if not fn():
-            detail = f"[switch] failed during same-account boundary post-select flow: {name}."
-            print(detail)
-            logger.error(detail)
-            restore_overlay()
-            state.switch_flow_paused = True
-            state.switch_last_unknown_detail = detail
-            state.overlay_status = "未知异常"
-            if not state.IS_PAUSED:
-                toggle_pause()
+        if not _run_thread6_step("退出游戏", "未能在同账号跨区切换前完成退出游戏。", lambda: _step01_exit(camera)):
             return False
-        logger.info("[switch] %s done", name)
 
-    state.current_execution_slot = target["next_slot"]
-    state.current_server_index = target["server_coord_index"]
-    state.current_account_index = 0 if target["next_slot"] <= 4 else 1
-    state.current_nickname = str(target["next_slot"])
-    state.need_switch_server = False
-    state.switch_flow_paused = False
-    state.switch_last_unknown_detail = ""
-    restore_overlay()
-    print(
-        f"[switch] same-account boundary flow done: next slot={target['next_slot']} "
-        f"server_index={target['server_coord_index']} trade_ready=true"
-    )
-    logger.info(
-        "[switch] same-account boundary flow done: next slot=%s server_index=%s trade_ready=true",
-        target["next_slot"],
-        target["server_coord_index"],
-    )
-    return True
+        if not _run_thread6_step("返回启动页确认", "未能在同账号跨区切换前确认回到启动页。", lambda: _wait_for_boundary_start_qidong(camera)):
+            return False
+
+        if not _run_thread6_step(
+            "打开大区列表",
+            "未能在同账号跨区切换前打开大区列表。",
+            lambda: _step02_server_list(camera, suppress_failure_output=True),
+        ):
+            return False
+
+        if not _run_thread6_step(
+            "选择目标大区",
+            f"未能切换到目标执行位 {target['next_slot']} 对应的大区。",
+            lambda: _step03_select(camera, target["server_coord_index"], suppress_failure_output=True),
+        ):
+            return False
+
+        if not _run_thread6_step(
+            "昵称模板校验",
+            f"执行位 {target['next_slot']} 的昵称模板校验失败。",
+            lambda: _verify_slot_nickname(camera, target["next_slot"]),
+        ):
+            return False
+
+        if not _run_thread6_step("恢复进场链路", "同账号跨区切换后未能完成回到交易行的后续步骤。", lambda: _run_thread6_resume_steps(camera)):
+            return False
+
+        state.current_execution_slot = target["next_slot"]
+        state.current_server_index = target["server_coord_index"]
+        state.current_account_index = 0 if target["next_slot"] <= 4 else 1
+        state.current_nickname = str(target["next_slot"])
+        state.need_switch_server = False
+        state.switch_flow_paused = False
+        state.switch_last_unknown_detail = ""
+        restore_overlay()
+        print(
+            f"[switch] same-account boundary flow done: next slot={target['next_slot']} "
+            f"server_index={target['server_coord_index']} trade_ready=true"
+        )
+        logger.info(
+            "[switch] same-account boundary flow done: next slot=%s server_index=%s trade_ready=true",
+            target["next_slot"],
+            target["server_coord_index"],
+        )
+        return True
+
+    return _run_thread6_chain("同账号跨区切换链路", _chain_impl)
 
 
 def switch_account_after_slot_boundary(camera):
     """线程 6 小阶段：4/8 区结束后切号、选区并做昵称模板校验。"""
-    target = _resolve_switch_target(state.current_execution_slot)
-    if target is None:
-        return False
+    def _chain_impl():
+        target = _resolve_switch_target(state.current_execution_slot)
+        if target is None:
+            return pause_thread6_failure("解析目标执行位", "跨账号切换链路未能解析 4->5 或 8->1 的目标执行位。")
 
-    set_overlay_mini("[switch] prepare boundary account switch")
-    print(
-        f"[switch] current slot={target['current_slot']}, "
-        f"next slot={target['next_slot']}, account={target['account_id']}"
-    )
-    logger.info(
-        "[switch] current slot=%s next slot=%s account=%s",
-        target["current_slot"],
-        target["next_slot"],
-        target["account_id"],
-    )
+        set_overlay_mini("[switch] prepare boundary account switch")
+        print(
+            f"[switch] current slot={target['current_slot']}, "
+            f"next slot={target['next_slot']}, account={target['account_id']}"
+        )
+        logger.info(
+            "[switch] current slot=%s next slot=%s account=%s",
+            target["current_slot"],
+            target["next_slot"],
+            target["account_id"],
+        )
 
-    if not _step01_exit(camera):
-        _pause_switch_flow("[switch] exit game failed", "[switch] failed before entering account switch flow.")
-        return False
-
-    if not _wait_for_boundary_start_qidong(camera):
-        return False
-
-    if not _switch_account_for_slot(camera, target["account_id"]):
-        return False
-
-    if not _step02_server_list(camera):
-        _pause_switch_flow("[switch] server list open failed", "[switch] failed to open server list after account switch.")
-        return False
-
-    if not _step03_select(camera, target["server_coord_index"]):
-        _pause_switch_flow("[switch] server select failed", "[switch] failed to select target server after account switch.")
-        return False
-
-    if not _verify_slot_nickname(camera, target["next_slot"]):
-        return False
-
-    resume_steps = [
-        ("step4 launch", lambda: _step04_launch(camera)),
-        ("step5 kongge", lambda: _step05_space(camera)),
-        ("step6 ads", lambda: _step06_ads(camera)),
-        ("step7 gumu", lambda: _step07_gumu(camera)),
-        ("step8 gold", lambda: _step08_gold(camera)),
-        ("step9 close", lambda: _step09_close(camera)),
-        ("step10 trade", lambda: _step10_trade(camera)),
-    ]
-    for name, fn in resume_steps:
-        logger.info("[switch] %s ...", name)
-        if not fn():
-            detail = f"[switch] failed during boundary post-select flow: {name}."
-            print(detail)
-            logger.error(detail)
-            restore_overlay()
-            state.switch_flow_paused = True
-            state.switch_last_unknown_detail = detail
-            state.overlay_status = "未知异常"
-            if not state.IS_PAUSED:
-                toggle_pause()
+        if not _run_thread6_step("退出游戏", "未能在跨账号切换前完成退出游戏。", lambda: _step01_exit(camera)):
             return False
-        logger.info("[switch] %s done", name)
 
-    state.current_execution_slot = target["next_slot"]
-    state.current_server_index = target["server_coord_index"]
-    state.current_account_index = 0 if target["next_slot"] <= 4 else 1
-    state.current_nickname = str(target["next_slot"])
-    state.need_switch_server = False
-    state.switch_flow_paused = False
-    state.switch_last_unknown_detail = ""
-    restore_overlay()
-    print(
-        f"[switch] boundary flow done: next slot={target['next_slot']} "
-        f"account={target['account_id']} trade_ready=true"
-    )
-    logger.info(
-        "[switch] boundary flow done: next slot=%s account=%s trade_ready=true",
-        target["next_slot"],
-        target["account_id"],
-    )
-    return True
+        if not _run_thread6_step("返回启动页确认", "未能在跨账号切换前确认回到启动页。", lambda: _wait_for_boundary_start_qidong(camera)):
+            return False
+
+        if not _run_thread6_step(
+            "执行跨账号切换",
+            f"未能切换到账号 {target['account_id']}。",
+            lambda: _switch_account_for_slot(camera, target["account_id"]),
+        ):
+            return False
+
+        if not _run_thread6_step(
+            "打开大区列表",
+            "跨账号切换后未能打开大区列表。",
+            lambda: _step02_server_list(camera, suppress_failure_output=True),
+        ):
+            return False
+
+        if not _run_thread6_step(
+            "选择目标大区",
+            f"跨账号切换后未能切换到目标执行位 {target['next_slot']} 对应的大区。",
+            lambda: _step03_select(camera, target["server_coord_index"], suppress_failure_output=True),
+        ):
+            return False
+
+        if not _run_thread6_step(
+            "昵称模板校验",
+            f"执行位 {target['next_slot']} 的昵称模板校验失败。",
+            lambda: _verify_slot_nickname(camera, target["next_slot"]),
+        ):
+            return False
+
+        if not _run_thread6_step("恢复进场链路", "跨账号切换后未能完成回到交易行的后续步骤。", lambda: _run_thread6_resume_steps(camera)):
+            return False
+
+        state.current_execution_slot = target["next_slot"]
+        state.current_server_index = target["server_coord_index"]
+        state.current_account_index = 0 if target["next_slot"] <= 4 else 1
+        state.current_nickname = str(target["next_slot"])
+        state.need_switch_server = False
+        state.switch_flow_paused = False
+        state.switch_last_unknown_detail = ""
+        restore_overlay()
+        print(
+            f"[switch] boundary flow done: next slot={target['next_slot']} "
+            f"account={target['account_id']} trade_ready=true"
+        )
+        logger.info(
+            "[switch] boundary flow done: next slot=%s account=%s trade_ready=true",
+            target["next_slot"],
+            target["account_id"],
+        )
+        return True
+
+    return _run_thread6_chain("跨账号边界切换链路", _chain_impl)
