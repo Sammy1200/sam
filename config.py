@@ -110,6 +110,16 @@ EXECUTION_SLOT_NICKNAME_TEMPLATE_FILES = (
     "7.png",
     "8.png",
 )
+EXECUTION_SLOT_NEXT_SLOT_MAP = {
+    1: 2,
+    2: 3,
+    3: 4,
+    4: 5,
+    5: 6,
+    6: 7,
+    7: 8,
+    8: 1,
+}
 EXECUTION_SLOT_SWITCH_TARGETS = {
     4: 5,
     8: 1,

@@ -6,6 +6,8 @@ Public APIs:
   full_switch_server(camera, server_index)
   is_at_gumu(camera)
   navigate_to_trade(camera)
+  resolve_execution_slot_transition(current_execution_slot)
+  switch_server_within_account_after_slot_boundary(camera)
   switch_account_after_slot_boundary(camera)
 """
 
@@ -214,14 +216,14 @@ def _wait_for_boundary_start_qidong(camera):
     return False
 
 
-def _resolve_switch_target(current_execution_slot):
-    """根据当前执行位解析小阶段目标执行位。"""
+def resolve_execution_slot_transition(current_execution_slot):
+    """根据当前执行位解析下一目标执行位和切换类型。"""
     try:
         current_slot = int(current_execution_slot)
     except (TypeError, ValueError):
         return None
 
-    next_slot = config.EXECUTION_SLOT_SWITCH_TARGETS.get(current_slot)
+    next_slot = config.EXECUTION_SLOT_NEXT_SLOT_MAP.get(current_slot)
     if next_slot is None:
         return None
 
@@ -231,7 +233,16 @@ def _resolve_switch_target(current_execution_slot):
         "next_slot": next_slot,
         "account_id": config.EXECUTION_SLOT_ACCOUNT_IDS[slot_index],
         "server_coord_index": config.EXECUTION_SLOT_SERVER_COORD_INDEXES[slot_index],
+        "requires_account_switch": current_slot in config.EXECUTION_SLOT_SWITCH_TARGETS,
     }
+
+
+def _resolve_switch_target(current_execution_slot):
+    """根据当前执行位解析小阶段目标执行位。"""
+    target = resolve_execution_slot_transition(current_execution_slot)
+    if not target or not target["requires_account_switch"]:
+        return None
+    return target
 
 
 def _digits_only(value):
@@ -650,6 +661,86 @@ def is_at_gumu(camera):
 def navigate_to_trade(camera):
     """从古墓大厅前往交易行。"""
     return _step10_trade(camera)
+
+
+def switch_server_within_account_after_slot_boundary(camera, transition=None):
+    """线程 6 小阶段：非 4/8 边界切到下一执行位并做昵称校验。"""
+    target = transition or resolve_execution_slot_transition(state.current_execution_slot)
+    if target is None or target["requires_account_switch"]:
+        return False
+
+    set_overlay_mini("[switch] prepare boundary server switch")
+    print(
+        f"[switch] current slot={target['current_slot']}, "
+        f"next slot={target['next_slot']}, server_index={target['server_coord_index']}"
+    )
+    logger.info(
+        "[switch] current slot=%s next slot=%s server_index=%s",
+        target["current_slot"],
+        target["next_slot"],
+        target["server_coord_index"],
+    )
+
+    if not _step01_exit(camera):
+        _pause_switch_flow("[switch] exit game failed", "[switch] failed before entering server switch flow.")
+        return False
+
+    if not _wait_for_boundary_start_qidong(camera):
+        return False
+
+    if not _step02_server_list(camera):
+        _pause_switch_flow("[switch] server list open failed", "[switch] failed to open server list before server switch.")
+        return False
+
+    if not _step03_select(camera, target["server_coord_index"]):
+        _pause_switch_flow("[switch] server select failed", "[switch] failed to select target server during boundary switch.")
+        return False
+
+    if not _verify_slot_nickname(camera, target["next_slot"]):
+        return False
+
+    resume_steps = [
+        ("step4 launch", lambda: _step04_launch(camera)),
+        ("step5 kongge", lambda: _step05_space(camera)),
+        ("step6 ads", lambda: _step06_ads(camera)),
+        ("step7 gumu", lambda: _step07_gumu(camera)),
+        ("step8 gold", lambda: _step08_gold(camera)),
+        ("step9 close", lambda: _step09_close(camera)),
+        ("step10 trade", lambda: _step10_trade(camera)),
+    ]
+    for name, fn in resume_steps:
+        logger.info("[switch] %s ...", name)
+        if not fn():
+            detail = f"[switch] failed during same-account boundary post-select flow: {name}."
+            print(detail)
+            logger.error(detail)
+            restore_overlay()
+            state.switch_flow_paused = True
+            state.switch_last_unknown_detail = detail
+            state.overlay_status = "未知异常"
+            if not state.IS_PAUSED:
+                toggle_pause()
+            return False
+        logger.info("[switch] %s done", name)
+
+    state.current_execution_slot = target["next_slot"]
+    state.current_server_index = target["server_coord_index"]
+    state.current_account_index = 0 if target["next_slot"] <= 4 else 1
+    state.current_nickname = str(target["next_slot"])
+    state.need_switch_server = False
+    state.switch_flow_paused = False
+    state.switch_last_unknown_detail = ""
+    restore_overlay()
+    print(
+        f"[switch] same-account boundary flow done: next slot={target['next_slot']} "
+        f"server_index={target['server_coord_index']} trade_ready=true"
+    )
+    logger.info(
+        "[switch] same-account boundary flow done: next slot=%s server_index=%s trade_ready=true",
+        target["next_slot"],
+        target["server_coord_index"],
+    )
+    return True
 
 
 def switch_account_after_slot_boundary(camera):
