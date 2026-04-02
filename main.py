@@ -64,10 +64,11 @@ from overlay import shutdown_overlay, start_overlay, ui_print, update_score_text
 from listing import execute_listing_routine
 from purchase import run_purchase_loop, reset_purchase_counters
 from switch import (
+    detect_current_execution_slot_from_launcher,
     pause_thread6_failure,
     resolve_execution_slot_transition,
     switch_server_within_account_after_slot_boundary,
-    startup_from_launcher,
+    startup_from_server_list,
     switch_account_after_slot_boundary,
 )
 
@@ -216,13 +217,15 @@ def _prompt_main_mode():
     while True:
         print("\n" + "=" * 40)
         print(" 请选择启动方式：")
-        print(" [1] 从启动器开始（选区 -> 进游戏 -> 交易行）")
+        print(" [回车] 从启动器开始（自动识别昵称 -> 自动解析大区 -> 进游戏 -> 交易行）")
         print(" [2] 已在交易行，直接开始抢购")
         print("=" * 40)
-        choice = input("请输入选项编号: ").strip()
-        if choice in ("1", "2"):
+        choice = input("直接回车或输入选项: ").strip()
+        if choice == "":
+            return "launcher"
+        if choice == "2":
             return choice
-        print("请输入 1 或 2。")
+        print("请输入回车或 2。")
 
 
 def _prompt_current_nickname():
@@ -245,6 +248,62 @@ def _prompt_server_index():
         if 1 <= server_number <= server_count:
             return server_number - 1
         print(f"请输入 1 到 {server_count} 之间的大区编号。")
+
+
+def _resolve_server_index_from_execution_slot(execution_slot):
+    """根据执行位解析启动器应选中的大区索引。"""
+    try:
+        slot_number = int(execution_slot)
+    except (TypeError, ValueError):
+        return None
+
+    if slot_number < 1 or slot_number > len(config.EXECUTION_SLOT_SERVER_COORD_INDEXES):
+        return None
+
+    server_index = config.EXECUTION_SLOT_SERVER_COORD_INDEXES[slot_number - 1]
+    if 0 <= server_index < len(config.SERVER_COORDS):
+        return server_index
+    return None
+
+
+def _prepare_launcher_start_context_from_nickname():
+    """正常模式启动前，只按昵称读 SQLite 并自动推出执行位与大区。"""
+    if not _load_current_account_context():
+        return False
+
+    server_index = _resolve_server_index_from_execution_slot(state.current_execution_slot)
+    if server_index is None:
+        message = (
+            f"[启动] 昵称 {state.current_nickname} 对应的执行位 "
+            f"{state.current_execution_slot} 无法解析到有效大区。"
+        )
+        print(message)
+        logger.error(message)
+        state.overlay_status = "未知异常"
+        return False
+
+    state.current_server_index = server_index
+    ui_print(
+        f"启动信息已自动解析：昵称 {state.current_nickname}，"
+        f"执行位 {state.current_execution_slot}，大区 {server_index + 1}"
+    )
+    logger.info(
+        "[启动] 已按昵称自动解析执行位与大区：昵称=%s 执行位=%s 大区=%s",
+        state.current_nickname,
+        state.current_execution_slot,
+        server_index + 1,
+    )
+    return True
+
+
+def _prepare_default_launcher_start(camera):
+    """默认回车启动：先识别当前执行位，再按 SQLite 自动推出昵称与大区。"""
+    detected_slot = detect_current_execution_slot_from_launcher(camera)
+    if detected_slot is None:
+        return False
+
+    state.current_nickname = str(detected_slot)
+    return _prepare_launcher_start_context_from_nickname()
 
 
 def _format_account_time(value):
@@ -666,9 +725,6 @@ def _handle_execution_slot_dispatch(camera):
 
 def main():
     mode = _prompt_main_mode()
-    state.current_nickname = _prompt_current_nickname()
-    if mode == "1":
-        state.current_server_index = _prompt_server_index()
     start_overlay()
     try:
         if os.name == 'nt':
@@ -744,8 +800,11 @@ def main():
             return
 
         try:
-            if mode == "1":
-                if not _prepare_launcher_start(camera):
+            if mode == "launcher":
+                if not _prepare_default_launcher_start(camera):
+                    _pause_after_launcher_start_failure()
+                    return
+                if not startup_from_server_list(camera, state.current_server_index):
                     _pause_after_launcher_start_failure()
                     return
                 if not _run_pre_listing_flow(
@@ -756,6 +815,7 @@ def main():
                 ):
                     return
             else:
+                state.current_nickname = _prompt_current_nickname()
                 if not _run_direct_account_flow(camera):
                     return
 
