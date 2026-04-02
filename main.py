@@ -59,7 +59,7 @@ from round_persistence import (
 from utils import safe_sleep, safe_get_frame, safe_imread, fast_click, gc_checkpoint
 from utils import async_push_msg, logger
 from vision import is_image_present, load_digit_templates
-from overlay import shutdown_overlay, start_overlay, ui_print
+from overlay import shutdown_overlay, start_overlay, ui_print, update_score_text
 from listing import execute_listing_routine
 from purchase import run_purchase_loop, reset_purchase_counters
 from switch import (
@@ -326,6 +326,27 @@ def _set_account_state_defaults():
     state.account_limit_reached_at = None
 
 
+def _clear_runtime_state_after_account_finalize(reason):
+    """当前账号最终写库后，立刻清空悬浮窗与本号运行态。"""
+    previous_nickname = (state.current_nickname or "").strip() or "未设置"
+    previous_slot = state.current_execution_slot
+    _set_account_state_defaults()
+    state.current_nickname = ""
+
+    message = (
+        f"[账号数据] {reason}：当前账号最终写库完成，"
+        f"已清空悬浮窗与运行态数据。原昵称={previous_nickname}，执行位={previous_slot}"
+    )
+    print(message)
+    logger.info(message)
+
+    if state.overlay_root:
+        try:
+            state.overlay_root.after(0, update_score_text)
+        except Exception:
+            pass
+
+
 def _load_current_account_context():
     nickname = (state.current_nickname or "").strip()
     _set_account_state_defaults()
@@ -497,13 +518,17 @@ def _wait_until_account_ready():
     return True
 
 
-def _run_pre_listing_flow(camera):
+def _run_pre_listing_flow(camera, reset_runtime_before_listing=False):
     if not _load_current_account_context():
         return False
+    if reset_runtime_before_listing:
+        reset_round_runtime_state("换号后预上架前清空当前账号运行态")
+        reset_purchase_counters("换号后开始新账号流程")
     ui_print("开始执行预上架流程...")
     execute_listing_routine(camera)
-    reset_round_runtime_state("预上架完成")
-    reset_purchase_counters("上架完成")
+    if not reset_runtime_before_listing:
+        reset_round_runtime_state("预上架完成")
+        reset_purchase_counters("上架完成")
     return _wait_until_account_ready()
 
 
@@ -602,7 +627,7 @@ def _handle_execution_slot_dispatch(camera):
             if state.switch_flow_paused:
                 return "abort"
 
-        if not _run_pre_listing_flow(camera):
+        if not _run_pre_listing_flow(camera, reset_runtime_before_listing=True):
             if not state.switch_flow_paused:
                 pause_thread6_failure("切换后预上架衔接", "线程 6 切换完成后未能完成预上架与账号状态衔接。")
             return "abort"
@@ -728,6 +753,7 @@ def main():
                 if not state.need_switch_server:
                     break
 
+                _clear_runtime_state_after_account_finalize("换号前移清理")
                 dispatch_action = _handle_execution_slot_dispatch(camera)
                 if dispatch_action == "continue":
                     continue
