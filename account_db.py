@@ -884,6 +884,18 @@ def find_canonical_account_stats_store(table_name=CANONICAL_ACCOUNT_STATS_TABLE)
     return None, table_name
 
 
+def ensure_local_canonical_account_stats_store(
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+):
+    """确保默认本地账号库存在，并补齐 canonical 表与执行位种子记录。"""
+    database_path = ACCOUNT_STATS_DB_PATH
+    inserted_seed_records = ensure_canonical_execution_slot_seed_records(
+        database_path,
+        table_name,
+    )
+    return database_path, table_name, inserted_seed_records
+
+
 def read_canonical_account_stats_record(
     database_path,
     nickname,
