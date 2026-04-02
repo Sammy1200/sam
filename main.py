@@ -218,7 +218,7 @@ def _prompt_main_mode():
         print("\n" + "=" * 40)
         print(" 请选择启动方式：")
         print(" [回车] 从启动器开始（自动识别昵称 -> 自动解析大区 -> 进游戏 -> 交易行）")
-        print(" [2] 已在交易行，直接开始抢购")
+        print(" [2] 已在交易行，临时抢购模式")
         print("=" * 40)
         choice = input("直接回车或输入选项: ").strip()
         if choice == "":
@@ -228,12 +228,18 @@ def _prompt_main_mode():
         print("请输入回车或 2。")
 
 
-def _prompt_current_nickname():
+def _prompt_temporary_item_count():
     while True:
-        nickname = input("请输入当前账号昵称: ").strip()
-        if nickname:
-            return nickname
-        print("昵称不能为空。")
+        raw = input("请输入本号当前道具数量: ").strip()
+        try:
+            item_count = int(raw)
+        except ValueError:
+            print("请输入大于等于 0 的整数。")
+            continue
+        if item_count < 0:
+            print("请输入大于等于 0 的整数。")
+            continue
+        return item_count
 
 
 def _prompt_server_index():
@@ -384,6 +390,25 @@ def _set_account_state_defaults():
     state.account_round_writeback_failed = False
     state.account_round_writeback_error = ""
     state.account_limit_reached_at = None
+    state.temporary_purchase_mode = False
+
+
+def _prepare_temporary_purchase_context(item_count):
+    """线程10B：临时模式只初始化运行态，不读取账号库。"""
+    _set_account_state_defaults()
+    state.temporary_purchase_mode = True
+    state.need_switch_server = False
+    state.current_nickname = "临时模式"
+    state.current_execution_slot = None
+    state.baseline_item_count = item_count
+    state.account_allow_purchase = True
+    state.account_is_waiting = False
+    state.overlay_status = "临时抢购中"
+    reset_round_runtime_state("进入临时抢购模式")
+    reset_purchase_counters("进入临时抢购模式")
+    ui_print(f"临时抢购模式已启动，道具数量起点：{item_count}", save_log=True)
+    print(f"[临时模式] 已启动，道具数量起点={item_count}")
+    logger.info("[临时模式] 已启动，道具数量起点=%s", item_count)
 
 
 def _clear_runtime_state_after_account_finalize(reason):
@@ -642,6 +667,8 @@ def _pause_after_launcher_start_failure():
 
 
 def _finalize_current_account_round(default_status):
+    if state.temporary_purchase_mode:
+        return True
     if not state.account_record_loaded and state.account_read_status == "":
         return True
     _freeze_purchase_timer()
@@ -815,9 +842,22 @@ def main():
                 ):
                     return
             else:
-                state.current_nickname = _prompt_current_nickname()
-                if not _run_direct_account_flow(camera):
-                    return
+                item_count = _prompt_temporary_item_count()
+                ui_print("临时抢购模式将在 2 秒后启动...")
+                safe_sleep(2.0)
+                _prepare_temporary_purchase_context(item_count)
+                ui_print("开始执行预上架流程...")
+                execute_listing_routine(camera)
+                run_purchase_loop(
+                    camera,
+                    templates,
+                    temp_success,
+                    temp_shop,
+                    temp_goumai,
+                    temp_meihuo,
+                    temp_diyici,
+                )
+                return
 
             while True:
                 state.need_switch_server = False

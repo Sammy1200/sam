@@ -9,6 +9,7 @@ import time
 import requests
 
 import state
+from account_db import compute_item_quantity
 from config import (
     ACCOUNT_LIMIT_THRESHOLD,
     BUY_POS,
@@ -291,6 +292,20 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                             state.unknown_page_count = 0
                             ui_print(f"🔄 店铺空置 ({state.limit_count}/{ACCOUNT_LIMIT_THRESHOLD})", is_replace=True)
                             if state.limit_count >= ACCOUNT_LIMIT_THRESHOLD:
+                                if state.temporary_purchase_mode:
+                                    estimated_total = compute_item_quantity(
+                                        state.baseline_item_count,
+                                        state.round_purchase_success_count,
+                                        state.round_listing_success_count,
+                                    )
+                                    state.account_round_end_status = "临时账号限制"
+                                    state.overlay_status = "临时账号限制"
+                                    async_push_msg(
+                                        "【临时账号限制】停止抢购",
+                                        f"连续多次店铺为空，已停止临时模式。道具推算后的总数：{estimated_total}",
+                                    )
+                                    state.need_switch_server = False
+                                    return
                                 state.account_round_end_status = "账号限制"
                                 state.overlay_status = "账号限制"
                                 async_push_msg("【账号被限】准备切换大区", "连续多次店铺为空，触发自动切号。")
