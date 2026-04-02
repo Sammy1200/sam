@@ -961,6 +961,72 @@ def read_canonical_account_stats_record_by_execution_slot(
         conn.close()
 
 
+def _is_execution_slot_seed_nickname(nickname, execution_slot):
+    """识别执行位自动建档生成的种子昵称，避免误当成真实账号记录。"""
+    normalized_nickname = str(nickname or "").strip()
+    try:
+        slot_value = int(execution_slot)
+    except (TypeError, ValueError):
+        return False
+
+    if not normalized_nickname:
+        return True
+    if normalized_nickname == str(slot_value):
+        return True
+    if normalized_nickname == f"slot_{slot_value}":
+        return True
+    if normalized_nickname.startswith(f"slot_{slot_value}_"):
+        return True
+    return False
+
+
+def read_preferred_canonical_account_stats_record_by_execution_slot(
+    database_path,
+    execution_slot,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+):
+    """按执行位优先读取真实账号记录，只有缺失时才回退到执行位种子记录。"""
+    if not database_path or not os.path.isfile(database_path):
+        return None
+
+    try:
+        slot_value = int(execution_slot)
+    except (TypeError, ValueError):
+        return None
+
+    try:
+        conn = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _canonical_table_exists(conn, table_name):
+            return None
+        rows = conn.execute(
+            f"SELECT {', '.join(_quote_identifier(name) for name in CANONICAL_ACCOUNT_STATS_COLUMNS)} "
+            f"FROM {_quote_identifier(table_name)} "
+            f"WHERE {_quote_identifier('current_execution_slot')} = ? "
+            f"ORDER BY {_quote_identifier('updated_at')} DESC, {_quote_identifier('nickname')}",
+            (slot_value,),
+        ).fetchall()
+        if not rows:
+            return None
+
+        seed_fallback_row = None
+        for row in rows:
+            nickname = str(row["nickname"] or "").strip()
+            if _is_execution_slot_seed_nickname(nickname, slot_value):
+                if seed_fallback_row is None:
+                    seed_fallback_row = row
+                continue
+            return _row_to_account_stats_record(row)
+
+        return _row_to_account_stats_record(seed_fallback_row)
+    finally:
+        conn.close()
+
+
 def save_canonical_account_stats_record(
     database_path,
     record,

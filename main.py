@@ -47,6 +47,7 @@ from account_db import (
     ensure_local_canonical_account_stats_store,
     find_canonical_account_stats_store,
     normalize_canonical_round_status_values,
+    read_preferred_canonical_account_stats_record_by_execution_slot,
     read_canonical_account_stats_record,
     read_canonical_account_stats_record_by_execution_slot,
 )
@@ -257,7 +258,7 @@ def _parse_slot_from_nickname_hint(nickname):
     if not raw.isdigit():
         return None
     slot_number = int(raw)
-    if 1 <= slot_number <= len(config.EXECUTION_SLOT_ACCOUNT_IDS):
+    if 1 <= slot_number <= int(config.EXECUTION_SLOT_COUNT):
         return slot_number
     return None
 
@@ -391,26 +392,45 @@ def _load_current_account_context():
         print(f"[账号数据] 已归一旧 round_status 样本数据：{normalized_count} 条")
         logger.info("[账号数据] 已归一旧 round_status 样本数据：%s 条", normalized_count)
 
-    record = read_canonical_account_stats_record(database_path, nickname, table_name)
-    if record is None:
-        slot_hint = _parse_slot_from_nickname_hint(nickname)
-        if slot_hint is not None:
-            record = read_canonical_account_stats_record_by_execution_slot(
-                database_path,
-                slot_hint,
-                table_name,
+    slot_hint = _parse_slot_from_nickname_hint(nickname)
+    record = None
+    if slot_hint is not None:
+        record = read_preferred_canonical_account_stats_record_by_execution_slot(
+            database_path,
+            slot_hint,
+            table_name,
+        )
+        if record is not None:
+            print(
+                f"[账号数据] 数字昵称 {nickname} 已按执行位 {slot_hint} "
+                f"优先读取为昵称 {record.nickname}。"
             )
-            if record is not None:
-                print(
-                    f"[账号数据] 昵称 {nickname} 未直接命中，已按执行位 {slot_hint} "
-                    f"兼容读取为昵称 {record.nickname}。"
-                )
-                logger.info(
-                    "[账号数据] 昵称 %s 未直接命中，已按执行位 %s 兼容读取为昵称 %s。",
-                    nickname,
-                    slot_hint,
-                    record.nickname,
-                )
+            logger.info(
+                "[账号数据] 数字昵称 %s 已按执行位 %s 优先读取为昵称 %s。",
+                nickname,
+                slot_hint,
+                record.nickname,
+            )
+
+    if record is None:
+        record = read_canonical_account_stats_record(database_path, nickname, table_name)
+    if record is None and slot_hint is not None:
+        record = read_canonical_account_stats_record_by_execution_slot(
+            database_path,
+            slot_hint,
+            table_name,
+        )
+        if record is not None:
+            print(
+                f"[账号数据] 昵称 {nickname} 未直接命中，已按执行位 {slot_hint} "
+                f"兼容读取为昵称 {record.nickname}。"
+            )
+            logger.info(
+                "[账号数据] 昵称 %s 未直接命中，已按执行位 %s 兼容读取为昵称 %s。",
+                nickname,
+                slot_hint,
+                record.nickname,
+            )
     if record is None:
         state.account_read_status = "account_not_found"
         state.account_read_error = f"SQLite 中未找到昵称为 {nickname} 的账号记录。"
@@ -518,17 +538,19 @@ def _wait_until_account_ready():
     return True
 
 
-def _run_pre_listing_flow(camera, reset_runtime_before_listing=False):
+def _run_pre_listing_flow(
+    camera,
+    reset_runtime_before_listing=False,
+    reset_reason="预上架前清空当前账号运行态",
+    purchase_reset_reason="开始当前账号流程",
+):
     if not _load_current_account_context():
         return False
     if reset_runtime_before_listing:
-        reset_round_runtime_state("换号后预上架前清空当前账号运行态")
-        reset_purchase_counters("换号后开始新账号流程")
+        reset_round_runtime_state(reset_reason)
+        reset_purchase_counters(purchase_reset_reason)
     ui_print("开始执行预上架流程...")
     execute_listing_routine(camera)
-    if not reset_runtime_before_listing:
-        reset_round_runtime_state("预上架完成")
-        reset_purchase_counters("上架完成")
     return _wait_until_account_ready()
 
 
@@ -537,12 +559,12 @@ def _run_direct_account_flow(camera):
         return False
     if not state.account_allow_purchase:
         ui_print("当前账号未到允许抢购时间，先执行预上架流程...")
-        execute_listing_routine(camera)
-        reset_round_runtime_state("mode2 冷却等待前上架完成")
-        reset_purchase_counters("上架完成")
-        print(f"[账号数据] 上架完成，当前时刻={_format_account_time(datetime.now())}，计时器状态：{_format_timer_state()}")
-        logger.info("[账号数据] 上架完成，当前时刻=%s，计时器状态：%s", _format_account_time(datetime.now()), _format_timer_state())
-        return _wait_until_account_ready()
+        return _run_pre_listing_flow(
+            camera,
+            reset_runtime_before_listing=True,
+            reset_reason="冷却等待前预上架清空当前账号运行态",
+            purchase_reset_reason="冷却等待前开始当前账号流程",
+        )
     reset_round_runtime_state("已加载当前账号")
     return _wait_until_account_ready()
 
@@ -627,7 +649,12 @@ def _handle_execution_slot_dispatch(camera):
             if state.switch_flow_paused:
                 return "abort"
 
-        if not _run_pre_listing_flow(camera, reset_runtime_before_listing=True):
+        if not _run_pre_listing_flow(
+            camera,
+            reset_runtime_before_listing=True,
+            reset_reason="换号后预上架前清空当前账号运行态",
+            purchase_reset_reason="换号后开始新账号流程",
+        ):
             if not state.switch_flow_paused:
                 pause_thread6_failure("切换后预上架衔接", "线程 6 切换完成后未能完成预上架与账号状态衔接。")
             return "abort"
@@ -721,7 +748,12 @@ def main():
                 if not _prepare_launcher_start(camera):
                     _pause_after_launcher_start_failure()
                     return
-                if not _run_pre_listing_flow(camera):
+                if not _run_pre_listing_flow(
+                    camera,
+                    reset_runtime_before_listing=True,
+                    reset_reason="启动后预上架前清空当前账号运行态",
+                    purchase_reset_reason="启动后开始当前账号流程",
+                ):
                     return
             else:
                 if not _run_direct_account_flow(camera):
