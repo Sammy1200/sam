@@ -555,6 +555,46 @@ def _verify_slot_nickname(camera, slot_number):
     )
 
 
+def _detect_slot_nickname_once(camera):
+    """在昵称校验区域内扫描当前命中的执行位模板。"""
+    for slot_number in range(1, int(config.EXECUTION_SLOT_COUNT) + 1):
+        template, _ = _load_nickname_template(slot_number)
+        if template is None:
+            continue
+        if _match_image(
+            camera,
+            template,
+            config.NICKNAME_VERIFY_REGION,
+            threshold=config.NICKNAME_MATCH_THRESHOLD,
+        ):
+            return slot_number
+    return None
+
+
+def detect_current_execution_slot_from_launcher(camera):
+    """启动入口：进入选区页后，复用线程6昵称模板链路识别当前执行位。"""
+    update_overlay_mini("[启动] 识别当前昵称")
+    if not _step02_server_list(camera, suppress_failure_output=True):
+        print("[启动] 未能进入启动器选区页，无法识别当前昵称。")
+        logger.error("[启动] 未能进入启动器选区页，无法识别当前昵称。")
+        return None
+
+    print("[启动] 已进入选区页，开始识别当前昵称模板。")
+    logger.info("[启动] 已进入选区页，开始识别当前昵称模板。")
+    end = time.time() + config.SWITCH_NICKNAME_VERIFY_TIMEOUT_SECONDS
+    while time.time() < end:
+        slot_number = _detect_slot_nickname_once(camera)
+        if slot_number is not None:
+            print(f"[启动] 已识别当前执行位：{slot_number}")
+            logger.info("[启动] 已识别当前执行位：%s", slot_number)
+            return slot_number
+        safe_sleep(0.5)
+
+    print("[启动] 当前昵称模板识别失败，未匹配到任何执行位模板。")
+    logger.error("[启动] 当前昵称模板识别失败，未匹配到任何执行位模板。")
+    return None
+
+
 def _step01_exit(camera):
     """步骤1：ALT+F4 并确认退出。"""
     update_overlay_mini("[switch] step1 exit game")
@@ -757,13 +797,15 @@ def _step10_trade(camera):
     return True
 
 
-def startup_from_launcher(camera, server_index):
+def _run_startup_from_launcher(camera, server_index, skip_open_server_list=False):
     """执行从启动器到交易行的完整流程。"""
     set_overlay_mini("[switch] prepare launcher flow")
     state.current_server_index = server_index
 
-    steps = [
-        ("step2 open server list", lambda: _step02_server_list(camera)),
+    steps = []
+    if not skip_open_server_list:
+        steps.append(("step2 open server list", lambda: _step02_server_list(camera)))
+    steps.extend([
         ("step3 select server", lambda: _step03_select(camera, server_index)),
         ("step4 launch", lambda: _step04_launch(camera)),
         ("step5 kongge", lambda: _step05_space(camera)),
@@ -772,7 +814,7 @@ def startup_from_launcher(camera, server_index):
         ("step8 gold", lambda: _step08_gold(camera)),
         ("step9 close", lambda: _step09_close(camera)),
         ("step10 trade", lambda: _step10_trade(camera)),
-    ]
+    ])
 
     for name, fn in steps:
         logger.info("[switch] %s ...", name)
@@ -784,6 +826,16 @@ def startup_from_launcher(camera, server_index):
 
     logger.info("[switch] server %s ready", server_index + 1)
     return True
+
+
+def startup_from_launcher(camera, server_index):
+    """执行从启动器到交易行的完整流程。"""
+    return _run_startup_from_launcher(camera, server_index, skip_open_server_list=False)
+
+
+def startup_from_server_list(camera, server_index):
+    """已位于选区页时，继续执行后续启动链路。"""
+    return _run_startup_from_launcher(camera, server_index, skip_open_server_list=True)
 
 
 def full_switch_server(camera, server_index):
