@@ -80,16 +80,6 @@ EXECUTION_SLOT_NICKNAMES = (
     "",
     "",
 )
-EXECUTION_SLOT_ACCOUNT_IDS = (
-    "88078011",
-    "88078011",
-    "88078011",
-    "88078011",
-    "2536158225",
-    "2536158225",
-    "2536158225",
-    "2536158225",
-)
 EXECUTION_SLOT_SERVER_COORD_INDEXES = (
     0,
     1,
@@ -126,6 +116,8 @@ EXECUTION_SLOT_SWITCH_TARGETS = {
 }
 THREAD6_RUNTIME_DB_PATH = os.path.join(SCRIPT_DIR, "thread6_runtime.sqlite3")
 ACCOUNT_STATS_DB_PATH = os.path.join(SCRIPT_DIR, "account_stats.sqlite3")
+LOCAL_SWITCH_ACCOUNT_CONFIG_PATH = os.path.join(SCRIPT_DIR, "local_switch_account_config.json")
+LOCAL_SWITCH_ACCOUNT_CONFIG_EXAMPLE_PATH = os.path.join(SCRIPT_DIR, "local_switch_account_config.example.json")
 SWITCH_STEP_MAX_RETRY = 3
 
 # ========= 换区/换号相关 =========
