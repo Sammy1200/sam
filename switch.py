@@ -21,6 +21,7 @@ import pyautogui
 
 import config
 import state
+from local_switch_account_config import load_boundary_switch_accounts
 from overlay import toggle_pause
 from utils import (
     async_push_msg,
@@ -52,6 +53,7 @@ _TPL_FILES = {
     "heping": "hepingjingying.png",
     "shoucan": "shoucan.png",
 }
+_BOUNDARY_SWITCH_ACCOUNTS_CACHE = None
 
 
 def _tpl(key):
@@ -303,6 +305,20 @@ def _wait_for_boundary_start_qidong(camera):
     )
 
 
+def _get_boundary_switch_accounts():
+    """读取并缓存 4 区后 / 8 区后的本机换号账号配置。"""
+    global _BOUNDARY_SWITCH_ACCOUNTS_CACHE
+
+    if _BOUNDARY_SWITCH_ACCOUNTS_CACHE is None:
+        accounts, source_path = load_boundary_switch_accounts()
+        _BOUNDARY_SWITCH_ACCOUNTS_CACHE = accounts
+        message = f"[线程6] 已加载本机换号配置：{os.path.basename(source_path)}"
+        print(message)
+        logger.info(message)
+
+    return _BOUNDARY_SWITCH_ACCOUNTS_CACHE
+
+
 def resolve_execution_slot_transition(current_execution_slot):
     """根据当前执行位解析下一目标执行位和切换类型。"""
     try:
@@ -315,12 +331,25 @@ def resolve_execution_slot_transition(current_execution_slot):
         return None
 
     slot_index = next_slot - 1
+    requires_account_switch = current_slot in config.EXECUTION_SLOT_SWITCH_TARGETS
+    account_id = None
+    config_error = ""
+
+    if requires_account_switch:
+        try:
+            account_id = _get_boundary_switch_accounts().get(current_slot)
+        except Exception as exc:
+            config_error = f"本机换号配置读取失败：{exc}"
+        if not config_error and not account_id:
+            config_error = f"本机换号配置缺少执行位 {current_slot} 的换号账号。"
+
     return {
         "current_slot": current_slot,
         "next_slot": next_slot,
-        "account_id": config.EXECUTION_SLOT_ACCOUNT_IDS[slot_index],
+        "account_id": account_id,
         "server_coord_index": config.EXECUTION_SLOT_SERVER_COORD_INDEXES[slot_index],
-        "requires_account_switch": current_slot in config.EXECUTION_SLOT_SWITCH_TARGETS,
+        "requires_account_switch": requires_account_switch,
+        "config_error": config_error,
     }
 
 
@@ -882,6 +911,8 @@ def switch_account_after_slot_boundary(camera):
         target = _resolve_switch_target(state.current_execution_slot)
         if target is None:
             return pause_thread6_failure("解析目标执行位", "跨账号切换链路未能解析 4->5 或 8->1 的目标执行位。")
+        if target.get("config_error"):
+            return pause_thread6_failure("读取本机换号配置", target["config_error"])
 
         set_overlay_mini("[switch] prepare boundary account switch")
         print(

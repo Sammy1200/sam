@@ -8,3 +8,4 @@ thread6_runtime.sqlite3
 account_stats.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
+local_switch_account_config.json
