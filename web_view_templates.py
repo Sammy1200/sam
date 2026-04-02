@@ -42,6 +42,7 @@ def _render_kv_table(items):
 def _render_health_summary(health):
     items = [
         ("存在重复 execution_slot", health.get("has_duplicate_execution_slots")),
+        ("存在缺失 execution_slot", health.get("has_missing_execution_slots")),
         ("存在关键字段缺失", health.get("has_missing_critical_fields")),
         ("runtime 快照存在", health.get("runtime_snapshot_exists")),
         ("runtime 命中 canonical", health.get("runtime_matched_canonical_record")),
@@ -58,12 +59,41 @@ def _render_health_summary(health):
     return _render_kv_table(items)
 
 
+def _render_source_notice():
+    return """
+<div class="notice">
+  <strong>数据来源说明：</strong>
+  canonical account_stats 是主数据源；thread6_runtime_state 只是辅助快照；
+  两者不能混用，页面中的 runtime 信息仅用于辅助对照。
+</div>
+"""
+
+
+def _render_read_only_notice():
+    return """
+<div class="readonly-notice">
+  <strong>当前页面为只读查看页：</strong>
+  仅支持 GET 查看，不提供编辑、写入、提交或自动刷新能力。
+</div>
+"""
+
+
+def _render_execution_slot_summary(health):
+    items = [
+        ("present_execution_slots", health.get("present_execution_slots")),
+        ("missing_execution_slots", health.get("missing_execution_slots")),
+    ]
+    return _render_kv_table(items)
+
+
 def _base_page(title, body_html):
     style = """
     body { font-family: "Microsoft YaHei", sans-serif; margin: 24px; color: #1f2328; background: #f7f8fa; }
     h1, h2 { margin: 0 0 12px 0; }
     .section { background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
     .meta { color: #59636e; margin-bottom: 12px; }
+    .readonly-notice { background: #ddf4ff; border: 1px solid #54aeff; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; line-height: 1.6; }
+    .notice { background: #fff8c5; border: 1px solid #d4a72c; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; line-height: 1.6; }
     table { width: 100%; border-collapse: collapse; }
     th, td { border: 1px solid #d8dee4; padding: 8px 10px; text-align: left; vertical-align: top; }
     th { background: #f3f4f6; }
@@ -82,6 +112,29 @@ def _base_page(title, body_html):
 {body_html}
 </body>
 </html>"""
+
+
+def render_message_page(title, message, detail_items=None, back_href="/", back_label="返回首页"):
+    detail_html = ""
+    if detail_items:
+        detail_html = f"""
+<div class="section">
+  <h2>说明</h2>
+  {_render_kv_table(detail_items)}
+</div>
+"""
+
+    body_html = f"""
+<h1>{escape(title)}</h1>
+{_render_read_only_notice()}
+{_render_source_notice()}
+<div class="section">
+  <p>{escape(message)}</p>
+  <p><a href="{escape(back_href, quote=True)}">{escape(back_label)}</a></p>
+</div>
+{detail_html}
+"""
+    return _base_page(title, body_html)
 
 
 def render_index_page(view_rows_result, runtime_result):
@@ -134,6 +187,8 @@ def render_index_page(view_rows_result, runtime_result):
 
     body_html = f"""
 <h1>SQLite 只读查看层</h1>
+{_render_read_only_notice()}
+{_render_source_notice()}
 <div class="meta">
   canonical 库：<code>{escape(str(view_rows_result.get("database_path") or ""))}</code><br>
   生成时间：{_format_value(view_rows_result.get("generated_at"))}
@@ -142,6 +197,11 @@ def render_index_page(view_rows_result, runtime_result):
 <div class="section">
   <h2>Health 体检摘要</h2>
   {_render_health_summary(health)}
+</div>
+
+<div class="section">
+  <h2>execution_slot 覆盖情况</h2>
+  {_render_execution_slot_summary(health)}
 </div>
 
 <div class="section">
@@ -176,12 +236,15 @@ def render_account_detail_page(detail_result, runtime_result):
     if record is None:
         body_html = f"""
 <h1>账号详情</h1>
+{_render_read_only_notice()}
+{_render_source_notice()}
 <div class="meta">
   查询条件：nickname={_format_value(lookup.get("nickname"))}，
   execution_slot={_format_value(lookup.get("execution_slot"))}
 </div>
 <div class="section">
-  <p>未找到对应账号记录。</p>
+  <p>未根据当前查询条件找到对应账号记录。</p>
+  <p>请返回首页重新选择，或确认 nickname / execution_slot 是否填写正确。</p>
   <p><a href="/">返回首页</a></p>
 </div>
 """
@@ -225,6 +288,8 @@ def render_account_detail_page(detail_result, runtime_result):
 
     body_html = f"""
 <h1>账号详情</h1>
+{_render_read_only_notice()}
+{_render_source_notice()}
 <div class="meta">
   canonical 库：<code>{escape(str(detail_result.get("database_path") or ""))}</code><br>
   查询条件：nickname={_format_value(lookup.get("nickname"))}，
