@@ -230,7 +230,7 @@ def execute_listing_routine(camera_obj, is_periodic=False):
     except Exception as e:
         ui_print(f"❌ 上架过程出现意外报错: {e}")
     finally:
-        if is_periodic:
+        if is_periodic and not state.temporary_purchase_mode:
             persist_result = persist_lightweight_round_snapshot()
             if persist_result.status != "success":
                 ui_print(f"SQLite 轻量落库失败: {persist_result.reason}", save_log=True)
