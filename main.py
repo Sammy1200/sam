@@ -44,6 +44,7 @@ from config import (
 from account_db import (
     CANONICAL_ACCOUNT_STATS_TABLE,
     ensure_canonical_execution_slot_seed_records,
+    ensure_local_canonical_account_stats_store,
     find_canonical_account_stats_store,
     normalize_canonical_round_status_values,
     read_canonical_account_stats_record,
@@ -340,14 +341,18 @@ def _load_current_account_context():
 
     database_path, table_name = find_canonical_account_stats_store()
     if not database_path:
-        state.account_read_status = "db_unavailable"
-        state.account_read_error = (
-            f"未找到包含 {CANONICAL_ACCOUNT_STATS_TABLE} 表的本地 SQLite 文件。"
-        )
-        state.overlay_status = "未知异常"
-        print(f"[账号数据] 读取失败：{state.account_read_error}")
-        logger.error(f"[账号数据] 读取失败：{state.account_read_error}")
-        return False
+        database_path, table_name, inserted_seed_records = ensure_local_canonical_account_stats_store()
+        print(f"[账号数据] 未找到现成账号库，已自动初始化本地 SQLite：{database_path}")
+        logger.info("[账号数据] 未找到现成账号库，已自动初始化本地 SQLite：%s", database_path)
+        if inserted_seed_records:
+            inserted_slots = ",".join(str(record.current_execution_slot) for record in inserted_seed_records)
+            inserted_nicknames = ",".join(record.nickname for record in inserted_seed_records)
+            print(f"[账号数据] 初始化时已补齐执行位建档：执行位={inserted_slots}，昵称={inserted_nicknames}")
+            logger.info(
+                "[账号数据] 初始化时已补齐执行位建档：执行位=%s 昵称=%s",
+                inserted_slots,
+                inserted_nicknames,
+            )
 
     inserted_seed_records = ensure_canonical_execution_slot_seed_records(database_path, table_name)
     if inserted_seed_records:
