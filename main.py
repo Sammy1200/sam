@@ -43,6 +43,7 @@ from config import (
 )
 from account_db import (
     CANONICAL_ACCOUNT_STATS_TABLE,
+    ensure_canonical_execution_slot_seed_records,
     find_canonical_account_stats_store,
     normalize_canonical_round_status_values,
     read_canonical_account_stats_record,
@@ -347,6 +348,17 @@ def _load_current_account_context():
         print(f"[账号数据] 读取失败：{state.account_read_error}")
         logger.error(f"[账号数据] 读取失败：{state.account_read_error}")
         return False
+
+    inserted_seed_records = ensure_canonical_execution_slot_seed_records(database_path, table_name)
+    if inserted_seed_records:
+        inserted_slots = ",".join(str(record.current_execution_slot) for record in inserted_seed_records)
+        inserted_nicknames = ",".join(record.nickname for record in inserted_seed_records)
+        print(f"[账号数据] 已自动补齐缺失建档：执行位={inserted_slots}，昵称={inserted_nicknames}")
+        logger.info(
+            "[账号数据] 已自动补齐缺失建档：执行位=%s 昵称=%s",
+            inserted_slots,
+            inserted_nicknames,
+        )
 
     normalized_count = normalize_canonical_round_status_values(database_path, table_name)
     if normalized_count > 0:
