@@ -9,7 +9,11 @@ from account_view_repo import (
     get_account_view_rows,
     get_runtime_snapshot,
 )
-from web_view_templates import render_account_detail_page, render_index_page
+from web_view_templates import (
+    render_account_detail_page,
+    render_index_page,
+    render_message_page,
+)
 
 
 HOST = "127.0.0.1"
@@ -48,18 +52,71 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         self._send_html(html)
 
     def _handle_account(self, query):
-        nickname = (query.get("nickname") or [""])[0]
-        execution_slot_raw = (query.get("execution_slot") or [""])[0]
+        nickname = ((query.get("nickname") or [""])[0] or "").strip()
+        execution_slot_raw = ((query.get("execution_slot") or [""])[0] or "").strip()
+
+        if not nickname and not execution_slot_raw:
+            html = render_message_page(
+                title="账号详情只读页",
+                message="当前访问缺少必要参数，无法定位账号详情。",
+                detail_items=[
+                    ("访问限制", "该页面只读，且需要通过 nickname 或 execution_slot 指定账号"),
+                    ("建议访问方式", "请从首页点击“查看详情”，或在地址中传入 ?nickname=昵称 / ?execution_slot=执行位"),
+                ],
+            )
+            self._send_html(html, status_code=400)
+            return
+
         try:
             execution_slot = int(execution_slot_raw) if execution_slot_raw.strip() else None
         except ValueError:
-            execution_slot = None
+            html = render_message_page(
+                title="账号详情只读页",
+                message="execution_slot 参数格式不正确，必须是整数。",
+                detail_items=[
+                    ("nickname", nickname or None),
+                    ("execution_slot 原始值", execution_slot_raw),
+                ],
+            )
+            self._send_html(html, status_code=400)
+            return
 
-        detail_result = get_account_view_detail(
-            nickname=nickname,
-            execution_slot=execution_slot,
-        )
+        try:
+            detail_result = get_account_view_detail(
+                nickname=nickname,
+                execution_slot=execution_slot,
+            )
+        except Exception as exc:
+            print(
+                f"[网页查看层] 账号详情查询失败：nickname={nickname or '-'} "
+                f"execution_slot={execution_slot_raw or '-'} error={exc}"
+            )
+            html = render_message_page(
+                title="账号详情只读页",
+                message="账号详情查询失败，请稍后重试。",
+                detail_items=[
+                    ("nickname", nickname or None),
+                    ("execution_slot", execution_slot),
+                    ("错误信息", str(exc)),
+                ],
+            )
+            self._send_html(html, status_code=500)
+            return
+
         runtime_result = get_runtime_snapshot()
+        if detail_result.get("record") is None:
+            html = render_message_page(
+                title="账号详情只读页",
+                message="未找到对应账号记录，请确认查询参数后重试。",
+                detail_items=[
+                    ("nickname", nickname or None),
+                    ("execution_slot", execution_slot),
+                    ("提示", "建议优先从首页账号列表进入详情页"),
+                ],
+            )
+            self._send_html(html, status_code=404)
+            return
+
         html = render_account_detail_page(detail_result, runtime_result)
         self._send_html(html)
 
