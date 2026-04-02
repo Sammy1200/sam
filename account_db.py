@@ -5,7 +5,13 @@ import json
 import os
 import sqlite3
 
-from config import ACCOUNT_STATS_DB_PATH, SCRIPT_DIR, THREAD6_RUNTIME_DB_PATH
+from config import (
+    ACCOUNT_STATS_DB_PATH,
+    EXECUTION_SLOT_COUNT,
+    EXECUTION_SLOT_NICKNAMES,
+    SCRIPT_DIR,
+    THREAD6_RUNTIME_DB_PATH,
+)
 
 
 _DB_SUFFIXES = (".db", ".sqlite", ".sqlite3")
@@ -1005,6 +1011,74 @@ def save_canonical_account_stats_record(
         "",
         int(record.baseline_item_count),
     )
+
+
+def ensure_canonical_execution_slot_seed_records(
+    database_path,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+):
+    """补齐缺失执行位的 canonical 建档，仅补不存在的执行位。"""
+    if not database_path:
+        raise ValueError("database_path is empty")
+
+    ensure_canonical_account_stats_table(database_path, table_name)
+
+    conn = sqlite3.connect(database_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            f"SELECT {_quote_identifier('nickname')}, {_quote_identifier('current_execution_slot')} "
+            f"FROM {_quote_identifier(table_name)}"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    existing_slots = set()
+    existing_nicknames = set()
+    for row in rows:
+        nickname = str(row["nickname"] or "").strip()
+        if nickname:
+            existing_nicknames.add(nickname)
+        slot_value = row["current_execution_slot"]
+        if slot_value not in (None, ""):
+            existing_slots.add(_parse_int(slot_value))
+
+    inserted_records = []
+    for slot_index in range(1, int(EXECUTION_SLOT_COUNT) + 1):
+        if slot_index in existing_slots:
+            continue
+
+        configured_nickname = ""
+        if 0 <= slot_index - 1 < len(EXECUTION_SLOT_NICKNAMES):
+            configured_nickname = str(EXECUTION_SLOT_NICKNAMES[slot_index - 1] or "").strip()
+
+        seed_nickname = configured_nickname or str(slot_index)
+        if seed_nickname in existing_nicknames:
+            seed_nickname = f"slot_{slot_index}"
+            suffix = 2
+            while seed_nickname in existing_nicknames:
+                seed_nickname = f"slot_{slot_index}_{suffix}"
+                suffix += 1
+
+        seed_record = AccountStatsRecord(
+            nickname=seed_nickname,
+            baseline_item_count=0,
+            last_limit_time=None,
+            last_account_end_time=None,
+            updated_at=datetime.now(),
+            current_execution_slot=slot_index,
+            round_purchase_success_count=0,
+            round_listing_success_count=0,
+            round_purchase_fail_count=0,
+            current_balance="",
+            purchase_running_seconds=0,
+            round_status=ROUND_STATUS_MANUAL_END,
+        )
+        save_canonical_account_stats_record(database_path, seed_record, table_name)
+        existing_nicknames.add(seed_nickname)
+        inserted_records.append(seed_record)
+
+    return inserted_records
 
 
 def write_account_round_record(database_path, table_name, nickname, payload):
