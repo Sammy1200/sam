@@ -282,7 +282,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                         continue
 
                     time_since_last_action = time.time() - last_refresh
-                    if time_since_last_action > 3.0:
+                    if time_since_last_action > 1.5:
                         is_normal_empty = (
                             is_image_present(frame, MONITOR_JIAOYIHANG, state.temp_jiaoyi) and
                             is_image_present(frame, MONITOR_SHOP, temp_shop)

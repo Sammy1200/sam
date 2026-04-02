@@ -162,7 +162,7 @@ def execute_listing_routine(camera_obj, is_periodic=False):
                         check_and_click_tishi(camera_obj)
                         first_popup_checked = True
 
-                    safe_sleep(POST_LIST_WAIT)
+                    safe_sleep(0.8)
 
                     expected_current = original_current + listed + 1
                     verified = None
@@ -200,7 +200,7 @@ def execute_listing_routine(camera_obj, is_periodic=False):
                         before_frame = safe_get_frame(camera_obj)
                         safe_sleep(0.08)
                         scroll_down()
-                        safe_sleep(0.5)
+                        safe_sleep(0.3)
                         after_frame = safe_get_frame(camera_obj)
                         if before_frame is not None and after_frame is not None:
                             sim = compare_region_similarity(before_frame, after_frame, SCAN_REGION)
@@ -214,7 +214,7 @@ def execute_listing_routine(camera_obj, is_periodic=False):
                 before_frame = frame
                 safe_sleep(0.08)
                 scroll_down()
-                safe_sleep(0.5)
+                safe_sleep(0.3)
                 after_frame = safe_get_frame(camera_obj)
                 if after_frame is not None:
                     sim = compare_region_similarity(before_frame, after_frame, SCAN_REGION)
@@ -234,10 +234,10 @@ def execute_listing_routine(camera_obj, is_periodic=False):
             persist_result = persist_lightweight_round_snapshot()
             if persist_result.status != "success":
                 ui_print(f"SQLite 轻量落库失败: {persist_result.reason}", save_log=True)
-        time.sleep(1.0)
+        time.sleep(0.5)
         ui_print("🔙 退出背包，按退出键返回交易行开启抢购！")
         press_key(0x1B)
-        time.sleep(1.0)
+        time.sleep(0.5)
         state._last_balance_hash = None
         move_overlay("+20+20")
         state.purchase_timer_active = resume_timer_after_listing

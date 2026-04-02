@@ -184,7 +184,7 @@ def run_automation():
         return
 
     if state.start_mode == 2:
-        safe_sleep(2.0)
+        safe_sleep(1.0)
         ui_print("正在检查交易行场景...")
         while True:
             if state.IS_PAUSED:
@@ -843,8 +843,8 @@ def main():
                     return
             else:
                 item_count = _prompt_temporary_item_count()
-                ui_print("临时抢购模式将在 2 秒后启动...")
-                safe_sleep(2.0)
+                ui_print("临时抢购模式将在 1 秒后启动...")
+                safe_sleep(1.0)
                 _prepare_temporary_purchase_context(item_count)
                 ui_print("开始执行预上架流程...")
                 execute_listing_routine(camera)
