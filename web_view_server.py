@@ -4,6 +4,7 @@ from __future__ import annotations
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from config import WEB_VIEW_HOST, WEB_VIEW_PORT
 from account_view_repo import (
     get_account_view_detail,
     get_account_view_rows,
@@ -17,8 +18,8 @@ from web_view_templates import (
 )
 
 
-HOST = "127.0.0.1"
-PORT = 8091
+HOST = WEB_VIEW_HOST
+PORT = WEB_VIEW_PORT
 
 
 class ReadOnlyViewHandler(BaseHTTPRequestHandler):
@@ -150,6 +151,7 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         item_quantity = ((form.get("item_quantity") or [""])[0] or "").strip()
         round_status = ((form.get("round_status") or [""])[0] or "").strip()
         current_balance_wan = ((form.get("current_balance_wan") or [""])[0] or "").strip()
+        return_to = ((form.get("return_to") or ["detail"])[0] or "detail").strip().lower()
 
         update_result = update_account_view_record(
             nickname=nickname,
@@ -157,6 +159,19 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
             round_status=round_status,
             balance_wan_text=current_balance_wan,
         )
+        status_code = 200 if update_result.get("status") == "success" else 400
+
+        if return_to == "index":
+            view_rows_result = get_account_view_rows()
+            runtime_result = get_runtime_snapshot()
+            html = render_index_page(
+                view_rows_result,
+                runtime_result,
+                edit_result=update_result,
+            )
+            self._send_html(html, status_code=status_code)
+            return
+
         detail_result = update_result.get("detail_result") or get_account_view_detail(nickname=nickname)
         runtime_result = get_runtime_snapshot()
 
@@ -174,7 +189,6 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
             self._send_html(html, status_code=400)
             return
 
-        status_code = 200 if update_result.get("status") == "success" else 400
         html = render_account_detail_page(
             detail_result,
             runtime_result,

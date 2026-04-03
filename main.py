@@ -5,6 +5,9 @@ import ctypes
 import sys
 import os
 import time
+import subprocess
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 from datetime import datetime, timedelta
 import cv2
 
@@ -750,7 +753,116 @@ def _handle_execution_slot_dispatch(camera):
         return "abort"
 
 
+def _is_web_view_service_response_valid(body_text):
+    markers = (
+        "SQLite 查看页",
+        "账号详情页",
+        "页面不存在。",
+        "页面渲染失败",
+        "提交处理失败",
+    )
+    return any(marker in body_text for marker in markers)
+
+
+def _probe_web_view_service(timeout=0.5):
+    request = urllib_request.Request(
+        f"{config.WEB_VIEW_SERVER_URL}/",
+        headers={"User-Agent": "codex-main-web-check"},
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=timeout) as response:
+            body_text = response.read().decode("utf-8", errors="ignore")
+    except urllib_error.HTTPError as exc:
+        body_text = exc.read().decode("utf-8", errors="ignore")
+        if _is_web_view_service_response_valid(body_text):
+            return True, f"网页服务已可访问，HTTP {exc.code}"
+        return False, f"8091 已有其他 HTTP 服务响应，HTTP {exc.code}"
+    except Exception as exc:
+        return False, f"网页服务不可访问：{exc}"
+
+    if _is_web_view_service_response_valid(body_text):
+        return True, "网页服务已可访问"
+    return False, "8091 已有其他 HTTP 服务响应"
+
+
+def _start_web_view_server_in_background():
+    script_path = config.WEB_VIEW_SERVER_SCRIPT_PATH
+    if not os.path.isfile(script_path):
+        message = f"[网页服务] 启动失败：未找到脚本 {script_path}"
+        print(message)
+        logger.error(message)
+        return False
+
+    startupinfo = None
+    creationflags = 0
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0
+        creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+    try:
+        process = subprocess.Popen(
+            [sys.executable, script_path],
+            cwd=config.SCRIPT_DIR,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+            close_fds=True,
+        )
+    except Exception as exc:
+        message = f"[网页服务] 后台静默启动失败：{exc}"
+        print(message)
+        logger.error(message)
+        return False
+
+    logger.info("[网页服务] 已发起后台静默启动，pid=%s", process.pid)
+    print(f"[网页服务] 已发起后台静默启动，pid={process.pid}")
+
+    for _ in range(6):
+        time.sleep(0.3)
+        if process.poll() is not None:
+            message = f"[网页服务] 子进程已退出，returncode={process.returncode}"
+            print(message)
+            logger.error(message)
+            return False
+        is_running, reason = _probe_web_view_service(timeout=0.3)
+        if is_running:
+            logger.info("[网页服务] 后台静默启动完成：%s", reason)
+            print(f"[网页服务] 后台静默启动完成：{reason}")
+            return True
+        if "其他 HTTP 服务" in reason:
+            logger.warning("[网页服务] 8091 端口冲突：%s", reason)
+            print(f"[网页服务] 8091 端口冲突：{reason}")
+            return False
+
+    message = "[网页服务] 已尝试后台静默启动，但暂未确认可访问，主程序继续运行。"
+    print(message)
+    logger.warning(message)
+    return False
+
+
+def ensure_web_view_server_ready():
+    is_running, reason = _probe_web_view_service(timeout=0.4)
+    if is_running:
+        logger.info("[网页服务] 跳过启动：%s", reason)
+        print(f"[网页服务] 跳过启动：{reason}")
+        return True
+
+    if "其他 HTTP 服务" in reason:
+        logger.warning("[网页服务] 跳过启动：%s", reason)
+        print(f"[网页服务] 跳过启动：{reason}")
+        return False
+
+    logger.info("[网页服务] 检查未通过，准备后台静默启动：%s", reason)
+    print(f"[网页服务] 检查未通过，准备后台静默启动：{reason}")
+    return _start_web_view_server_in_background()
+
+
 def main():
+    ensure_web_view_server_ready()
     mode = _prompt_main_mode()
     start_overlay()
     try:

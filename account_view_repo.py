@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 import os
 import sqlite3
+import subprocess
 
 from account_db import (
     AccountStatsRecord,
@@ -17,7 +18,12 @@ from account_db import (
     read_runtime_execution_state,
     save_canonical_account_stats_record,
 )
-from config import ACCOUNT_LIMIT_COOLDOWN_SECONDS, EXECUTION_SLOT_COUNT, THREAD6_RUNTIME_DB_PATH
+from config import (
+    ACCOUNT_LIMIT_COOLDOWN_SECONDS,
+    ACCOUNT_STATS_DB_PATH,
+    EXECUTION_SLOT_COUNT,
+    THREAD6_RUNTIME_DB_PATH,
+)
 
 
 CANONICAL_SOURCE_TYPE = "canonical_account_stats"
@@ -423,6 +429,134 @@ def _build_edit_meta(record=None):
     }
 
 
+def _sqlite_table_exists(database_path, table_name):
+    if not database_path or not os.path.isfile(database_path):
+        return False
+
+    try:
+        conn = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
+def _iter_git_worktree_roots():
+    current_root = os.path.dirname(os.path.abspath(__file__))
+    try:
+        completed = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=current_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, ValueError):
+        return []
+
+    if completed.returncode != 0:
+        return []
+
+    roots = []
+    seen = set()
+    for line in completed.stdout.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        worktree_root = os.path.abspath(line[len("worktree ") :].strip())
+        if not worktree_root or worktree_root in seen:
+            continue
+        seen.add(worktree_root)
+        roots.append(worktree_root)
+    return roots
+
+
+def _resolve_account_view_canonical_store(table_name=CANONICAL_ACCOUNT_STATS_TABLE):
+    database_path, resolved_table_name = find_canonical_account_stats_store(table_name)
+    expected_database_path = os.path.abspath(ACCOUNT_STATS_DB_PATH)
+    current_root = os.path.dirname(os.path.abspath(__file__))
+
+    if database_path and os.path.isfile(database_path):
+        return {
+            "database_path": database_path,
+            "table_name": resolved_table_name,
+            "expected_database_path": expected_database_path,
+            "resolution_type": "current_search",
+            "resolved_from_root": current_root,
+            "using_fallback": False,
+        }
+
+    database_name = os.path.basename(expected_database_path)
+    for worktree_root in _iter_git_worktree_roots():
+        candidate_path = os.path.join(worktree_root, database_name)
+        if os.path.normcase(candidate_path) == os.path.normcase(expected_database_path):
+            continue
+        if not _sqlite_table_exists(candidate_path, resolved_table_name):
+            continue
+        return {
+            "database_path": candidate_path,
+            "table_name": resolved_table_name,
+            "expected_database_path": expected_database_path,
+            "resolution_type": "git_worktree_fallback",
+            "resolved_from_root": worktree_root,
+            "using_fallback": True,
+        }
+
+    return {
+        "database_path": "",
+        "table_name": resolved_table_name,
+        "expected_database_path": expected_database_path,
+        "resolution_type": "not_found",
+        "resolved_from_root": "",
+        "using_fallback": False,
+    }
+
+
+def _count_canonical_records(database_path, table_name):
+    if not database_path or not os.path.isfile(database_path):
+        return 0
+
+    conn = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    try:
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM {_quote_identifier(table_name or CANONICAL_ACCOUNT_STATS_TABLE)}"
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+    except sqlite3.Error:
+        return 0
+    finally:
+        conn.close()
+
+
+def _build_source_diagnostics(resolved_source, real_record_count):
+    resolution_type = resolved_source.get("resolution_type")
+    if resolution_type == "git_worktree_fallback":
+        resolution_label = "当前工作树未找到库，已回退到 Git 主工作树数据源"
+    elif resolution_type == "current_search":
+        resolution_label = "当前工作树 canonical 数据源"
+    else:
+        resolution_label = "未找到 canonical 数据源"
+
+    return {
+        "current_database_path": resolved_source.get("database_path") or "",
+        "expected_database_path": resolved_source.get("expected_database_path") or "",
+        "resolved_from_root": resolved_source.get("resolved_from_root") or "",
+        "resolution_type": resolution_type,
+        "resolution_label": resolution_label,
+        "using_fallback": bool(resolved_source.get("using_fallback")),
+        "real_record_count": int(real_record_count or 0),
+        "showing_demo_data": int(real_record_count or 0) == 0,
+    }
+
+
 def _build_canonical_result(database_path, table_name, rows, generated_at):
     return {
         "source_type": CANONICAL_SOURCE_TYPE,
@@ -430,14 +564,18 @@ def _build_canonical_result(database_path, table_name, rows, generated_at):
         "table_name": table_name,
         "generated_at": _serialize_datetime(generated_at),
         "rows": rows,
+        "edit_meta": _build_edit_meta(),
     }
 
 
 def get_account_view_rows():
     """读取 canonical 账号视图列表，并补出冷却派生字段。"""
-    database_path, table_name = find_canonical_account_stats_store()
+    resolved_source = _resolve_account_view_canonical_store()
+    database_path = resolved_source.get("database_path") or ""
+    table_name = resolved_source.get("table_name") or CANONICAL_ACCOUNT_STATS_TABLE
     generated_at = datetime.now()
     runtime_snapshot = get_runtime_snapshot()
+    real_record_count = _count_canonical_records(database_path, table_name)
     if not database_path or not os.path.isfile(database_path):
         result = _build_canonical_result("", table_name, [], generated_at)
         result["health"] = {
@@ -448,6 +586,7 @@ def get_account_view_rows():
         }
         result["execution_slot_summary"] = _build_execution_slot_summary(result["health"])
         result["source_summary"] = _build_source_summary("", table_name, runtime_snapshot)
+        result["source_diagnostics"] = _build_source_diagnostics(resolved_source, real_record_count)
         return result
 
     conn = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
@@ -473,6 +612,7 @@ def get_account_view_rows():
         }
         result["execution_slot_summary"] = _build_execution_slot_summary(result["health"])
         result["source_summary"] = _build_source_summary(database_path, table_name, runtime_snapshot)
+        result["source_diagnostics"] = _build_source_diagnostics(resolved_source, real_record_count)
         return result
     finally:
         conn.close()
@@ -480,7 +620,9 @@ def get_account_view_rows():
 
 def get_account_view_detail(nickname=None, execution_slot=None):
     """按昵称或执行位读取单条 canonical 账号视图。"""
-    database_path, table_name = find_canonical_account_stats_store()
+    resolved_source = _resolve_account_view_canonical_store()
+    database_path = resolved_source.get("database_path") or ""
+    table_name = resolved_source.get("table_name") or CANONICAL_ACCOUNT_STATS_TABLE
     generated_at = datetime.now()
     runtime_snapshot = get_runtime_snapshot()
     result = {
@@ -500,6 +642,10 @@ def get_account_view_detail(nickname=None, execution_slot=None):
             "missing_critical_fields": [],
             "runtime_consistency": _build_runtime_consistency_health(runtime_snapshot, None),
         },
+        "source_diagnostics": _build_source_diagnostics(
+            resolved_source,
+            _count_canonical_records(database_path, table_name),
+        ),
     }
     if not database_path or not os.path.isfile(database_path):
         return result
@@ -598,7 +744,9 @@ def update_account_view_record(
         result["message"] = "缺少账号昵称，无法提交修改。"
         return result
 
-    database_path, table_name = find_canonical_account_stats_store()
+    resolved_source = _resolve_account_view_canonical_store()
+    database_path = resolved_source.get("database_path") or ""
+    table_name = resolved_source.get("table_name") or CANONICAL_ACCOUNT_STATS_TABLE
     if not database_path or not os.path.isfile(database_path):
         result["message"] = "canonical SQLite 不存在，当前无法写入。"
         return result

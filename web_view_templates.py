@@ -82,11 +82,34 @@ def _render_source_notice(source_summary=None):
 """
 
 
+def _render_source_diagnostics(source_diagnostics=None):
+    source_diagnostics = source_diagnostics or {}
+    current_database_path = escape(str(source_diagnostics.get("current_database_path") or ""))
+    expected_database_path = escape(str(source_diagnostics.get("expected_database_path") or ""))
+    resolved_from_root = escape(str(source_diagnostics.get("resolved_from_root") or ""))
+    real_record_count = _format_value(source_diagnostics.get("real_record_count"))
+    showing_demo_data = source_diagnostics.get("showing_demo_data")
+    demo_tip = "是，下方仅展示演示数据" if showing_demo_data else "否，下方展示真实账号列表"
+    return f"""
+<div class="section">
+  <h2>数据源诊断</h2>
+  {_render_kv_table((
+      ("当前数据源文件", current_database_path or "-"),
+      ("预期默认路径", expected_database_path or "-"),
+      ("解析结果", source_diagnostics.get("resolution_label") or "-"),
+      ("回退命中的工作树", resolved_from_root or "-"),
+      ("真实账号记录数", real_record_count),
+      ("当前是否展示 demo 数据", demo_tip),
+  ))}
+</div>
+"""
+
+
 def _render_read_only_notice():
     return """
 <div class="readonly-notice">
-  <strong>当前页面以只读查看为主：</strong>
-  首页仍只支持 GET 查看；账号详情页仅新增“单账号最小编辑”，只允许修改道具数量、账号状态和余额（万）。
+  <strong>当前页面以查看为主：</strong>
+  首页支持“单行最小编辑”，详情页保留“单账号最小编辑”；只允许修改道具数量、账号状态和余额（万）。
 </div>
 """
 
@@ -227,6 +250,99 @@ def _build_detail_form_values(record, edit_meta, edit_result):
     return form_values
 
 
+def _is_active_edit_row(row, edit_result):
+    if not edit_result:
+        return False
+    form_values = edit_result.get("form_values") or {}
+    active_nickname = str(form_values.get("nickname") or "").strip()
+    row_nickname = str(row.get("nickname") or "").strip()
+    return bool(active_nickname and active_nickname == row_nickname)
+
+
+def _build_list_form_values(row, edit_result):
+    form_values = {
+        "nickname": str(row.get("nickname") or "").strip(),
+        "item_quantity": str(row.get("item_quantity") or 0),
+        "round_status": str(row.get("round_status") or "").strip(),
+        "current_balance_wan": str(row.get("current_balance_wan") or "").strip(),
+    }
+    if _is_active_edit_row(row, edit_result):
+        form_values.update(edit_result.get("form_values") or {})
+    return form_values
+
+
+def _render_inline_row_result(row, edit_result):
+    if not _is_active_edit_row(row, edit_result):
+        return ""
+
+    status = str(edit_result.get("status") or "").strip()
+    css_class = "inline-result success" if status == "success" else "inline-result error"
+    return f'<div class="{css_class}">{escape(str(edit_result.get("message") or ""))}</div>'
+
+
+def _build_status_options_html(status_options, current_status):
+    option_html = []
+    for option in status_options:
+        selected = " selected" if option == current_status else ""
+        option_html.append(
+            f'<option value="{escape(str(option), quote=True)}"{selected}>{escape(str(option))}</option>'
+        )
+    return "".join(option_html)
+
+
+def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
+    nickname = str(row.get("nickname") or "").strip()
+    if not nickname:
+        muted_html = '<span class="muted-text">缺少昵称，暂不可编辑</span>'
+        return muted_html, muted_html, muted_html, muted_html
+
+    edit_meta = edit_meta or {}
+    form_id = f"inline-edit-form-{row_index}"
+    field_errors = (edit_result or {}).get("field_errors") if _is_active_edit_row(row, edit_result) else {}
+    form_values = _build_list_form_values(row, edit_result)
+    status_options = list(edit_meta.get("status_options") or [])
+    balance_input_unit = str(edit_meta.get("balance_input_unit") or "万")
+    status_options_html = _build_status_options_html(
+        status_options,
+        str(form_values.get("round_status") or ""),
+    )
+
+    item_cell = f"""
+<div class="inline-field">
+  <input form="{escape(form_id, quote=True)}" type="number" name="item_quantity" step="1" min="0" required value="{escape(str(form_values.get('item_quantity') or ''), quote=True)}">
+  {_render_field_error(field_errors, "item_quantity")}
+</div>
+"""
+    status_cell = f"""
+<div class="inline-field">
+  <select form="{escape(form_id, quote=True)}" name="round_status" required>
+    {status_options_html}
+  </select>
+  {_render_field_error(field_errors, "round_status")}
+</div>
+"""
+    balance_cell = f"""
+<div class="inline-field">
+  <div class="input-with-unit inline-balance">
+    <input form="{escape(form_id, quote=True)}" type="text" name="current_balance_wan" inputmode="decimal" required value="{escape(str(form_values.get('current_balance_wan') or ''), quote=True)}">
+    <span class="unit-tag">{escape(balance_input_unit)}</span>
+  </div>
+  {_render_field_error(field_errors, "current_balance_wan")}
+</div>
+"""
+    action_cell = f"""
+<div class="inline-save">
+  <form id="{escape(form_id, quote=True)}" method="post" action="/account/update">
+    <input type="hidden" name="nickname" value="{escape(nickname, quote=True)}">
+    <input type="hidden" name="return_to" value="index">
+  </form>
+  <button type="submit" form="{escape(form_id, quote=True)}">保存</button>
+  {_render_inline_row_result(row, edit_result)}
+</div>
+"""
+    return item_cell, status_cell, balance_cell, action_cell
+
+
 def _render_account_edit_form(record, edit_meta=None, edit_result=None):
     if record is None:
         return ""
@@ -255,6 +371,7 @@ def _render_account_edit_form(record, edit_meta=None, edit_result=None):
   余额（{escape(balance_input_unit)}） → <code>{escape(str(column_mapping.get("current_balance_wan") or "-"))}</code>。</p>
   <form method="post" action="/account/update" class="edit-form">
     <input type="hidden" name="nickname" value="{escape(str(record.get("nickname") or ""), quote=True)}">
+    <input type="hidden" name="return_to" value="detail">
     <label>
       <span>道具数量</span>
       <input type="number" name="item_quantity" step="1" min="0" required value="{escape(str(form_values.get('item_quantity') or ''), quote=True)}">
@@ -320,29 +437,40 @@ def _format_cooldown_remaining_time(seconds_value):
     return f"{hours}小时{minutes}分"
 
 
-def _build_account_list_rows(rows):
+def _build_account_list_rows(rows, edit_meta=None, edit_result=None):
     using_demo_rows = not bool(rows)
     effective_rows = rows if rows else _build_demo_account_rows()
 
     row_items = []
-    for row in effective_rows:
+    for row_index, row in enumerate(effective_rows, start=1):
         nickname = row.get("nickname")
         slot = row.get("current_execution_slot")
         if using_demo_rows:
             detail_cell = '<span class="muted-text">演示数据，不可查看/不可编辑</span>'
+            item_cell = _format_value(row.get("item_quantity"))
+            status_cell = _format_value(row.get("round_status"))
+            balance_cell = _format_balance_wan_display(row.get("current_balance_wan"))
+            action_cell = '<span class="muted-text">不可保存</span>'
         else:
             detail_url = f"/account?nickname={nickname}" if nickname else f"/account?execution_slot={slot}"
             detail_cell = f"<a href=\"{escape(detail_url, quote=True)}\">查看详情</a>"
+            item_cell, status_cell, balance_cell, action_cell = _render_inline_edit_cells(
+                row,
+                row_index,
+                edit_meta=edit_meta,
+                edit_result=edit_result,
+            )
         row_items.append(
             (
                 _format_value(slot),
                 _format_value(nickname),
-                _format_value(row.get("round_status")),
-                _format_value(row.get("item_quantity")),
-                _format_balance_wan_display(row.get("current_balance_wan")),
+                item_cell,
+                status_cell,
+                balance_cell,
                 _format_value(row.get("allow_purchase")),
                 _format_cooldown_remaining_time(row.get("cooldown_remaining_seconds")),
                 detail_cell,
+                action_cell,
             )
         )
     return row_items, using_demo_rows
@@ -375,11 +503,20 @@ def _base_page(title, body_html):
     .edit-form small { color: #59636e; }
     .edit-form input, .edit-form select, .edit-form button { font: inherit; }
     .edit-form input, .edit-form select { padding: 8px 10px; border: 1px solid #d0d7de; border-radius: 6px; background: #fff; }
+    .inline-field { display: grid; gap: 6px; min-width: 120px; }
+    .inline-field input, .inline-field select { width: 100%; padding: 8px 10px; border: 1px solid #d0d7de; border-radius: 6px; background: #fff; font: inherit; box-sizing: border-box; }
     .input-with-unit { display: flex; align-items: center; gap: 8px; }
     .input-with-unit input { flex: 1; }
+    .inline-balance { align-items: stretch; }
     .unit-tag { background: #f3f4f6; border: 1px solid #d0d7de; border-radius: 999px; padding: 6px 10px; font-weight: 600; }
     .form-actions button { padding: 10px 14px; border: 1px solid #1f6feb; border-radius: 6px; background: #1f6feb; color: #fff; cursor: pointer; }
     .form-actions button:hover { background: #1759b8; }
+    .inline-save { display: grid; gap: 8px; min-width: 110px; }
+    .inline-save button { padding: 8px 10px; border: 1px solid #1f6feb; border-radius: 6px; background: #1f6feb; color: #fff; cursor: pointer; font: inherit; }
+    .inline-save button:hover { background: #1759b8; }
+    .inline-result { border-radius: 6px; padding: 6px 8px; font-size: 12px; line-height: 1.5; }
+    .inline-result.success { background: #dafbe1; color: #116329; }
+    .inline-result.error { background: #ffebe9; color: #cf222e; }
     @media (max-width: 760px) {
       body { margin: 12px; }
       .section { padding: 12px; }
@@ -423,13 +560,19 @@ def render_message_page(title, message, detail_items=None, back_href="/", back_l
     return _base_page(title, body_html)
 
 
-def render_index_page(view_rows_result, runtime_result):
+def render_index_page(view_rows_result, runtime_result, edit_result=None):
     rows = view_rows_result.get("rows") or []
     health = view_rows_result.get("health") or {}
     source_summary = view_rows_result.get("source_summary") or {}
+    source_diagnostics = view_rows_result.get("source_diagnostics") or {}
     execution_slot_summary = view_rows_result.get("execution_slot_summary") or {}
+    edit_meta = view_rows_result.get("edit_meta") or {}
     runtime_snapshot = runtime_result.get("snapshot") or {}
-    row_items, using_demo_rows = _build_account_list_rows(rows)
+    row_items, using_demo_rows = _build_account_list_rows(
+        rows,
+        edit_meta=edit_meta,
+        edit_result=edit_result,
+    )
 
     duplicate_items = health.get("duplicate_execution_slots") or []
     duplicate_rows = [
@@ -462,7 +605,9 @@ def render_index_page(view_rows_result, runtime_result):
     body_html = f"""
 <h1>SQLite 查看页</h1>
 {_render_read_only_notice()}
+{_render_edit_result(edit_result)}
 {_render_source_notice(source_summary)}
+{_render_source_diagnostics(source_diagnostics)}
 <div class="meta">
   canonical 库：<code>{escape(str(view_rows_result.get("database_path") or ""))}</code><br>
   生成时间：{_format_value(view_rows_result.get("generated_at"))}
@@ -471,7 +616,7 @@ def render_index_page(view_rows_result, runtime_result):
 <div class="section">
   <h2>账号列表</h2>
   {demo_notice_html}
-  {_render_table(("执行位", "昵称", "状态", "道具数量", "余额（万）", "允许抢购", "冷却剩余时间", "详情"), row_items)}
+  {_render_table(("执行位", "昵称", "道具数量", "账号状态", "余额（万）", "允许抢购", "冷却剩余时间", "详情", "保存"), row_items)}
 </div>
 
 <div class="section">
