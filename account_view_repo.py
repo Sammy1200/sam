@@ -2,20 +2,28 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 import os
 import sqlite3
 
 from account_db import (
+    AccountStatsRecord,
     CANONICAL_ACCOUNT_STATS_COLUMNS,
     CANONICAL_ACCOUNT_STATS_TABLE,
+    ROUND_STATUS_VALUES,
+    compute_item_quantity,
     find_canonical_account_stats_store,
+    read_canonical_account_stats_record,
     read_runtime_execution_state,
+    save_canonical_account_stats_record,
 )
 from config import ACCOUNT_LIMIT_COOLDOWN_SECONDS, EXECUTION_SLOT_COUNT, THREAD6_RUNTIME_DB_PATH
 
 
 CANONICAL_SOURCE_TYPE = "canonical_account_stats"
 RUNTIME_SOURCE_TYPE = "runtime_snapshot_auxiliary"
+BALANCE_INPUT_UNIT = "万"
+BALANCE_STORAGE_SUFFIX = "万"
 CRITICAL_VIEW_FIELDS = (
     "nickname",
     "current_execution_slot",
@@ -89,6 +97,75 @@ def _serialize_datetime(value):
     if value is None:
         return None
     return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _normalize_decimal_text(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "." not in text:
+        return text
+    text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _extract_balance_number(raw_value):
+    text = str(raw_value or "").strip()
+    if not text:
+        return ""
+    return "".join(ch for ch in text if ch.isdigit() or ch == ".")
+
+
+def _format_balance_for_wan_input(raw_balance):
+    text = str(raw_balance or "").strip()
+    if not text:
+        return ""
+
+    numeric_text = _extract_balance_number(text)
+    if not numeric_text:
+        return ""
+
+    try:
+        amount = Decimal(numeric_text)
+    except InvalidOperation:
+        return ""
+
+    if "亿" in text:
+        wan_value = amount * Decimal("10000")
+    elif "万" in text:
+        wan_value = amount
+    else:
+        wan_value = amount / Decimal("10000")
+    return _normalize_decimal_text(wan_value)
+
+
+def _normalize_balance_wan_input(balance_wan_text):
+    text = str(balance_wan_text or "").strip()
+    if not text:
+        raise ValueError("余额不能为空")
+    if text.endswith(BALANCE_INPUT_UNIT):
+        text = text[:-1].strip()
+    try:
+        value = Decimal(text)
+    except InvalidOperation as exc:
+        raise ValueError("余额必须是数字，单位为万") from exc
+    if value < 0:
+        raise ValueError("余额不能为负数")
+    return _normalize_decimal_text(value), f"{_normalize_decimal_text(value)}{BALANCE_STORAGE_SUFFIX}"
+
+
+def _parse_item_quantity_input(item_quantity_text):
+    text = str(item_quantity_text or "").strip()
+    if not text:
+        raise ValueError("道具数量不能为空")
+    if text.startswith("+"):
+        text = text[1:].strip()
+    if not text or any(ch not in "0123456789-" for ch in text):
+        raise ValueError("道具数量必须是整数")
+    value = int(text)
+    if value < 0:
+        raise ValueError("道具数量不能为负数")
+    return value
 
 
 def _build_cooldown_fields(last_limit_time, now):
@@ -313,8 +390,37 @@ def _row_to_view_record(row, now):
         "purchase_running_seconds": _parse_int(row["purchase_running_seconds"]),
         "round_status": str(row["round_status"] or "").strip(),
     }
+    record["item_quantity"] = compute_item_quantity(
+        record["baseline_item_count"],
+        record["round_purchase_success_count"],
+        record["round_listing_success_count"],
+    )
+    record["current_balance_wan"] = _format_balance_for_wan_input(record["current_balance"])
     record.update(_build_cooldown_fields(last_limit_time, now))
     return record
+
+
+def _build_edit_meta(record=None):
+    record = record or {}
+    return {
+        "editable_fields": (
+            "item_quantity",
+            "round_status",
+            "current_balance_wan",
+        ),
+        "status_options": list(ROUND_STATUS_VALUES),
+        "balance_input_unit": BALANCE_INPUT_UNIT,
+        "column_mapping": {
+            "item_quantity": "baseline_item_count",
+            "round_status": "round_status",
+            "current_balance_wan": "current_balance",
+        },
+        "form_defaults": {
+            "item_quantity": str(record.get("item_quantity") or 0),
+            "round_status": str(record.get("round_status") or ""),
+            "current_balance_wan": str(record.get("current_balance_wan") or ""),
+        },
+    }
 
 
 def _build_canonical_result(database_path, table_name, rows, generated_at):
@@ -388,6 +494,7 @@ def get_account_view_detail(nickname=None, execution_slot=None):
         },
         "record": None,
         "source_summary": _build_source_summary(database_path, table_name, runtime_snapshot),
+        "edit_meta": _build_edit_meta(),
         "health": {
             "has_missing_critical_fields": False,
             "missing_critical_fields": [],
@@ -428,6 +535,7 @@ def get_account_view_detail(nickname=None, execution_slot=None):
         if row is not None:
             record = _row_to_view_record(row, generated_at)
             result["record"] = record
+            result["edit_meta"] = _build_edit_meta(record)
             result["health"] = {
                 **_build_record_health(record),
                 "runtime_consistency": _build_runtime_consistency_health(
@@ -461,4 +569,120 @@ def get_runtime_snapshot():
         },
     }
     result["health"] = _build_runtime_consistency_health(result, None)
+    return result
+
+
+def update_account_view_record(
+    nickname,
+    item_quantity_text,
+    round_status,
+    balance_wan_text,
+):
+    """最小单账号写接口：仅允许更新道具数量、状态和余额。"""
+    normalized_nickname = str(nickname or "").strip()
+    form_values = {
+        "nickname": normalized_nickname,
+        "item_quantity": str(item_quantity_text or "").strip(),
+        "round_status": str(round_status or "").strip(),
+        "current_balance_wan": str(balance_wan_text or "").strip(),
+    }
+    result = {
+        "status": "error",
+        "message": "",
+        "field_errors": {},
+        "form_values": form_values,
+        "detail_result": None,
+    }
+
+    if not normalized_nickname:
+        result["message"] = "缺少账号昵称，无法提交修改。"
+        return result
+
+    database_path, table_name = find_canonical_account_stats_store()
+    if not database_path or not os.path.isfile(database_path):
+        result["message"] = "canonical SQLite 不存在，当前无法写入。"
+        return result
+
+    current_record = read_canonical_account_stats_record(database_path, normalized_nickname, table_name)
+    if current_record is None:
+        result["message"] = "未找到对应账号记录，无法写入。"
+        result["detail_result"] = get_account_view_detail(nickname=normalized_nickname)
+        return result
+
+    try:
+        desired_item_quantity = _parse_item_quantity_input(item_quantity_text)
+    except ValueError as exc:
+        result["field_errors"]["item_quantity"] = str(exc)
+    else:
+        recalculated_baseline = (
+            desired_item_quantity
+            - int(current_record.round_purchase_success_count)
+            + int(current_record.round_listing_success_count)
+        )
+        if recalculated_baseline < 0:
+            result["field_errors"]["item_quantity"] = (
+                "当前轮次增减数量会导致底层 baseline_item_count 变成负数，无法写入。"
+            )
+
+    normalized_round_status = str(round_status or "").strip()
+    if normalized_round_status not in ROUND_STATUS_VALUES:
+        result["field_errors"]["round_status"] = "账号状态必须从下拉枚举中选择。"
+
+    try:
+        normalized_balance_wan, storage_balance_text = _normalize_balance_wan_input(balance_wan_text)
+    except ValueError as exc:
+        result["field_errors"]["current_balance_wan"] = str(exc)
+    else:
+        form_values["current_balance_wan"] = normalized_balance_wan
+
+    if result["field_errors"]:
+        result["message"] = "提交失败，请先修正表单输入。"
+        result["detail_result"] = get_account_view_detail(nickname=normalized_nickname)
+        return result
+
+    updated_record = AccountStatsRecord(
+        nickname=current_record.nickname,
+        baseline_item_count=recalculated_baseline,
+        last_limit_time=current_record.last_limit_time,
+        last_account_end_time=current_record.last_account_end_time,
+        updated_at=datetime.now(),
+        current_execution_slot=current_record.current_execution_slot,
+        round_purchase_success_count=current_record.round_purchase_success_count,
+        round_listing_success_count=current_record.round_listing_success_count,
+        round_purchase_fail_count=current_record.round_purchase_fail_count,
+        current_balance=storage_balance_text,
+        purchase_running_seconds=current_record.purchase_running_seconds,
+        round_status=normalized_round_status,
+    )
+
+    try:
+        save_canonical_account_stats_record(database_path, updated_record, table_name)
+    except Exception as exc:
+        result["message"] = f"写库失败：{exc}"
+        result["detail_result"] = get_account_view_detail(nickname=normalized_nickname)
+        return result
+
+    reloaded_record = read_canonical_account_stats_record(database_path, normalized_nickname, table_name)
+    if reloaded_record is None:
+        result["message"] = "写库后回读失败：未找到更新后的账号记录。"
+        return result
+
+    if (
+        int(reloaded_record.baseline_item_count) != int(updated_record.baseline_item_count)
+        or str(reloaded_record.round_status or "").strip() != normalized_round_status
+        or str(reloaded_record.current_balance or "").strip() != storage_balance_text
+    ):
+        result["message"] = "写库后回读校验失败：数据库中的值与提交值不一致。"
+        result["detail_result"] = get_account_view_detail(nickname=normalized_nickname)
+        return result
+
+    result["status"] = "success"
+    result["message"] = "保存成功，已完成写库并回读确认。"
+    result["detail_result"] = get_account_view_detail(nickname=normalized_nickname)
+    result["form_values"] = {
+        "nickname": normalized_nickname,
+        "item_quantity": str(desired_item_quantity),
+        "round_status": normalized_round_status,
+        "current_balance_wan": normalized_balance_wan,
+    }
     return result

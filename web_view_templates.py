@@ -1,6 +1,7 @@
-"""最小网页只读展示模板。"""
+"""最小网页展示模板。"""
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 from html import escape
 
 
@@ -84,8 +85,72 @@ def _render_source_notice(source_summary=None):
 def _render_read_only_notice():
     return """
 <div class="readonly-notice">
-  <strong>当前页面为只读查看页：</strong>
-  仅支持 GET 查看，不提供编辑、写入、提交或自动刷新能力。
+  <strong>当前页面以只读查看为主：</strong>
+  首页仍只支持 GET 查看；账号详情页仅新增“单账号最小编辑”，只允许修改道具数量、账号状态和余额（万）。
+</div>
+"""
+
+
+def _render_edit_notice():
+    return """
+<div class="edit-notice">
+  <strong>当前详情页支持最小编辑：</strong>
+  仅允许修改 3 个字段：道具数量、账号状态、余额（万）。
+  不支持批量编辑，不支持自动刷新，也不会改动 runtime 逻辑。
+</div>
+"""
+
+
+def _build_demo_account_rows():
+    return [
+        {
+            "current_execution_slot": 1,
+            "nickname": "演示账号-A",
+            "round_status": "运行中",
+            "item_quantity": 42,
+            "current_balance_wan": "18.6",
+            "updated_at": "2026-04-03 10:15:00",
+            "allow_purchase": True,
+            "cooldown_remaining_seconds": 0,
+        },
+        {
+            "current_execution_slot": 2,
+            "nickname": "演示账号-B",
+            "round_status": "账号限制",
+            "item_quantity": 17,
+            "current_balance_wan": "9.2",
+            "updated_at": "2026-04-03 09:48:00",
+            "allow_purchase": False,
+            "cooldown_remaining_seconds": 1280,
+        },
+        {
+            "current_execution_slot": 3,
+            "nickname": "演示账号-C",
+            "round_status": "余额不足",
+            "item_quantity": 8,
+            "current_balance_wan": "1.4",
+            "updated_at": "2026-04-03 08:30:00",
+            "allow_purchase": False,
+            "cooldown_remaining_seconds": 0,
+        },
+        {
+            "current_execution_slot": 4,
+            "nickname": "演示账号-D",
+            "round_status": "正常结束",
+            "item_quantity": 26,
+            "current_balance_wan": "23",
+            "updated_at": "2026-04-03 07:55:00",
+            "allow_purchase": True,
+            "cooldown_remaining_seconds": 0,
+        },
+    ]
+
+
+def _render_demo_list_notice():
+    return """
+<div class="flash-error">
+  <strong>当前无真实账号数据：</strong>
+  下方仅为演示数据，用于展示页面效果。这些账号不会写入数据库，也不可查看详情或提交修改。
 </div>
 """
 
@@ -117,20 +182,210 @@ def _render_runtime_consistency_summary(runtime_result, runtime_consistency):
     return _render_kv_table(items)
 
 
+def _render_edit_result(edit_result):
+    if not edit_result:
+        return ""
+
+    status = str(edit_result.get("status") or "").strip()
+    css_class = "flash-success" if status == "success" else "flash-error"
+    title = "提交成功" if status == "success" else "提交失败"
+    field_errors = edit_result.get("field_errors") or {}
+    error_rows = []
+    for field_name, message in field_errors.items():
+        error_rows.append((escape(str(field_name)), escape(str(message))))
+
+    field_error_html = ""
+    if error_rows:
+        field_error_html = f"""
+<div class="field-error-block">
+  <strong>字段校验：</strong>
+  {_render_table(("字段", "错误"), error_rows)}
+</div>
+"""
+
+    return f"""
+<div class="{css_class}">
+  <strong>{title}：</strong>{escape(str(edit_result.get("message") or ""))}
+  {field_error_html}
+</div>
+"""
+
+
+def _render_field_error(field_errors, field_name):
+    message = str((field_errors or {}).get(field_name) or "").strip()
+    if not message:
+        return ""
+    return f'<div class="field-error">{escape(message)}</div>'
+
+
+def _build_detail_form_values(record, edit_meta, edit_result):
+    form_values = dict((edit_meta or {}).get("form_defaults") or {})
+    if edit_result and edit_result.get("form_values"):
+        form_values.update(edit_result.get("form_values") or {})
+    if record:
+        form_values.setdefault("nickname", record.get("nickname"))
+    return form_values
+
+
+def _render_account_edit_form(record, edit_meta=None, edit_result=None):
+    if record is None:
+        return ""
+
+    edit_meta = edit_meta or {}
+    field_errors = (edit_result or {}).get("field_errors") or {}
+    form_values = _build_detail_form_values(record, edit_meta, edit_result)
+    status_options = list(edit_meta.get("status_options") or [])
+    balance_input_unit = str(edit_meta.get("balance_input_unit") or "万")
+    column_mapping = edit_meta.get("column_mapping") or {}
+
+    option_html = []
+    current_status = str(form_values.get("round_status") or "")
+    for option in status_options:
+        selected = " selected" if option == current_status else ""
+        option_html.append(
+            f'<option value="{escape(str(option), quote=True)}"{selected}>{escape(str(option))}</option>'
+        )
+
+    return f"""
+<div class="section">
+  <h2>最小编辑</h2>
+  <p>仅开放 3 个字段。余额输入单位固定为“{escape(balance_input_unit)}”，账号状态只能从现有合法枚举中选择。</p>
+  <p>字段映射：道具数量 → <code>{escape(str(column_mapping.get("item_quantity") or "-"))}</code>，
+  账号状态 → <code>{escape(str(column_mapping.get("round_status") or "-"))}</code>，
+  余额（{escape(balance_input_unit)}） → <code>{escape(str(column_mapping.get("current_balance_wan") or "-"))}</code>。</p>
+  <form method="post" action="/account/update" class="edit-form">
+    <input type="hidden" name="nickname" value="{escape(str(record.get("nickname") or ""), quote=True)}">
+    <label>
+      <span>道具数量</span>
+      <input type="number" name="item_quantity" step="1" min="0" required value="{escape(str(form_values.get('item_quantity') or ''), quote=True)}">
+      <small>必须为整数；提交时会换算写入底层 <code>baseline_item_count</code>。</small>
+      {_render_field_error(field_errors, "item_quantity")}
+    </label>
+    <label>
+      <span>账号状态</span>
+      <select name="round_status" required>
+        {"".join(option_html)}
+      </select>
+      <small>仅允许现有合法状态枚举，不接受自由文本。</small>
+      {_render_field_error(field_errors, "round_status")}
+    </label>
+    <label>
+      <span>余额（万）</span>
+      <div class="input-with-unit">
+        <input type="text" name="current_balance_wan" inputmode="decimal" required value="{escape(str(form_values.get('current_balance_wan') or ''), quote=True)}">
+        <span class="unit-tag">{escape(balance_input_unit)}</span>
+      </div>
+      <small>页面输入和展示都按“万”为单位；提交时会按 canonical 当前存储口径写入。</small>
+      {_render_field_error(field_errors, "current_balance_wan")}
+    </label>
+    <div class="form-actions">
+      <button type="submit">保存这 3 个字段</button>
+    </div>
+  </form>
+</div>
+"""
+
+
+def _format_balance_wan_display(balance_wan_text):
+    text = str(balance_wan_text or "").strip()
+    if not text:
+        return "-"
+    if text.endswith("万"):
+        text = text[:-1].strip()
+    try:
+        truncated_value = int(Decimal(text))
+    except (InvalidOperation, ValueError):
+        integer_text = text.split(".", 1)[0].strip()
+        if integer_text in ("", "+", "-"):
+            integer_text = "0"
+        try:
+            truncated_value = int(integer_text)
+        except ValueError:
+            return escape(text)
+    return escape(f"{truncated_value}万")
+
+
+def _format_cooldown_remaining_time(seconds_value):
+    try:
+        remaining_seconds = max(0, int(seconds_value or 0))
+    except (TypeError, ValueError):
+        remaining_seconds = 0
+
+    total_minutes = remaining_seconds // 60
+    if total_minutes < 60:
+        return f"{total_minutes}分钟"
+
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    return f"{hours}小时{minutes}分"
+
+
+def _build_account_list_rows(rows):
+    using_demo_rows = not bool(rows)
+    effective_rows = rows if rows else _build_demo_account_rows()
+
+    row_items = []
+    for row in effective_rows:
+        nickname = row.get("nickname")
+        slot = row.get("current_execution_slot")
+        if using_demo_rows:
+            detail_cell = '<span class="muted-text">演示数据，不可查看/不可编辑</span>'
+        else:
+            detail_url = f"/account?nickname={nickname}" if nickname else f"/account?execution_slot={slot}"
+            detail_cell = f"<a href=\"{escape(detail_url, quote=True)}\">查看详情</a>"
+        row_items.append(
+            (
+                _format_value(slot),
+                _format_value(nickname),
+                _format_value(row.get("round_status")),
+                _format_value(row.get("item_quantity")),
+                _format_balance_wan_display(row.get("current_balance_wan")),
+                _format_value(row.get("allow_purchase")),
+                _format_cooldown_remaining_time(row.get("cooldown_remaining_seconds")),
+                detail_cell,
+            )
+        )
+    return row_items, using_demo_rows
+
+
 def _base_page(title, body_html):
     style = """
     body { font-family: "Microsoft YaHei", sans-serif; margin: 24px; color: #1f2328; background: #f7f8fa; }
     h1, h2 { margin: 0 0 12px 0; }
     .section { background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
     .meta { color: #59636e; margin-bottom: 12px; }
-    .readonly-notice { background: #ddf4ff; border: 1px solid #54aeff; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; line-height: 1.6; }
-    .notice { background: #fff8c5; border: 1px solid #d4a72c; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; line-height: 1.6; }
+    .readonly-notice, .edit-notice, .notice, .flash-success, .flash-error { border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; line-height: 1.6; }
+    .readonly-notice { background: #ddf4ff; border: 1px solid #54aeff; }
+    .edit-notice { background: #dafbe1; border: 1px solid #4ac26b; }
+    .notice { background: #fff8c5; border: 1px solid #d4a72c; }
+    .flash-success { background: #dafbe1; border: 1px solid #4ac26b; }
+    .flash-error { background: #ffebe9; border: 1px solid #ff8182; }
+    .field-error-block { margin-top: 12px; }
+    .field-error { color: #cf222e; margin-top: 6px; font-size: 13px; }
+    .muted-text { color: #59636e; }
     table { width: 100%; border-collapse: collapse; }
     th, td { border: 1px solid #d8dee4; padding: 8px 10px; text-align: left; vertical-align: top; }
     th { background: #f3f4f6; }
     a { color: #0969da; text-decoration: none; }
     a:hover { text-decoration: underline; }
     code { background: #f0f2f4; padding: 1px 4px; border-radius: 4px; }
+    .edit-form { display: grid; gap: 14px; }
+    .edit-form label { display: grid; gap: 6px; }
+    .edit-form span { font-weight: 600; }
+    .edit-form small { color: #59636e; }
+    .edit-form input, .edit-form select, .edit-form button { font: inherit; }
+    .edit-form input, .edit-form select { padding: 8px 10px; border: 1px solid #d0d7de; border-radius: 6px; background: #fff; }
+    .input-with-unit { display: flex; align-items: center; gap: 8px; }
+    .input-with-unit input { flex: 1; }
+    .unit-tag { background: #f3f4f6; border: 1px solid #d0d7de; border-radius: 999px; padding: 6px 10px; font-weight: 600; }
+    .form-actions button { padding: 10px 14px; border: 1px solid #1f6feb; border-radius: 6px; background: #1f6feb; color: #fff; cursor: pointer; }
+    .form-actions button:hover { background: #1759b8; }
+    @media (max-width: 760px) {
+      body { margin: 12px; }
+      .section { padding: 12px; }
+      .input-with-unit { flex-direction: column; align-items: stretch; }
+      .unit-tag { align-self: flex-start; }
+    }
     """
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -174,23 +429,7 @@ def render_index_page(view_rows_result, runtime_result):
     source_summary = view_rows_result.get("source_summary") or {}
     execution_slot_summary = view_rows_result.get("execution_slot_summary") or {}
     runtime_snapshot = runtime_result.get("snapshot") or {}
-
-    row_items = []
-    for row in rows:
-        nickname = row.get("nickname")
-        slot = row.get("current_execution_slot")
-        detail_url = f"/account?nickname={nickname}" if nickname else f"/account?execution_slot={slot}"
-        row_items.append(
-            (
-                _format_value(slot),
-                _format_value(nickname),
-                _format_value(row.get("round_status")),
-                _format_value(row.get("current_balance")),
-                _format_value(row.get("updated_at")),
-                _format_value(row.get("allow_purchase")),
-                f"<a href=\"{escape(detail_url, quote=True)}\">查看详情</a>",
-            )
-        )
+    row_items, using_demo_rows = _build_account_list_rows(rows)
 
     duplicate_items = health.get("duplicate_execution_slots") or []
     duplicate_rows = [
@@ -218,8 +457,10 @@ def render_index_page(view_rows_result, runtime_result):
         ("快照更新时间", runtime_snapshot.get("updated_at")),
     ]
 
+    demo_notice_html = _render_demo_list_notice() if using_demo_rows else ""
+
     body_html = f"""
-<h1>SQLite 只读查看层</h1>
+<h1>SQLite 查看页</h1>
 {_render_read_only_notice()}
 {_render_source_notice(source_summary)}
 <div class="meta">
@@ -228,7 +469,13 @@ def render_index_page(view_rows_result, runtime_result):
 </div>
 
 <div class="section">
-  <h2>Health 体检摘要</h2>
+  <h2>账号列表</h2>
+  {demo_notice_html}
+  {_render_table(("执行位", "昵称", "状态", "道具数量", "余额（万）", "允许抢购", "冷却剩余时间", "详情"), row_items)}
+</div>
+
+<div class="section">
+  <h2>Health 摘要</h2>
   {_render_health_summary(health)}
 </div>
 
@@ -252,20 +499,16 @@ def render_index_page(view_rows_result, runtime_result):
   <h2>关键字段缺失</h2>
   {_render_table(("昵称", "执行位", "缺失字段"), missing_rows)}
 </div>
-
-<div class="section">
-  <h2>账号列表</h2>
-  {_render_table(("执行位", "昵称", "状态", "余额", "更新时间", "允许抢购", "详情"), row_items)}
-</div>
 """
-    return _base_page("SQLite 只读查看层", body_html)
+    return _base_page("SQLite 查看页", body_html)
 
 
-def render_account_detail_page(detail_result, runtime_result):
+def render_account_detail_page(detail_result, runtime_result, edit_result=None):
     record = detail_result.get("record")
     health = detail_result.get("health") or {}
     lookup = detail_result.get("lookup") or {}
     source_summary = detail_result.get("source_summary") or {}
+    edit_meta = detail_result.get("edit_meta") or {}
 
     if record is None:
         body_html = f"""
@@ -288,11 +531,13 @@ def render_account_detail_page(detail_result, runtime_result):
         ("昵称", record.get("nickname")),
         ("执行位", record.get("current_execution_slot")),
         ("状态", record.get("round_status")),
-        ("余额", record.get("current_balance")),
-        ("基线数量", record.get("baseline_item_count")),
-        ("抢购成功数", record.get("round_purchase_success_count")),
-        ("上架成功数", record.get("round_listing_success_count")),
-        ("抢购失败数", record.get("round_purchase_fail_count")),
+        ("余额（万）", _format_balance_wan_display(record.get("current_balance_wan"))),
+        ("余额原始存储", record.get("current_balance")),
+        ("道具数量（推算）", record.get("item_quantity")),
+        ("baseline_item_count", record.get("baseline_item_count")),
+        ("本轮抢购成功数", record.get("round_purchase_success_count")),
+        ("本轮上架成功数", record.get("round_listing_success_count")),
+        ("本轮抢购失败数", record.get("round_purchase_fail_count")),
         ("本轮运行秒数", record.get("purchase_running_seconds")),
         ("最后限制时间", record.get("last_limit_time")),
         ("最后下号时间", record.get("last_account_end_time")),
@@ -301,7 +546,7 @@ def render_account_detail_page(detail_result, runtime_result):
     derived_items = [
         ("允许开始时间", record.get("allow_start_time")),
         ("当前可抢购", record.get("allow_purchase")),
-        ("冷却剩余秒数", record.get("cooldown_remaining_seconds")),
+        ("冷却剩余时间", _format_cooldown_remaining_time(record.get("cooldown_remaining_seconds"))),
     ]
 
     record_health_items = [
@@ -315,7 +560,8 @@ def render_account_detail_page(detail_result, runtime_result):
 
     body_html = f"""
 <h1>账号详情</h1>
-{_render_read_only_notice()}
+{_render_edit_notice()}
+{_render_edit_result(edit_result)}
 {_render_source_notice(source_summary)}
 <div class="meta">
   canonical 库：<code>{escape(str(detail_result.get("database_path") or ""))}</code><br>
@@ -326,6 +572,8 @@ def render_account_detail_page(detail_result, runtime_result):
 <div class="section">
   <p><a href="/">返回首页</a></p>
 </div>
+
+{_render_account_edit_form(record, edit_meta, edit_result)}
 
 <div class="section">
   <h2>基础字段</h2>
@@ -339,7 +587,7 @@ def render_account_detail_page(detail_result, runtime_result):
 
 <div class="section">
   <h2>当前记录 Health</h2>
-  <p>这里只展示当前 canonical 记录本身的完整性和可读性摘要，不写回任何数据。</p>
+  <p>这里只展示当前 canonical 记录本身的完整性和可读性摘要，不写回任何额外数据。</p>
   {_render_kv_table(record_health_items)}
 </div>
 
