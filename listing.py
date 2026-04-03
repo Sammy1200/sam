@@ -20,7 +20,11 @@ from vision import (
     compare_region_similarity, match_item_in_scan
 )
 from overlay import ui_print, move_overlay, update_score_text
-from round_persistence import persist_lightweight_round_snapshot, refresh_account_limit_reached_at
+from round_persistence import (
+    persist_lightweight_round_snapshot,
+    persist_minimal_item_balance_sync,
+    refresh_account_limit_reached_at,
+)
 
 
 def check_and_click_tishi(camera_obj):
@@ -234,6 +238,9 @@ def execute_listing_routine(camera_obj, is_periodic=False):
             persist_result = persist_lightweight_round_snapshot()
             if persist_result.status != "success":
                 ui_print(f"SQLite 轻量落库失败: {persist_result.reason}", save_log=True)
+        minimal_sync_result = persist_minimal_item_balance_sync()
+        if minimal_sync_result.status not in ("success", "skipped"):
+            ui_print(f"SQLite 高频最小同步失败: {minimal_sync_result.reason}", save_log=True)
         time.sleep(0.5)
         ui_print("🔙 退出背包，按退出键返回交易行开启抢购！")
         press_key(0x1B)

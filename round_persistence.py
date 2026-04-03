@@ -6,14 +6,17 @@ import state
 from account_db import (
     AccountStatsRecord,
     AccountWriteResult,
+    CANONICAL_ACCOUNT_STATS_TABLE,
     ROUND_STATUS_BALANCE_LOW,
     ROUND_STATUS_LIMITED,
     ROUND_STATUS_MANUAL_END,
     ROUND_STATUS_NORMAL_END,
     ROUND_STATUS_RUNNING,
     ROUND_STATUS_UNKNOWN,
+    compute_item_quantity,
     compute_new_baseline_item_count,
     save_canonical_account_stats_record,
+    update_canonical_account_item_balance_fields,
 )
 from config import ACCOUNT_MAX_PURCHASE_SECONDS
 from utils import get_current_elapsed, logger
@@ -162,6 +165,59 @@ def _save_record(record):
     state.last_account_end_time = record.last_account_end_time
     state.updated_at = record.updated_at
     state.round_status = record.round_status
+    return result
+
+
+def persist_minimal_item_balance_sync():
+    """高频最小同步：仅同步运行中道具数量与余额。"""
+    if state.temporary_purchase_mode:
+        return AccountWriteResult("skipped", "临时模式不写入 canonical SQLite")
+
+    nickname = (state.current_nickname or "").strip()
+    if state.account_read_status == "account_not_found" or not state.account_record_loaded:
+        return AccountWriteResult(
+            "account_not_found",
+            f"未找到昵称为 {nickname} 的账号记录",
+        )
+    if not nickname:
+        return AccountWriteResult("nickname_missing", "当前昵称为空")
+
+    runtime_item_quantity = compute_item_quantity(
+        state.baseline_item_count,
+        state.round_purchase_success_count,
+        state.round_listing_success_count,
+    )
+    if runtime_item_quantity < 0:
+        return AccountWriteResult(
+            "invalid_item_quantity",
+            f"运行中道具数量为负数: {runtime_item_quantity}",
+        )
+
+    effective_balance = _get_effective_balance()
+    table_name = state.account_db_table_name or CANONICAL_ACCOUNT_STATS_TABLE
+    result = update_canonical_account_item_balance_fields(
+        state.account_db_path,
+        nickname,
+        runtime_item_quantity,
+        effective_balance,
+        table_name=table_name,
+    )
+
+    balance_log_text = effective_balance or "保持原值"
+    if result.status == "success":
+        print(
+            "[账号数据] 高频最小同步完成："
+            f"昵称={nickname}，道具数量={runtime_item_quantity}，余额={balance_log_text}"
+        )
+        logger.info(
+            "[账号数据] 高频最小同步完成：昵称=%s 道具数量=%s 余额=%s",
+            nickname,
+            runtime_item_quantity,
+            balance_log_text,
+        )
+    elif result.status != "skipped":
+        logger.warning("[账号数据] 高频最小同步失败：昵称=%s 原因=%s", nickname, result.reason)
+
     return result
 
 
