@@ -175,6 +175,20 @@ def _build_expected_slot_health(rows):
     }
 
 
+def _build_execution_slot_summary(health):
+    expected_slots = list(health.get("expected_execution_slots") or [])
+    present_slots = list(health.get("present_execution_slots") or [])
+    missing_slots = list(health.get("missing_execution_slots") or [])
+    return {
+        "expected_execution_slots": expected_slots,
+        "expected_execution_slot_count": len(expected_slots),
+        "present_execution_slots": present_slots,
+        "present_execution_slot_count": len(present_slots),
+        "missing_execution_slots": missing_slots,
+        "missing_execution_slot_count": len(missing_slots),
+    }
+
+
 def _build_missing_field_health(rows):
     issues = []
     for row in rows:
@@ -248,6 +262,20 @@ def _build_runtime_consistency_health(runtime_snapshot, canonical_record):
     }
 
 
+def _build_source_summary(database_path, table_name, runtime_snapshot):
+    runtime_snapshot = runtime_snapshot or {}
+    return {
+        "canonical_source_type": CANONICAL_SOURCE_TYPE,
+        "canonical_is_primary": True,
+        "canonical_database_path": database_path or "",
+        "canonical_table_name": table_name,
+        "runtime_source_type": RUNTIME_SOURCE_TYPE,
+        "runtime_is_auxiliary_snapshot": True,
+        "runtime_database_path": runtime_snapshot.get("database_path") or "",
+        "runtime_database_exists": bool(runtime_snapshot.get("database_exists")),
+    }
+
+
 def _build_runtime_snapshot_health(rows, runtime_snapshot):
     matched_record = _find_runtime_match(rows, runtime_snapshot)
     runtime_consistency = _build_runtime_consistency_health(runtime_snapshot, matched_record)
@@ -303,15 +331,17 @@ def get_account_view_rows():
     """读取 canonical 账号视图列表，并补出冷却派生字段。"""
     database_path, table_name = find_canonical_account_stats_store()
     generated_at = datetime.now()
+    runtime_snapshot = get_runtime_snapshot()
     if not database_path or not os.path.isfile(database_path):
         result = _build_canonical_result("", table_name, [], generated_at)
-        empty_runtime_snapshot = get_runtime_snapshot()
         result["health"] = {
             **_build_duplicate_slot_health([]),
             **_build_expected_slot_health([]),
             **_build_missing_field_health([]),
-            **_build_runtime_snapshot_health([], empty_runtime_snapshot),
+            **_build_runtime_snapshot_health([], runtime_snapshot),
         }
+        result["execution_slot_summary"] = _build_execution_slot_summary(result["health"])
+        result["source_summary"] = _build_source_summary("", table_name, runtime_snapshot)
         return result
 
     conn = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
@@ -329,13 +359,14 @@ def get_account_view_rows():
         ).fetchall()
         view_rows = [_row_to_view_record(row, generated_at) for row in rows]
         result = _build_canonical_result(database_path, table_name, view_rows, generated_at)
-        runtime_snapshot = get_runtime_snapshot()
         result["health"] = {
             **_build_duplicate_slot_health(view_rows),
             **_build_expected_slot_health(view_rows),
             **_build_missing_field_health(view_rows),
             **_build_runtime_snapshot_health(view_rows, runtime_snapshot),
         }
+        result["execution_slot_summary"] = _build_execution_slot_summary(result["health"])
+        result["source_summary"] = _build_source_summary(database_path, table_name, runtime_snapshot)
         return result
     finally:
         conn.close()
@@ -345,6 +376,7 @@ def get_account_view_detail(nickname=None, execution_slot=None):
     """按昵称或执行位读取单条 canonical 账号视图。"""
     database_path, table_name = find_canonical_account_stats_store()
     generated_at = datetime.now()
+    runtime_snapshot = get_runtime_snapshot()
     result = {
         "source_type": CANONICAL_SOURCE_TYPE,
         "database_path": database_path or "",
@@ -355,10 +387,11 @@ def get_account_view_detail(nickname=None, execution_slot=None):
             "execution_slot": execution_slot,
         },
         "record": None,
+        "source_summary": _build_source_summary(database_path, table_name, runtime_snapshot),
         "health": {
             "has_missing_critical_fields": False,
             "missing_critical_fields": [],
-            "runtime_consistency": _build_runtime_consistency_health(get_runtime_snapshot(), None),
+            "runtime_consistency": _build_runtime_consistency_health(runtime_snapshot, None),
         },
     }
     if not database_path or not os.path.isfile(database_path):
@@ -398,7 +431,7 @@ def get_account_view_detail(nickname=None, execution_slot=None):
             result["health"] = {
                 **_build_record_health(record),
                 "runtime_consistency": _build_runtime_consistency_health(
-                    get_runtime_snapshot(),
+                    runtime_snapshot,
                     record,
                 ),
             }

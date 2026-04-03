@@ -9,7 +9,10 @@ def _format_value(value):
         return "-"
     if isinstance(value, bool):
         return "是" if value else "否"
-    if isinstance(value, (list, dict)):
+    if isinstance(value, (list, tuple, set)):
+        items = [str(item).strip() for item in value if str(item).strip()]
+        return escape(", ".join(items)) if items else "-"
+    if isinstance(value, dict):
         return escape(str(value))
     text = str(value).strip()
     return escape(text) if text else "-"
@@ -59,12 +62,21 @@ def _render_health_summary(health):
     return _render_kv_table(items)
 
 
-def _render_source_notice():
-    return """
+def _render_source_notice(source_summary=None):
+    source_summary = source_summary or {}
+    canonical_table_name = source_summary.get("canonical_table_name") or "-"
+    canonical_database_path = escape(str(source_summary.get("canonical_database_path") or ""))
+    runtime_database_path = escape(str(source_summary.get("runtime_database_path") or ""))
+    runtime_database_exists = _format_value(source_summary.get("runtime_database_exists"))
+    return f"""
 <div class="notice">
   <strong>数据来源说明：</strong>
-  canonical account_stats 是主数据源；thread6_runtime_state 只是辅助快照；
-  两者不能混用，页面中的 runtime 信息仅用于辅助对照。
+  canonical SQLite（表：<code>{escape(str(canonical_table_name))}</code>）是主数据源；
+  runtime 仅为辅助快照，只用于一致性对照，不参与主展示口径。
+  <br>
+  canonical 库：<code>{canonical_database_path or "-"}</code>
+  <br>
+  runtime 库：<code>{runtime_database_path or "-"}</code>（存在：{runtime_database_exists}）
 </div>
 """
 
@@ -78,10 +90,29 @@ def _render_read_only_notice():
 """
 
 
-def _render_execution_slot_summary(health):
+def _render_execution_slot_summary(summary):
     items = [
-        ("present_execution_slots", health.get("present_execution_slots")),
-        ("missing_execution_slots", health.get("missing_execution_slots")),
+        ("expected_execution_slots", summary.get("expected_execution_slots")),
+        ("expected_execution_slot_count", summary.get("expected_execution_slot_count")),
+        ("present_execution_slots", summary.get("present_execution_slots")),
+        ("present_execution_slot_count", summary.get("present_execution_slot_count")),
+        ("missing_execution_slots", summary.get("missing_execution_slots")),
+        ("missing_execution_slot_count", summary.get("missing_execution_slot_count")),
+    ]
+    return _render_kv_table(items)
+
+
+def _render_runtime_consistency_summary(runtime_result, runtime_consistency):
+    runtime_snapshot = runtime_result.get("snapshot") or {}
+    items = [
+        ("runtime 快照存在", runtime_result.get("database_exists")),
+        ("runtime 当前执行位", runtime_snapshot.get("current_execution_slot")),
+        ("runtime 当前昵称", runtime_snapshot.get("current_nickname")),
+        ("runtime 快照更新时间", runtime_snapshot.get("updated_at")),
+        ("runtime 明显滞后", runtime_consistency.get("runtime_is_stale")),
+        ("runtime 滞后秒数", runtime_consistency.get("runtime_lag_seconds")),
+        ("runtime 与 canonical 一致", runtime_consistency.get("runtime_matches_canonical")),
+        ("runtime 不一致字段", runtime_consistency.get("runtime_mismatch_fields")),
     ]
     return _render_kv_table(items)
 
@@ -140,6 +171,8 @@ def render_message_page(title, message, detail_items=None, back_href="/", back_l
 def render_index_page(view_rows_result, runtime_result):
     rows = view_rows_result.get("rows") or []
     health = view_rows_result.get("health") or {}
+    source_summary = view_rows_result.get("source_summary") or {}
+    execution_slot_summary = view_rows_result.get("execution_slot_summary") or {}
     runtime_snapshot = runtime_result.get("snapshot") or {}
 
     row_items = []
@@ -188,7 +221,7 @@ def render_index_page(view_rows_result, runtime_result):
     body_html = f"""
 <h1>SQLite 只读查看层</h1>
 {_render_read_only_notice()}
-{_render_source_notice()}
+{_render_source_notice(source_summary)}
 <div class="meta">
   canonical 库：<code>{escape(str(view_rows_result.get("database_path") or ""))}</code><br>
   生成时间：{_format_value(view_rows_result.get("generated_at"))}
@@ -201,7 +234,8 @@ def render_index_page(view_rows_result, runtime_result):
 
 <div class="section">
   <h2>execution_slot 覆盖情况</h2>
-  {_render_execution_slot_summary(health)}
+  <p>首页明确展示 canonical 视角下已覆盖与缺失的执行位，便于快速判断槽位是否齐全。</p>
+  {_render_execution_slot_summary(execution_slot_summary)}
 </div>
 
 <div class="section">
@@ -230,14 +264,14 @@ def render_index_page(view_rows_result, runtime_result):
 def render_account_detail_page(detail_result, runtime_result):
     record = detail_result.get("record")
     health = detail_result.get("health") or {}
-    runtime_snapshot = runtime_result.get("snapshot") or {}
     lookup = detail_result.get("lookup") or {}
+    source_summary = detail_result.get("source_summary") or {}
 
     if record is None:
         body_html = f"""
 <h1>账号详情</h1>
 {_render_read_only_notice()}
-{_render_source_notice()}
+{_render_source_notice(source_summary)}
 <div class="meta">
   查询条件：nickname={_format_value(lookup.get("nickname"))}，
   execution_slot={_format_value(lookup.get("execution_slot"))}
@@ -273,23 +307,16 @@ def render_account_detail_page(detail_result, runtime_result):
     record_health_items = [
         ("存在关键字段缺失", health.get("has_missing_critical_fields")),
         ("缺失字段", health.get("missing_critical_fields")),
+        ("canonical 更新时间", record.get("updated_at")),
+        ("runtime 快照存在", runtime_result.get("database_exists")),
     ]
 
     runtime_consistency = health.get("runtime_consistency") or {}
-    runtime_items = [
-        ("辅助快照当前执行位", runtime_snapshot.get("current_execution_slot")),
-        ("辅助快照当前昵称", runtime_snapshot.get("current_nickname")),
-        ("辅助快照更新时间", runtime_snapshot.get("updated_at")),
-        ("runtime 明显滞后", runtime_consistency.get("runtime_is_stale")),
-        ("runtime 滞后秒数", runtime_consistency.get("runtime_lag_seconds")),
-        ("runtime 与 canonical 一致", runtime_consistency.get("runtime_matches_canonical")),
-        ("runtime 不一致字段", runtime_consistency.get("runtime_mismatch_fields")),
-    ]
 
     body_html = f"""
 <h1>账号详情</h1>
 {_render_read_only_notice()}
-{_render_source_notice()}
+{_render_source_notice(source_summary)}
 <div class="meta">
   canonical 库：<code>{escape(str(detail_result.get("database_path") or ""))}</code><br>
   查询条件：nickname={_format_value(lookup.get("nickname"))}，
@@ -312,12 +339,14 @@ def render_account_detail_page(detail_result, runtime_result):
 
 <div class="section">
   <h2>当前记录 Health</h2>
+  <p>这里只展示当前 canonical 记录本身的完整性和可读性摘要，不写回任何数据。</p>
   {_render_kv_table(record_health_items)}
 </div>
 
 <div class="section">
   <h2>与 Runtime 的一致性摘要</h2>
-  {_render_kv_table(runtime_items)}
+  <p>runtime 仅做辅助对照，以下结果用于观察当前快照与 canonical 详情是否一致。</p>
+  {_render_runtime_consistency_summary(runtime_result, runtime_consistency)}
 </div>
 """
     return _base_page(f"账号详情 - {record.get('nickname')}", body_html)
