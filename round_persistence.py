@@ -13,8 +13,6 @@ from account_db import (
     ROUND_STATUS_NORMAL_END,
     ROUND_STATUS_RUNNING,
     ROUND_STATUS_UNKNOWN,
-    compute_item_quantity,
-    compute_new_baseline_item_count,
     save_canonical_account_stats_record,
     update_canonical_account_item_balance_fields,
 )
@@ -114,15 +112,11 @@ def _build_record(is_final, round_status):
 
     refresh_account_limit_reached_at()
     state.round_purchase_running_seconds = float(get_current_elapsed())
-    new_baseline_item_count = compute_new_baseline_item_count(
-        state.baseline_item_count,
-        state.round_purchase_success_count,
-        state.round_listing_success_count,
-    )
+    new_baseline_item_count = int(state.baseline_item_count)
     if new_baseline_item_count < 0:
         return None, AccountWriteResult(
             "invalid_baseline",
-            f"new baseline count is negative: {new_baseline_item_count}",
+            f"current inventory is negative: {new_baseline_item_count}",
         )
 
     effective_round_status = _normalize_round_status(round_status, is_final)
@@ -169,7 +163,7 @@ def _save_record(record):
 
 
 def persist_minimal_item_balance_sync():
-    """高频最小同步：仅同步运行中道具数量与余额。"""
+    """高频最小同步：仅同步当前真实库存与余额。"""
     if state.temporary_purchase_mode:
         return AccountWriteResult("skipped", "临时模式不写入 canonical SQLite")
 
@@ -182,43 +176,54 @@ def persist_minimal_item_balance_sync():
     if not nickname:
         return AccountWriteResult("nickname_missing", "当前昵称为空")
 
-    runtime_item_quantity = compute_item_quantity(
-        state.baseline_item_count,
-        state.round_purchase_success_count,
-        state.round_listing_success_count,
-    )
+    runtime_item_quantity = int(state.baseline_item_count)
     if runtime_item_quantity < 0:
         return AccountWriteResult(
             "invalid_item_quantity",
-            f"运行中道具数量为负数: {runtime_item_quantity}",
+            f"运行中道具库存为负数: {runtime_item_quantity}",
         )
 
     effective_balance = _get_effective_balance()
     table_name = state.account_db_table_name or CANONICAL_ACCOUNT_STATS_TABLE
+    write_time = datetime.now()
     result = update_canonical_account_item_balance_fields(
         state.account_db_path,
         nickname,
         runtime_item_quantity,
         effective_balance,
         table_name=table_name,
+        updated_at=write_time,
     )
 
     balance_log_text = effective_balance or "保持原值"
     if result.status == "success":
+        state.updated_at = write_time
         print(
-            "[账号数据] 高频最小同步完成："
-            f"昵称={nickname}，道具数量={runtime_item_quantity}，余额={balance_log_text}"
+            "[账号数据] 实时库存同步完成："
+            f"昵称={nickname}，道具库存={runtime_item_quantity}，余额={balance_log_text}"
         )
         logger.info(
-            "[账号数据] 高频最小同步完成：昵称=%s 道具数量=%s 余额=%s",
+            "[账号数据] 实时库存同步完成：昵称=%s 道具库存=%s 余额=%s",
             nickname,
             runtime_item_quantity,
             balance_log_text,
         )
     elif result.status != "skipped":
-        logger.warning("[账号数据] 高频最小同步失败：昵称=%s 原因=%s", nickname, result.reason)
+        logger.warning("[账号数据] 实时库存同步失败：昵称=%s 原因=%s", nickname, result.reason)
 
     return result
+
+
+def persist_pause_snapshot():
+    """F12 暂停后补一次当前账号全量关键数据写库。"""
+    if state.temporary_purchase_mode:
+        return AccountWriteResult("skipped", "临时模式不写入 canonical SQLite")
+
+    nickname = (state.current_nickname or "").strip()
+    if state.account_read_status == "account_not_found" or not state.account_record_loaded or not nickname:
+        return AccountWriteResult("skipped", f"当前账号未加载 SQLite 记录: {nickname}")
+
+    return persist_lightweight_round_snapshot()
 
 
 def persist_lightweight_round_snapshot():
@@ -241,11 +246,11 @@ def persist_lightweight_round_snapshot():
     state.account_round_writeback_error = ""
     print(
         "[account-data] lightweight write ok: "
-        f"nickname={state.current_nickname}, baseline={result.new_baseline_item_count}, "
+        f"nickname={state.current_nickname}, inventory={result.new_baseline_item_count}, "
         f"running_seconds={record.purchase_running_seconds}"
     )
     logger.info(
-        "[account-data] lightweight write ok: nickname=%s baseline=%s running_seconds=%s",
+        "[account-data] lightweight write ok: nickname=%s inventory=%s running_seconds=%s",
         state.current_nickname,
         result.new_baseline_item_count,
         record.purchase_running_seconds,
@@ -278,10 +283,10 @@ def persist_final_round_snapshot(default_status):
     print(
         "[account-data] final write ok: "
         f"nickname={state.current_nickname}, status={record.round_status}, "
-        f"baseline={result.new_baseline_item_count}"
+        f"inventory={result.new_baseline_item_count}"
     )
     logger.info(
-        "[account-data] final write ok: nickname=%s status=%s baseline=%s",
+        "[account-data] final write ok: nickname=%s status=%s inventory=%s",
         state.current_nickname,
         record.round_status,
         result.new_baseline_item_count,

@@ -294,12 +294,8 @@ def compute_item_quantity(
     round_purchase_success_count,
     round_listing_success_count,
 ):
-    """线程 2 统一“道具数量”公式。"""
-    return (
-        int(baseline_item_count)
-        + int(round_purchase_success_count)
-        - int(round_listing_success_count)
-    )
+    """线程 2 当前真实道具库存口径。"""
+    return int(baseline_item_count)
 
 
 def compute_new_baseline_item_count(
@@ -307,7 +303,7 @@ def compute_new_baseline_item_count(
     round_purchase_success_count,
     round_listing_success_count,
 ):
-    """线程 2 统一“新基线数量”公式。"""
+    """线程 2 当前真实道具库存回写口径。"""
     return compute_item_quantity(
         baseline_item_count,
         round_purchase_success_count,
@@ -1097,8 +1093,9 @@ def update_canonical_account_item_balance_fields(
     item_quantity,
     current_balance="",
     table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+    updated_at=None,
 ):
-    """最小高频同步：仅更新道具数量映射字段与余额。"""
+    """最小高频同步：直接更新真实库存字段与余额。"""
     normalized_nickname = str(nickname or "").strip()
     if not normalized_nickname:
         return AccountWriteResult("nickname_missing", "当前昵称为空")
@@ -1118,6 +1115,7 @@ def update_canonical_account_item_balance_fields(
         return AccountWriteResult("db_unavailable", f"数据库文件不存在: {database_path}")
 
     normalized_balance = str(current_balance or "").strip()
+    normalized_updated_at = _serialize_datetime(updated_at or datetime.now())
 
     try:
         conn = sqlite3.connect(database_path)
@@ -1130,8 +1128,7 @@ def update_canonical_account_item_balance_fields(
             return AccountWriteResult("schema_not_found", f"canonical 表不存在: {table_name}")
 
         row = conn.execute(
-            f"SELECT {_quote_identifier('round_purchase_success_count')}, "
-            f"{_quote_identifier('round_listing_success_count')} "
+            f"SELECT 1 "
             f"FROM {_quote_identifier(table_name)} "
             f"WHERE {_quote_identifier('nickname')} = ? "
             "LIMIT 1",
@@ -1143,19 +1140,11 @@ def update_canonical_account_item_balance_fields(
                 f"未找到昵称为 {normalized_nickname} 的账号记录",
             )
 
-        recalculated_baseline = (
-            desired_item_quantity
-            - _parse_int(row["round_purchase_success_count"])
-            + _parse_int(row["round_listing_success_count"])
-        )
-        if recalculated_baseline < 0:
-            return AccountWriteResult(
-                "invalid_baseline",
-                f"反推后的 baseline_item_count 为负数: {recalculated_baseline}",
-            )
-
-        set_clauses = [f"{_quote_identifier('baseline_item_count')} = ?"]
-        params = [recalculated_baseline]
+        set_clauses = [
+            f"{_quote_identifier('baseline_item_count')} = ?",
+            f"{_quote_identifier('updated_at')} = ?",
+        ]
+        params = [desired_item_quantity, normalized_updated_at]
         if normalized_balance:
             set_clauses.append(f"{_quote_identifier('current_balance')} = ?")
             params.append(normalized_balance)
@@ -1175,7 +1164,7 @@ def update_canonical_account_item_balance_fields(
                 f"未找到昵称为 {normalized_nickname} 的账号记录",
             )
         conn.commit()
-        return AccountWriteResult("success", "", recalculated_baseline)
+        return AccountWriteResult("success", "", desired_item_quantity)
     except sqlite3.Error as exc:
         try:
             conn.rollback()

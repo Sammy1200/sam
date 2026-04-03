@@ -9,7 +9,6 @@ import time
 import requests
 
 import state
-from account_db import compute_item_quantity
 from config import (
     ACCOUNT_LIMIT_THRESHOLD,
     BUY_POS,
@@ -34,6 +33,7 @@ from config import (
     SUCCESS_CONFIRM_POS,
 )
 from overlay import toggle_pause, ui_print, update_score_text
+from round_persistence import persist_minimal_item_balance_sync
 from switch import is_at_gumu, navigate_to_trade
 from utils import (
     click_exit,
@@ -229,11 +229,14 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                         precise_sleep(CONFIRM_DELAY)
                         fast_click(CONFIRM_POS)
                         time.sleep(0.6)
+                        purchase_succeeded = False
 
                         frame_after = safe_get_frame(camera)
                         if frame_after is not None and is_image_present(frame_after, MONITOR_SUCCESS, temp_success):
                             state.success_count += 1
                             state.round_purchase_success_count += 1
+                            state.baseline_item_count += 1
+                            purchase_succeeded = True
                             last_success_time = last_idle_push_time = time.time()
                             if state.overlay_root:
                                 state.overlay_root.after(0, update_score_text)
@@ -251,6 +254,10 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                             click_exit()
 
                         if wait_and_recognize_balance(EXIT_DELAY, camera):
+                            if purchase_succeeded:
+                                sync_result = persist_minimal_item_balance_sync()
+                                if sync_result.status not in ("success", "skipped"):
+                                    ui_print(f"SQLite 实时库存同步失败: {sync_result.reason}", save_log=True)
                             if not check_trigger_listing(camera):
                                 return
                             fast_click(REFRESH_POS)
@@ -293,16 +300,12 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                             ui_print(f"🔄 店铺空置 ({state.limit_count}/{ACCOUNT_LIMIT_THRESHOLD})", is_replace=True)
                             if state.limit_count >= ACCOUNT_LIMIT_THRESHOLD:
                                 if state.temporary_purchase_mode:
-                                    estimated_total = compute_item_quantity(
-                                        state.baseline_item_count,
-                                        state.round_purchase_success_count,
-                                        state.round_listing_success_count,
-                                    )
+                                    estimated_total = int(state.baseline_item_count)
                                     state.account_round_end_status = "临时账号限制"
                                     state.overlay_status = "临时账号限制"
                                     async_push_msg(
                                         "【临时账号限制】停止抢购",
-                                        f"连续多次店铺为空，已停止临时模式。道具推算后的总数：{estimated_total}",
+                                        f"连续多次店铺为空，已停止临时模式。当前道具库存：{estimated_total}",
                                     )
                                     state.need_switch_server = False
                                     return

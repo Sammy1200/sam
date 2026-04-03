@@ -1,26 +1,27 @@
 """
-悬浮窗、ui_print、计分板、暂停控制
+悬浮窗、日志输出、计分板、暂停控制
 """
-import tkinter as tk
-import threading
+import atexit
 import ctypes
 import os
+import threading
 import time
-import atexit
+import tkinter as tk
 from datetime import datetime
+
 import state
-from account_db import compute_new_baseline_item_count
+from round_persistence import persist_pause_snapshot
 from utils import (
+    OVERLAY_LOG_LABEL_PACK,
+    OVERLAY_LOG_LABEL_STYLE,
+    OVERLAY_NORMAL_ALPHA,
+    OVERLAY_NORMAL_BG,
+    OVERLAY_NORMAL_GEOMETRY,
+    OVERLAY_SCORE_LABEL_PACK,
+    OVERLAY_SCORE_LABEL_STYLE,
     drain_overlay_tasks,
     enqueue_overlay_task,
     get_current_elapsed,
-    OVERLAY_NORMAL_GEOMETRY,
-    OVERLAY_NORMAL_BG,
-    OVERLAY_NORMAL_ALPHA,
-    OVERLAY_SCORE_LABEL_STYLE,
-    OVERLAY_LOG_LABEL_STYLE,
-    OVERLAY_SCORE_LABEL_PACK,
-    OVERLAY_LOG_LABEL_PACK,
 )
 
 
@@ -41,7 +42,7 @@ def fit_overlay_to_content(position_override=None):
         position = position_override or getattr(root, "_overlay_normal_position", OVERLAY_NORMAL_GEOMETRY)
         root.update_idletasks()
         root.geometry(f"{root.winfo_reqwidth()}x{root.winfo_reqheight()}{position}")
-    except:
+    except Exception:
         pass
 
 
@@ -71,9 +72,7 @@ def _format_remaining_time(target_time):
 
 def _get_overlay_status_text():
     status_text = str(state.overlay_status or "").strip()
-    if status_text:
-        return status_text
-    return DEFAULT_OVERLAY_STATUS_TEXT
+    return status_text or DEFAULT_OVERLAY_STATUS_TEXT
 
 
 def _get_balance_display_text():
@@ -84,37 +83,36 @@ def _get_balance_display_text():
     return fallback_text or "获取中..."
 
 
-def _get_runtime_item_estimate():
-    return compute_new_baseline_item_count(
-        state.baseline_item_count,
-        state.round_purchase_success_count,
-        state.round_listing_success_count,
-    )
+def _get_current_inventory():
+    return max(0, int(state.baseline_item_count or 0))
 
 
 def update_score_text():
-    if state.overlay_root and state.score_var:
-        elapsed_text = _format_duration(get_current_elapsed())
-        status_text = _get_overlay_status_text()
-        nickname_text = str(state.current_nickname or "").strip() or "未设置"
-        slot_text = str(state.current_execution_slot or "--")
-        wait_flag_text = "是" if state.account_is_waiting else "否"
-        allow_start_text = _format_account_time(state.account_allow_start_time)
-        remaining_text = _format_remaining_time(state.account_allow_start_time) if state.account_is_waiting else "无需等待"
-        balance_text = _get_balance_display_text()
-        runtime_item_estimate = _get_runtime_item_estimate()
-        msg = (
-            f"🧭 执行位: {slot_text} | 昵称: {nickname_text} | 状态: {status_text}\n"
-            f"⏳ 冷却中: {wait_flag_text} | 可开抢: {allow_start_text} | 剩余: {remaining_text}\n"
-            f"⏱️ 抢购运行: {elapsed_text} | 💰 当前余额: [ {balance_text} ]\n"
-            f"✔ 本轮抢购成功: [ {state.round_purchase_success_count:<2} ] | ✖ 本轮抢购失败: [ {state.round_purchase_fail_count:<2} ] | 📦 本轮上架成功: [ {state.round_listing_success_count:<2} ]\n"
-            f"📚 已加载基线数量: [ {state.baseline_item_count:<2} ] | 🧮 运行中道具推算值: [ {runtime_item_estimate:<2} ]"
-        )
-        try:
-            state.score_var.set(msg)
-            fit_overlay_to_content()
-        except:
-            pass
+    if not state.overlay_root or not state.score_var:
+        return
+
+    elapsed_text = _format_duration(get_current_elapsed())
+    status_text = _get_overlay_status_text()
+    nickname_text = str(state.current_nickname or "").strip() or "未设置"
+    slot_text = str(state.current_execution_slot or "--")
+    wait_flag_text = "是" if state.account_is_waiting else "否"
+    allow_start_text = _format_account_time(state.account_allow_start_time)
+    remaining_text = _format_remaining_time(state.account_allow_start_time) if state.account_is_waiting else "无需等待"
+    balance_text = _get_balance_display_text()
+    current_inventory = _get_current_inventory()
+    updated_at_text = _format_account_time(state.updated_at)
+    msg = (
+        f"执行位: {slot_text} | 昵称: {nickname_text} | 状态: {status_text}\n"
+        f"冷却中: {wait_flag_text} | 可开抢: {allow_start_text} | 剩余: {remaining_text}\n"
+        f"抢购运行: {elapsed_text} | 当前余额: [ {balance_text} ]\n"
+        f"本轮抢购成功: [ {state.round_purchase_success_count:<2} ] | 本轮抢购失败: [ {state.round_purchase_fail_count:<2} ] | 本轮上架成功: [ {state.round_listing_success_count:<2} ]\n"
+        f"当前道具库存: [ {current_inventory:<2} ] | 最后入库: [ {updated_at_text} ]"
+    )
+    try:
+        state.score_var.set(msg)
+        fit_overlay_to_content()
+    except Exception:
+        pass
 
 
 def tick_timer():
@@ -147,7 +145,7 @@ def create_overlay():
     root._overlay_score_label.pack(**OVERLAY_SCORE_LABEL_PACK)
 
     state.log_text_var = tk.StringVar()
-    state.log_text_var.set("🤖 脚本悬浮窗就绪...")
+    state.log_text_var.set("悬浮窗已就绪。")
     root._overlay_log_label = tk.Label(
         root,
         textvariable=state.log_text_var,
@@ -160,7 +158,7 @@ def create_overlay():
             hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
             style = ctypes.windll.user32.GetWindowLongW(hwnd, -20)
             ctypes.windll.user32.SetWindowLongW(hwnd, -20, style | 0x00080000 | 0x00000020)
-        except:
+        except Exception:
             pass
 
     state.last_resume_time = time.time()
@@ -179,15 +177,14 @@ def start_overlay():
     global _overlay_shutdown_requested
     _overlay_shutdown_requested = False
     _start_pause_hotkey_listener()
-    t = threading.Thread(target=create_overlay, daemon=True)
-    t.start()
+    threading.Thread(target=create_overlay, daemon=True).start()
 
 
 def ui_print(msg, is_replace=False, save_log=False, show_console=True):
     now = datetime.now().strftime("%H:%M:%S")
     if show_console:
-        print(f"\r[{now}] {msg}" if is_replace else f"[{now}] {msg}",
-              end="\n" if not is_replace else "")
+        print(f"\r[{now}] {msg}" if is_replace else f"[{now}] {msg}", end="\n" if not is_replace else "")
+
     if save_log:
         try:
             if not os.path.exists("logs"):
@@ -196,31 +193,32 @@ def ui_print(msg, is_replace=False, save_log=False, show_console=True):
                 os.path.join("logs", f"result_log_{datetime.now().strftime('%Y-%m-%d')}.txt"),
                 "a",
                 encoding="utf-8",
-            ) as f:
-                f.write(f"[{now}] {msg}\n")
-        except:
+            ) as file_obj:
+                file_obj.write(f"[{now}] {msg}\n")
+        except Exception:
             pass
-    if state.overlay_root and state.log_text_var:
-        gui_msg = f"[{now}] {msg}"
-        if is_replace and state.log_lines and any(
-                icon in state.log_lines[-1] for icon in ["✔", "✖", "⏭️"]):
-            state.log_lines.append(gui_msg)
-        elif is_replace and state.log_lines:
-            state.log_lines[-1] = gui_msg
-        else:
-            state.log_lines.append(gui_msg)
-        if len(state.log_lines) > 20:
-            state.log_lines.pop(0)
-        try:
-            def _apply_log_text(log_text):
-                if not state.overlay_root or not state.log_text_var:
-                    return
-                state.log_text_var.set(log_text)
-                fit_overlay_to_content()
 
-            enqueue_overlay_task(_apply_log_text, "\n".join(state.log_lines))
-        except:
-            pass
+    if not state.overlay_root or not state.log_text_var:
+        return
+
+    gui_msg = f"[{now}] {msg}"
+    if is_replace and state.log_lines:
+        state.log_lines[-1] = gui_msg
+    else:
+        state.log_lines.append(gui_msg)
+    if len(state.log_lines) > 20:
+        state.log_lines.pop(0)
+
+    try:
+        def _apply_log_text(log_text):
+            if not state.overlay_root or not state.log_text_var:
+                return
+            state.log_text_var.set(log_text)
+            fit_overlay_to_content()
+
+        enqueue_overlay_task(_apply_log_text, "\n".join(state.log_lines))
+    except Exception:
+        pass
 
 
 def toggle_pause():
@@ -229,20 +227,25 @@ def toggle_pause():
         if state.last_resume_time is not None:
             state.total_running_time += (time.time() - state.last_resume_time)
             state.last_resume_time = None
-        ui_print("⏸️ 脚本已暂停（按 F12 恢复）")
+        ui_print("脚本已暂停（按 F12 恢复）")
+        pause_persist_result = persist_pause_snapshot()
+        if pause_persist_result.status == "success":
+            ui_print("暂停后已完成全量入库，网页可立即读取最新数据。", save_log=True)
+        elif pause_persist_result.status != "skipped":
+            ui_print(f"暂停后全量入库失败：{pause_persist_result.reason}", save_log=True)
         if state.overlay_root:
             try:
                 enqueue_overlay_task(state.overlay_root.withdraw)
-            except:
+            except Exception:
                 pass
     else:
         state.last_resume_time = time.time()
         if state.overlay_root:
             try:
                 enqueue_overlay_task(state.overlay_root.deiconify)
-            except:
+            except Exception:
                 pass
-        ui_print("▶️ 脚本已恢复！（按 F12 暂停）")
+        ui_print("脚本已恢复（按 F12 暂停）")
 
 
 def _pause_hotkey_loop():
@@ -270,7 +273,7 @@ def _start_pause_hotkey_listener():
 
 
 def shutdown_overlay(wait_timeout=1.5):
-    """关闭悬浮窗并尽量等待 Tk 线程退出。"""
+    """关闭悬浮窗，并尽量等待 Tk 线程退出。"""
     global _overlay_shutdown_requested
     _overlay_shutdown_requested = True
 
@@ -285,11 +288,11 @@ def shutdown_overlay(wait_timeout=1.5):
             return
         try:
             current_root.quit()
-        except:
+        except Exception:
             pass
         try:
             current_root.destroy()
-        except:
+        except Exception:
             pass
 
     try:
@@ -297,7 +300,7 @@ def shutdown_overlay(wait_timeout=1.5):
     except Exception:
         try:
             root.after(0, _close_root)
-        except:
+        except Exception:
             pass
 
     _overlay_closed_event.wait(wait_timeout)
@@ -307,17 +310,19 @@ atexit.register(shutdown_overlay)
 
 
 def move_overlay(geometry_str):
-    if state.overlay_root:
-        try:
-            def _apply_move():
-                if not state.overlay_root:
-                    return
-                if not getattr(state.overlay_root, "_overlay_is_mini", False):
-                    state.overlay_root._overlay_normal_position = geometry_str
-                    fit_overlay_to_content(geometry_str)
-                else:
-                    state.overlay_root.geometry(geometry_str)
+    if not state.overlay_root:
+        return
 
-            enqueue_overlay_task(_apply_move)
-        except:
-            pass
+    try:
+        def _apply_move():
+            if not state.overlay_root:
+                return
+            if not getattr(state.overlay_root, "_overlay_is_mini", False):
+                state.overlay_root._overlay_normal_position = geometry_str
+                fit_overlay_to_content(geometry_str)
+            else:
+                state.overlay_root.geometry(geometry_str)
+
+        enqueue_overlay_task(_apply_move)
+    except Exception:
+        pass

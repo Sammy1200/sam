@@ -11,7 +11,7 @@ from account_view_repo import (
     get_runtime_snapshot,
     update_account_view_record,
 )
-from web_view_templates import (
+from web_view_templates_inventory import (
     render_account_detail_page,
     render_index_page,
     render_message_page,
@@ -184,8 +184,7 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
                 message=update_result.get("message") or "账号修改失败。",
                 detail_items=[
                     ("nickname", nickname or None),
-                    ("提交的基数增减", baseline_item_delta or None),
-                    ("提交的道具基数", baseline_item_count or None),
+                    ("提交的道具库存", baseline_item_count or None),
                     ("提交的账号状态", round_status or None),
                     ("提交的余额（万）", current_balance_wan or None),
                 ],

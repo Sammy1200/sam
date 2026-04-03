@@ -233,7 +233,7 @@ def _prompt_main_mode():
 
 def _prompt_temporary_item_count():
     while True:
-        raw = input("请输入本号当前道具数量: ").strip()
+        raw = input("请输入本号当前道具库存: ").strip()
         try:
             item_count = int(raw)
         except ValueError:
@@ -409,9 +409,9 @@ def _prepare_temporary_purchase_context(item_count):
     state.overlay_status = "临时抢购中"
     reset_round_runtime_state("进入临时抢购模式")
     reset_purchase_counters("进入临时抢购模式")
-    ui_print(f"临时抢购模式已启动，道具数量起点：{item_count}", save_log=True)
-    print(f"[临时模式] 已启动，道具数量起点={item_count}")
-    logger.info("[临时模式] 已启动，道具数量起点=%s", item_count)
+    ui_print(f"临时抢购模式已启动，当前道具库存：{item_count}", save_log=True)
+    print(f"[临时模式] 已启动，当前道具库存={item_count}")
+    logger.info("[临时模式] 已启动，当前道具库存=%s", item_count)
 
 
 def _clear_runtime_state_after_account_finalize(reason):
@@ -560,7 +560,7 @@ def _load_current_account_context():
     state.overlay_status = "抢购中" if allow_purchase else "等待抢购时间"
 
     print(
-        "[账号数据] 昵称={0}，基线初始数量={1}，最后一次限制时间={2}，最后下号时间={3}，更新时间={4}，执行位={5}，允许开始时间={6}，当前可抢购={7}".format(
+        "[账号数据] 昵称={0}，当前道具库存={1}，最后一次限制时间={2}，最后下号时间={3}，更新时间={4}，执行位={5}，允许开始时间={6}，当前可抢购={7}".format(
             state.current_nickname,
             state.baseline_item_count,
             _format_account_time(state.last_limit_time),
@@ -572,7 +572,7 @@ def _load_current_account_context():
         )
     )
     logger.info(
-        "[账号数据] 昵称=%s 基线初始数量=%s 最后一次限制时间=%s 最后下号时间=%s 更新时间=%s 执行位=%s 允许开始时间=%s 当前可抢购=%s 来源=%s:%s",
+        "[账号数据] 昵称=%s 当前道具库存=%s 最后一次限制时间=%s 最后下号时间=%s 更新时间=%s 执行位=%s 允许开始时间=%s 当前可抢购=%s 来源=%s:%s",
         state.current_nickname,
         state.baseline_item_count,
         _format_account_time(state.last_limit_time),
