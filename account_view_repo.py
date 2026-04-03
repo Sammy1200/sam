@@ -160,17 +160,30 @@ def _normalize_balance_wan_input(balance_wan_text):
     return _normalize_decimal_text(value), f"{_normalize_decimal_text(value)}{BALANCE_STORAGE_SUFFIX}"
 
 
-def _parse_item_quantity_input(item_quantity_text):
-    text = str(item_quantity_text or "").strip()
+def _parse_integer_input(raw_text, field_label):
+    text = str(raw_text or "").strip()
     if not text:
-        raise ValueError("道具数量不能为空")
-    if text.startswith("+"):
-        text = text[1:].strip()
-    if not text or any(ch not in "0123456789-" for ch in text):
-        raise ValueError("道具数量必须是整数")
-    value = int(text)
+        raise ValueError(f"{field_label}不能为空")
+
+    sign = ""
+    digits = text
+    if text[0] in "+-":
+        sign = text[0]
+        digits = text[1:].strip()
+
+    if not digits or not digits.isdigit():
+        raise ValueError(f"{field_label}必须是整数")
+    return int(f"{sign}{digits}" if sign else digits)
+
+
+def _parse_baseline_item_delta_input(baseline_item_delta_text):
+    return _parse_integer_input(baseline_item_delta_text, "基数增减")
+
+
+def _parse_baseline_item_count_input(baseline_item_count_text):
+    value = _parse_integer_input(baseline_item_count_text, "道具基数")
     if value < 0:
-        raise ValueError("道具数量不能为负数")
+        raise ValueError("道具基数不能为负数")
     return value
 
 
@@ -410,19 +423,22 @@ def _build_edit_meta(record=None):
     record = record or {}
     return {
         "editable_fields": (
-            "item_quantity",
+            "baseline_item_delta",
+            "baseline_item_count",
             "round_status",
             "current_balance_wan",
         ),
         "status_options": list(ROUND_STATUS_VALUES),
         "balance_input_unit": BALANCE_INPUT_UNIT,
         "column_mapping": {
-            "item_quantity": "baseline_item_count",
+            "baseline_item_delta": "baseline_item_count",
+            "baseline_item_count": "baseline_item_count",
             "round_status": "round_status",
             "current_balance_wan": "current_balance",
         },
         "form_defaults": {
-            "item_quantity": str(record.get("item_quantity") or 0),
+            "baseline_item_delta": "",
+            "baseline_item_count": str(record.get("baseline_item_count") or 0),
             "round_status": str(record.get("round_status") or ""),
             "current_balance_wan": str(record.get("current_balance_wan") or ""),
         },
@@ -720,15 +736,21 @@ def get_runtime_snapshot():
 
 def update_account_view_record(
     nickname,
-    item_quantity_text,
+    baseline_item_delta_text,
+    baseline_item_count_text,
     round_status,
     balance_wan_text,
+    baseline_update_mode="detail",
 ):
-    """最小单账号写接口：仅允许更新道具数量、状态和余额。"""
+    """最小单账号写接口：仅允许更新道具基数、状态和余额。"""
     normalized_nickname = str(nickname or "").strip()
+    normalized_update_mode = str(baseline_update_mode or "detail").strip().lower()
+    if normalized_update_mode not in ("index", "detail"):
+        normalized_update_mode = "detail"
     form_values = {
         "nickname": normalized_nickname,
-        "item_quantity": str(item_quantity_text or "").strip(),
+        "baseline_item_delta": str(baseline_item_delta_text or "").strip(),
+        "baseline_item_count": str(baseline_item_count_text or "").strip(),
         "round_status": str(round_status or "").strip(),
         "current_balance_wan": str(balance_wan_text or "").strip(),
     }
@@ -757,20 +779,28 @@ def update_account_view_record(
         result["detail_result"] = get_account_view_detail(nickname=normalized_nickname)
         return result
 
-    try:
-        desired_item_quantity = _parse_item_quantity_input(item_quantity_text)
-    except ValueError as exc:
-        result["field_errors"]["item_quantity"] = str(exc)
+    recalculated_baseline = None
+    if normalized_update_mode == "index":
+        try:
+            baseline_delta = _parse_baseline_item_delta_input(baseline_item_delta_text)
+        except ValueError as exc:
+            result["field_errors"]["baseline_item_delta"] = str(exc)
+        else:
+            recalculated_baseline = _parse_int(current_record.baseline_item_count) + baseline_delta
+            if recalculated_baseline < 0:
+                result["field_errors"]["baseline_item_delta"] = (
+                    "调整后的道具基数不能小于 0。"
+                )
     else:
-        recalculated_baseline = (
-            desired_item_quantity
-            - int(current_record.round_purchase_success_count)
-            + int(current_record.round_listing_success_count)
-        )
-        if recalculated_baseline < 0:
-            result["field_errors"]["item_quantity"] = (
-                "当前轮次增减数量会导致底层 baseline_item_count 变成负数，无法写入。"
-            )
+        try:
+            recalculated_baseline = _parse_baseline_item_count_input(baseline_item_count_text)
+        except ValueError as exc:
+            result["field_errors"]["baseline_item_count"] = str(exc)
+        else:
+            form_values["baseline_item_count"] = str(recalculated_baseline)
+
+    if recalculated_baseline is not None:
+        form_values["baseline_item_count"] = str(recalculated_baseline)
 
     normalized_round_status = str(round_status or "").strip()
     if normalized_round_status not in ROUND_STATUS_VALUES:
@@ -829,7 +859,8 @@ def update_account_view_record(
     result["detail_result"] = get_account_view_detail(nickname=normalized_nickname)
     result["form_values"] = {
         "nickname": normalized_nickname,
-        "item_quantity": str(desired_item_quantity),
+        "baseline_item_delta": "" if normalized_update_mode == "index" else form_values["baseline_item_delta"],
+        "baseline_item_count": str(recalculated_baseline),
         "round_status": normalized_round_status,
         "current_balance_wan": normalized_balance_wan,
     }

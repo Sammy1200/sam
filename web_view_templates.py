@@ -109,7 +109,8 @@ def _render_read_only_notice():
     return """
 <div class="readonly-notice">
   <strong>当前页面以查看为主：</strong>
-  首页支持“单行最小编辑”，详情页保留“单账号最小编辑”；只允许修改道具数量、账号状态和余额（万）。
+  首页支持“单行最小编辑”，其中“当前道具数量”为只读推算值，只能通过“基数增减”调整 <code>baseline_item_count</code>；
+  详情页保留“单账号最小编辑”，其中“道具基数”直接对应 <code>baseline_item_count</code>。
 </div>
 """
 
@@ -118,7 +119,7 @@ def _render_edit_notice():
     return """
 <div class="edit-notice">
   <strong>当前详情页支持最小编辑：</strong>
-  仅允许修改 3 个字段：道具数量、账号状态、余额（万）。
+  仅允许修改 3 个字段：道具基数、账号状态、余额（万）。
   不支持批量编辑，不支持自动刷新，也不会改动 runtime 逻辑。
 </div>
 """
@@ -262,7 +263,7 @@ def _is_active_edit_row(row, edit_result):
 def _build_list_form_values(row, edit_result):
     form_values = {
         "nickname": str(row.get("nickname") or "").strip(),
-        "item_quantity": str(row.get("item_quantity") or 0),
+        "baseline_item_delta": "",
         "round_status": str(row.get("round_status") or "").strip(),
         "current_balance_wan": str(row.get("current_balance_wan") or "").strip(),
     }
@@ -294,7 +295,7 @@ def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
     nickname = str(row.get("nickname") or "").strip()
     if not nickname:
         muted_html = '<span class="muted-text">缺少昵称，暂不可编辑</span>'
-        return muted_html, muted_html, muted_html, muted_html
+        return muted_html, muted_html, muted_html, muted_html, muted_html
 
     edit_meta = edit_meta or {}
     form_id = f"inline-edit-form-{row_index}"
@@ -309,8 +310,15 @@ def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
 
     item_cell = f"""
 <div class="inline-field">
-  <input form="{escape(form_id, quote=True)}" type="number" name="item_quantity" step="1" min="0" required value="{escape(str(form_values.get('item_quantity') or ''), quote=True)}">
-  {_render_field_error(field_errors, "item_quantity")}
+  <div class="readonly-value">{_format_value(row.get("item_quantity"))}</div>
+  <div class="muted-text">只读推算值</div>
+</div>
+"""
+    baseline_delta_cell = f"""
+<div class="inline-field">
+  <input form="{escape(form_id, quote=True)}" type="number" name="baseline_item_delta" step="1" required value="{escape(str(form_values.get('baseline_item_delta') or ''), quote=True)}" placeholder="-100 / 50">
+  <div class="muted-text">保存时只调整 <code>baseline_item_count</code></div>
+  {_render_field_error(field_errors, "baseline_item_delta")}
 </div>
 """
     status_cell = f"""
@@ -340,7 +348,7 @@ def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
   {_render_inline_row_result(row, edit_result)}
 </div>
 """
-    return item_cell, status_cell, balance_cell, action_cell
+    return item_cell, baseline_delta_cell, status_cell, balance_cell, action_cell
 
 
 def _render_account_edit_form(record, edit_meta=None, edit_result=None):
@@ -366,17 +374,17 @@ def _render_account_edit_form(record, edit_meta=None, edit_result=None):
 <div class="section">
   <h2>最小编辑</h2>
   <p>仅开放 3 个字段。余额输入单位固定为“{escape(balance_input_unit)}”，账号状态只能从现有合法枚举中选择。</p>
-  <p>字段映射：道具数量 → <code>{escape(str(column_mapping.get("item_quantity") or "-"))}</code>，
+  <p>字段映射：道具基数 → <code>{escape(str(column_mapping.get("baseline_item_count") or "-"))}</code>，
   账号状态 → <code>{escape(str(column_mapping.get("round_status") or "-"))}</code>，
   余额（{escape(balance_input_unit)}） → <code>{escape(str(column_mapping.get("current_balance_wan") or "-"))}</code>。</p>
   <form method="post" action="/account/update" class="edit-form">
     <input type="hidden" name="nickname" value="{escape(str(record.get("nickname") or ""), quote=True)}">
     <input type="hidden" name="return_to" value="detail">
     <label>
-      <span>道具数量</span>
-      <input type="number" name="item_quantity" step="1" min="0" required value="{escape(str(form_values.get('item_quantity') or ''), quote=True)}">
-      <small>必须为整数；提交时会换算写入底层 <code>baseline_item_count</code>。</small>
-      {_render_field_error(field_errors, "item_quantity")}
+      <span>道具基数</span>
+      <input type="number" name="baseline_item_count" step="1" min="0" required value="{escape(str(form_values.get('baseline_item_count') or ''), quote=True)}">
+      <small>必须为整数；提交时直接写入底层 <code>baseline_item_count</code>，不再按推算值反推。</small>
+      {_render_field_error(field_errors, "baseline_item_count")}
     </label>
     <label>
       <span>账号状态</span>
@@ -448,13 +456,14 @@ def _build_account_list_rows(rows, edit_meta=None, edit_result=None):
         if using_demo_rows:
             detail_cell = '<span class="muted-text">演示数据，不可查看/不可编辑</span>'
             item_cell = _format_value(row.get("item_quantity"))
+            baseline_delta_cell = '<span class="muted-text">演示数据，不可编辑</span>'
             status_cell = _format_value(row.get("round_status"))
             balance_cell = _format_balance_wan_display(row.get("current_balance_wan"))
             action_cell = '<span class="muted-text">不可保存</span>'
         else:
             detail_url = f"/account?nickname={nickname}" if nickname else f"/account?execution_slot={slot}"
             detail_cell = f"<a href=\"{escape(detail_url, quote=True)}\">查看详情</a>"
-            item_cell, status_cell, balance_cell, action_cell = _render_inline_edit_cells(
+            item_cell, baseline_delta_cell, status_cell, balance_cell, action_cell = _render_inline_edit_cells(
                 row,
                 row_index,
                 edit_meta=edit_meta,
@@ -465,6 +474,7 @@ def _build_account_list_rows(rows, edit_meta=None, edit_result=None):
                 _format_value(slot),
                 _format_value(nickname),
                 item_cell,
+                baseline_delta_cell,
                 status_cell,
                 balance_cell,
                 _format_value(row.get("allow_purchase")),
@@ -505,6 +515,7 @@ def _base_page(title, body_html):
     .edit-form input, .edit-form select { padding: 8px 10px; border: 1px solid #d0d7de; border-radius: 6px; background: #fff; }
     .inline-field { display: grid; gap: 6px; min-width: 120px; }
     .inline-field input, .inline-field select { width: 100%; padding: 8px 10px; border: 1px solid #d0d7de; border-radius: 6px; background: #fff; font: inherit; box-sizing: border-box; }
+    .readonly-value { padding: 8px 10px; border: 1px solid #d0d7de; border-radius: 6px; background: #f6f8fa; }
     .input-with-unit { display: flex; align-items: center; gap: 8px; }
     .input-with-unit input { flex: 1; }
     .inline-balance { align-items: stretch; }
@@ -616,7 +627,7 @@ def render_index_page(view_rows_result, runtime_result, edit_result=None):
 <div class="section">
   <h2>账号列表</h2>
   {demo_notice_html}
-  {_render_table(("执行位", "昵称", "道具数量", "账号状态", "余额（万）", "允许抢购", "冷却剩余时间", "详情", "保存"), row_items)}
+  {_render_table(("执行位", "昵称", "当前道具数量", "基数增减", "账号状态", "余额（万）", "允许抢购", "冷却剩余时间", "详情", "保存"), row_items)}
 </div>
 
 <div class="section">
@@ -678,8 +689,7 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None):
         ("状态", record.get("round_status")),
         ("余额（万）", _format_balance_wan_display(record.get("current_balance_wan"))),
         ("余额原始存储", record.get("current_balance")),
-        ("道具数量（推算）", record.get("item_quantity")),
-        ("baseline_item_count", record.get("baseline_item_count")),
+        ("道具基数", record.get("baseline_item_count")),
         ("本轮抢购成功数", record.get("round_purchase_success_count")),
         ("本轮上架成功数", record.get("round_listing_success_count")),
         ("本轮抢购失败数", record.get("round_purchase_fail_count")),
@@ -689,6 +699,7 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None):
         ("更新时间", record.get("updated_at")),
     ]
     derived_items = [
+        ("当前道具数量（推算）", record.get("item_quantity")),
         ("允许开始时间", record.get("allow_start_time")),
         ("当前可抢购", record.get("allow_purchase")),
         ("冷却剩余时间", _format_cooldown_remaining_time(record.get("cooldown_remaining_seconds"))),

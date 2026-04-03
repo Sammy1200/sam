@@ -148,16 +148,19 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         form = parse_qs(raw_body.decode("utf-8"), keep_blank_values=True)
 
         nickname = ((form.get("nickname") or [""])[0] or "").strip()
-        item_quantity = ((form.get("item_quantity") or [""])[0] or "").strip()
+        baseline_item_delta = ((form.get("baseline_item_delta") or [""])[0] or "").strip()
+        baseline_item_count = ((form.get("baseline_item_count") or [""])[0] or "").strip()
         round_status = ((form.get("round_status") or [""])[0] or "").strip()
         current_balance_wan = ((form.get("current_balance_wan") or [""])[0] or "").strip()
         return_to = ((form.get("return_to") or ["detail"])[0] or "detail").strip().lower()
 
         update_result = update_account_view_record(
             nickname=nickname,
-            item_quantity_text=item_quantity,
+            baseline_item_delta_text=baseline_item_delta,
+            baseline_item_count_text=baseline_item_count,
             round_status=round_status,
             balance_wan_text=current_balance_wan,
+            baseline_update_mode=return_to,
         )
         status_code = 200 if update_result.get("status") == "success" else 400
 
@@ -181,7 +184,8 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
                 message=update_result.get("message") or "账号修改失败。",
                 detail_items=[
                     ("nickname", nickname or None),
-                    ("提交的道具数量", item_quantity or None),
+                    ("提交的基数增减", baseline_item_delta or None),
+                    ("提交的道具基数", baseline_item_count or None),
                     ("提交的账号状态", round_status or None),
                     ("提交的余额（万）", current_balance_wan or None),
                 ],
