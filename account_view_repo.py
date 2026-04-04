@@ -18,6 +18,7 @@ from account_db import (
     save_canonical_account_stats_record,
 )
 from config import (
+    ACCOUNT_MAX_PURCHASE_SECONDS,
     ACCOUNT_LIMIT_COOLDOWN_SECONDS,
     ACCOUNT_STATS_DB_PATH,
     EXECUTION_SLOT_COUNT,
@@ -202,6 +203,17 @@ def _format_updated_at_relative(updated_at, now):
     return f"{total_hours // 24}天前"
 
 
+def _format_duration_text(total_seconds):
+    total_seconds = max(0, int(total_seconds or 0))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}小时{minutes}分{seconds}秒"
+    if minutes > 0:
+        return f"{minutes}分{seconds}秒"
+    return f"{seconds}秒"
+
+
 def _build_cooldown_fields(last_limit_time, now):
     if last_limit_time is None:
         return {
@@ -216,6 +228,55 @@ def _build_cooldown_fields(last_limit_time, now):
         "allow_start_time": _serialize_datetime(allow_start_time),
         "allow_purchase": cooldown_remaining_seconds == 0,
         "cooldown_remaining_seconds": cooldown_remaining_seconds,
+    }
+
+
+def _build_runtime_window_fields(
+    purchase_running_seconds,
+    runtime_window_start_time,
+    updated_at,
+    last_account_end_time,
+    now,
+):
+    raw_running_seconds = max(0, _parse_int(purchase_running_seconds))
+    effective_window_start_time = runtime_window_start_time
+    source = "stored"
+    rolled = False
+    if effective_window_start_time is None:
+        source = "missing"
+        if raw_running_seconds > 0:
+            legacy_start_time = updated_at or last_account_end_time
+            if legacy_start_time is not None:
+                effective_window_start_time = legacy_start_time
+                source = "legacy_fallback"
+
+    effective_running_seconds = min(raw_running_seconds, ACCOUNT_MAX_PURCHASE_SECONDS)
+    if effective_window_start_time is not None:
+        elapsed_since_start = (now - effective_window_start_time).total_seconds()
+        if elapsed_since_start >= ACCOUNT_LIMIT_COOLDOWN_SECONDS:
+            window_step_count = int(elapsed_since_start // ACCOUNT_LIMIT_COOLDOWN_SECONDS)
+            effective_window_start_time = effective_window_start_time + timedelta(
+                seconds=window_step_count * ACCOUNT_LIMIT_COOLDOWN_SECONDS
+            )
+            effective_running_seconds = 0
+            rolled = True
+            if source == "stored":
+                source = "rolled_forward"
+
+    remaining_seconds = max(
+        0,
+        ACCOUNT_MAX_PURCHASE_SECONDS - min(ACCOUNT_MAX_PURCHASE_SECONDS, effective_running_seconds),
+    )
+    return {
+        "effective_runtime_window_start_time": _serialize_datetime(effective_window_start_time),
+        "runtime_window_total_seconds": ACCOUNT_MAX_PURCHASE_SECONDS,
+        "runtime_window_total_text": _format_duration_text(ACCOUNT_MAX_PURCHASE_SECONDS),
+        "runtime_window_used_seconds": effective_running_seconds,
+        "runtime_window_used_text": _format_duration_text(effective_running_seconds),
+        "runtime_window_remaining_seconds": remaining_seconds,
+        "runtime_window_remaining_text": _format_duration_text(remaining_seconds),
+        "runtime_window_source": source,
+        "runtime_window_has_rolled": rolled,
     }
 
 
@@ -405,6 +466,7 @@ def _row_to_view_record(row, now):
     last_limit_time = _parse_datetime(row["last_limit_time"])
     last_account_end_time = _parse_datetime(row["last_account_end_time"])
     updated_at = _parse_datetime(row["updated_at"])
+    runtime_window_start_time = _parse_datetime(row["runtime_window_start_time"])
 
     record = {
         "nickname": str(row["nickname"] or "").strip(),
@@ -422,6 +484,7 @@ def _row_to_view_record(row, now):
         "round_purchase_fail_count": _parse_int(row["round_purchase_fail_count"]),
         "current_balance": str(row["current_balance"] or "").strip(),
         "purchase_running_seconds": _parse_int(row["purchase_running_seconds"]),
+        "runtime_window_start_time": _serialize_datetime(runtime_window_start_time),
         "round_status": str(row["round_status"] or "").strip(),
     }
     record["item_quantity"] = record["baseline_item_count"]
@@ -429,6 +492,15 @@ def _row_to_view_record(row, now):
     record["current_balance_wan"] = _format_balance_for_wan_input(record["current_balance"])
     record["updated_at_relative"] = _format_updated_at_relative(updated_at, now)
     record.update(_build_cooldown_fields(last_limit_time, now))
+    record.update(
+        _build_runtime_window_fields(
+            record["purchase_running_seconds"],
+            runtime_window_start_time,
+            updated_at,
+            last_account_end_time,
+            now,
+        )
+    )
     return record
 
 
@@ -821,6 +893,7 @@ def update_account_view_record(
         round_purchase_fail_count=current_record.round_purchase_fail_count,
         current_balance=storage_balance_text,
         purchase_running_seconds=current_record.purchase_running_seconds,
+        runtime_window_start_time=current_record.runtime_window_start_time,
         round_status=normalized_round_status,
     )
 

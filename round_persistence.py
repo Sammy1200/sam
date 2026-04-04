@@ -338,7 +338,7 @@ def _save_record(record):
 
 
 def persist_minimal_item_balance_sync():
-    """高频最小同步：仅同步当前真实库存与余额。"""
+    """库存变化时最小同步库存、余额和运行时间字段。"""
     if state.temporary_purchase_mode:
         return AccountWriteResult("skipped", "临时模式不写入 canonical SQLite")
 
@@ -360,6 +360,13 @@ def persist_minimal_item_balance_sync():
 
     effective_balance = _get_effective_balance()
     table_name = state.account_db_table_name or CANONICAL_ACCOUNT_STATS_TABLE
+    sync_runtime_window_state(
+        persist_if_changed=False,
+        initialize_if_missing=False,
+        allow_legacy_fallback=False,
+    )
+    reached_time = refresh_account_limit_reached_at()
+    runtime_seconds = max(0, int(get_current_elapsed()))
     write_time = datetime.now()
     result = update_canonical_account_item_balance_fields(
         state.account_db_path,
@@ -368,20 +375,34 @@ def persist_minimal_item_balance_sync():
         effective_balance,
         table_name=table_name,
         updated_at=write_time,
+        purchase_running_seconds=runtime_seconds,
+        runtime_window_start_time=state.runtime_window_start_time,
+        last_limit_time=reached_time,
+        update_last_limit_time=(
+            reached_time is not None and state.last_limit_time != reached_time
+        ),
     )
 
     balance_log_text = effective_balance or "保持原值"
     if result.status == "success":
         state.updated_at = write_time
+        state.round_purchase_running_seconds = float(runtime_seconds)
+        if reached_time is not None:
+            state.last_limit_time = reached_time
         print(
             "[账号数据] 实时库存同步完成："
-            f"昵称={nickname}，道具库存={runtime_item_quantity}，余额={balance_log_text}"
+            f"昵称={nickname}，道具库存={runtime_item_quantity}，"
+            f"余额={balance_log_text}，累计抢购秒数={runtime_seconds}"
         )
         logger.info(
-            "[账号数据] 实时库存同步完成：昵称=%s 道具库存=%s 余额=%s",
+            "[账号数据] 实时库存同步完成：昵称=%s 道具库存=%s 余额=%s 累计抢购秒数=%s 运行窗口起点=%s",
             nickname,
             runtime_item_quantity,
             balance_log_text,
+            runtime_seconds,
+            state.runtime_window_start_time.strftime("%Y-%m-%d %H:%M:%S")
+            if state.runtime_window_start_time is not None
+            else "无",
         )
     elif result.status != "skipped":
         logger.warning("[账号数据] 实时库存同步失败：昵称=%s 原因=%s", nickname, result.reason)
