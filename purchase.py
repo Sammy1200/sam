@@ -57,11 +57,11 @@ def get_battle_report():
     bal_str = str(state.current_balance)
     return (
         "--------------------\n"
-        f"💰 当前余额: {bal_str}\n"
-        f"✔ 成功抢购: {state.success_count} 次\n"
-        f"✖ 失败抢购: {state.fail_count} 次\n"
-        f"📦 累计上架: {state.total_listed_count} 件\n"
-        f"⏱️ 运行时间: {h}小时{m}分{s}秒"
+        f"当前余额：{bal_str}\n"
+        f"抢购成功：{state.success_count} 次\n"
+        f"抢购失败：{state.fail_count} 次\n"
+        f"累计上架：{state.total_listed_count} 件\n"
+        f"运行时间：{h}小时{m}分{s}秒"
     )
 
 
@@ -91,7 +91,7 @@ def reset_purchase_counters(reason):
 
     for counter_name, counter_label in counters_to_reset:
         setattr(state, counter_name, 0)
-        print(f"[重置] {reason}，{counter_label}已清零: {counter_name}=0")
+        print(f"[重置] {reason}，{counter_label}已清零。")
 
     if state.overlay_root:
         try:
@@ -128,9 +128,9 @@ def check_balance_limit(frame):
         if real_val < MAX_PRICE:
             state.account_round_end_status = "余额不足"
             state.overlay_status = "余额不足"
-            ui_print(f"🛑 余额不足！金额 {bal_str}，准备自动换号。", save_log=True)
-            print(f"[余额不足] 当前余额: {bal_str}，触发自动换号")
-            async_push_msg("【余额不足】准备切换大区", f"当前余额: {bal_str}，已触发自动换号。")
+            ui_print(f"余额不足，当前金额 {bal_str}，准备自动换号。", save_log=True)
+            print(f"[余额不足] 当前余额：{bal_str}，已触发自动换号")
+            async_push_msg("【余额不足】准备换号换区", f"当前余额：{bal_str}，已触发自动换号。")
             state.need_switch_server = True
             return False
     except:
@@ -212,7 +212,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
 
                 if (current_time - last_refresh > STUCK_PUSH_INTERVAL and
                         current_time - last_stuck_push_time > STUCK_PUSH_INTERVAL):
-                    async_push_msg("🚨 [2号电脑] 脚本卡死警告", "超 5 分钟未执行刷新。")
+                    async_push_msg("【2号电脑】脚本卡顿提醒", "已超过 5 分钟未执行刷新。")
                     last_stuck_push_time = current_time
 
                 raw_frame = safe_get_frame(camera)
@@ -232,7 +232,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                     state.limit_count = 0
                     state.unknown_page_count = 0
                     last_refresh = time.time()
-                    price = price_text if price_value is not None else f"prefix {price_text}"
+                    price = price_text if price_value is not None else f"前缀识别 {price_text}"
 
                     if price_action == "accept":
                         fast_click(BUY_POS)
@@ -250,7 +250,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                             last_success_time = last_idle_push_time = time.time()
                             if state.overlay_root:
                                 state.overlay_root.after(0, update_score_text)
-                            ui_print(f"✔ 抢到！识别价格：{price}", save_log=True, show_console=False)
+                            ui_print(f"抢购成功，识别价格：{price}", save_log=True, show_console=False)
                             precise_sleep(0.2)
                             fast_click(SUCCESS_CONFIRM_POS)
                             precise_sleep(0.2)
@@ -260,14 +260,14 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                             state.round_purchase_fail_count += 1
                             if state.overlay_root:
                                 state.overlay_root.after(0, update_score_text)
-                            ui_print(f"✖ 错过！识别价格：{price}", save_log=True, show_console=False)
+                            ui_print(f"抢购失败，识别价格：{price}", save_log=True, show_console=False)
                             click_exit()
 
                         if wait_and_recognize_balance(EXIT_DELAY, camera):
                             if purchase_succeeded:
                                 sync_result = persist_minimal_item_balance_sync()
                                 if sync_result.status not in ("success", "skipped"):
-                                    ui_print(f"SQLite 实时库存同步失败: {sync_result.reason}", save_log=True)
+                                    ui_print(f"实时库存同步失败：{sync_result.reason}", save_log=True)
                             if not check_trigger_listing(camera):
                                 return
                             fast_click(REFRESH_POS)
@@ -275,7 +275,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                         elif state.need_switch_server:
                             return
                     else:
-                        ui_print(f"⏭️ 价格不符：{price}", is_replace=True)
+                        ui_print(f"价格不符：{price}", is_replace=True)
                         click_exit()
                         if wait_and_recognize_balance(MISMATCH_EXIT_DELAY, camera):
                             if not check_trigger_listing(camera):
@@ -287,7 +287,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                 else:
                     if is_image_present(frame, MONITOR_MEIHUO, temp_meihuo):
                         state.unknown_page_count = 0
-                        ui_print("⚡ 识别到售空！", is_replace=True)
+                        ui_print("已识别到售空。", is_replace=True)
                         click_exit()
                         if wait_and_recognize_balance(EXIT_DELAY, camera):
                             if not check_trigger_listing(camera):
@@ -307,7 +307,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                         if is_normal_empty:
                             state.limit_count += 1
                             state.unknown_page_count = 0
-                            ui_print(f"🔄 店铺空置 ({state.limit_count}/{ACCOUNT_LIMIT_THRESHOLD})", is_replace=True)
+                            ui_print(f"店铺空置（{state.limit_count}/{ACCOUNT_LIMIT_THRESHOLD}）", is_replace=True)
                             if state.limit_count >= ACCOUNT_LIMIT_THRESHOLD:
                                 if state.temporary_purchase_mode:
                                     estimated_total = int(state.baseline_item_count)
@@ -321,7 +321,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                                     return
                                 state.account_round_end_status = "账号限制"
                                 state.overlay_status = "账号限制"
-                                async_push_msg("【账号被限】准备切换大区", "连续多次店铺为空，触发自动切号。")
+                                async_push_msg("【账号限制】准备换号换区", "连续多次店铺为空，已触发自动切号。")
                                 state.need_switch_server = True
                                 return
                             if not check_balance_limit(frame):
@@ -335,7 +335,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                             last_refresh = time.time()
                         else:
                             if state.unknown_page_count == 0 or time_since_last_action > 10.0:
-                                ui_print("\n⚠️ 画面异常！全场景识别...", save_log=True)
+                                ui_print("\n画面异常，开始全场景识别。", save_log=True)
                                 is_unknown_page = False
                                 if is_image_present(frame, MONITOR_DIYICI, temp_diyici, threshold=0.6):
                                     fast_click(DIYICI_CLICK_POS)
@@ -353,7 +353,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                                     state.unknown_page_count += 1
                                     if state.unknown_page_count >= 5:
                                         state.overlay_status = "未知异常"
-                                        async_push_msg("🚨 [2号电脑] 未知死锁", "长时卡在未知页面。")
+                                        async_push_msg("【2号电脑】未知页面卡死", "长时间停留在未知页面。")
                                         state.unknown_page_count = 0
                                         if not state.IS_PAUSED:
                                             toggle_pause()
@@ -371,7 +371,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                             else:
                                 current_sec = int(time_since_last_action)
                                 if current_sec != last_abnormal_print_sec:
-                                    ui_print(f"⏳ 等待场景识别介入（{current_sec}秒/10秒）", is_replace=True)
+                                    ui_print(f"等待场景识别介入（{current_sec}秒/10秒）", is_replace=True)
                                     last_abnormal_print_sec = current_sec
 
                 time.sleep(0.002)

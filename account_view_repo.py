@@ -637,11 +637,11 @@ def _count_canonical_records(database_path, table_name):
 def _build_source_diagnostics(resolved_source, real_record_count):
     resolution_type = resolved_source.get("resolution_type")
     if resolution_type == "git_worktree_fallback":
-        resolution_label = "当前工作树未找到库，已回退到 Git 主工作树数据源"
+        resolution_label = "当前工作树未找到数据库，已回退到 Git 主工作树数据源"
     elif resolution_type == "current_search":
-        resolution_label = "当前工作树 canonical 数据源"
+        resolution_label = "当前工作树主数据库数据源"
     else:
-        resolution_label = "未找到 canonical 数据源"
+        resolution_label = "未找到主数据库数据源"
 
     return {
         "current_database_path": resolved_source.get("database_path") or "",
@@ -848,7 +848,7 @@ def update_account_view_record(
     database_path = resolved_source.get("database_path") or ""
     table_name = resolved_source.get("table_name") or CANONICAL_ACCOUNT_STATS_TABLE
     if not database_path or not os.path.isfile(database_path):
-        result["message"] = "canonical SQLite 不存在，当前无法写入。"
+        result["message"] = "主 SQLite 数据库不存在，当前无法写入。"
         return result
 
     current_record = read_canonical_account_stats_record(database_path, normalized_nickname, table_name)

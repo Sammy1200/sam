@@ -19,17 +19,29 @@ def _format_value(value):
     return escape(text) if text else "-"
 
 
-def _render_table(headers, rows):
-    header_html = "".join(f"<th>{escape(str(header))}</th>" for header in headers)
+def _render_table(headers, rows, column_classes=None, table_class=""):
+    column_classes = list(column_classes or [])
+    table_class_attr = f' class="{escape(table_class, quote=True)}"' if table_class else ""
+    header_parts = []
+    for index, header in enumerate(headers):
+        column_class = column_classes[index] if index < len(column_classes) else ""
+        class_attr = f' class="{escape(column_class, quote=True)}"' if column_class else ""
+        header_parts.append(f"<th{class_attr}>{escape(str(header))}</th>")
+    header_html = "".join(header_parts)
     body_parts = []
     for row in rows:
-        cell_html = "".join(f"<td>{cell}</td>" for cell in row)
+        cells = []
+        for index, cell in enumerate(row):
+            column_class = column_classes[index] if index < len(column_classes) else ""
+            class_attr = f' class="{escape(column_class, quote=True)}"' if column_class else ""
+            cells.append(f"<td{class_attr}>{cell}</td>")
+        cell_html = "".join(cells)
         body_parts.append(f"<tr>{cell_html}</tr>")
     body_html = "".join(body_parts) if body_parts else (
         f"<tr><td colspan=\"{len(headers)}\">暂无数据</td></tr>"
     )
     return (
-        "<table>"
+        f"<table{table_class_attr}>"
         f"<thead><tr>{header_html}</tr></thead>"
         f"<tbody>{body_html}</tbody>"
         "</table>"
@@ -45,19 +57,19 @@ def _render_kv_table(items):
 
 def _render_health_summary(health):
     items = [
-        ("存在重复 execution_slot", health.get("has_duplicate_execution_slots")),
-        ("存在缺失 execution_slot", health.get("has_missing_execution_slots")),
+        ("存在重复执行位", health.get("has_duplicate_execution_slots")),
+        ("存在缺失执行位", health.get("has_missing_execution_slots")),
         ("存在关键字段缺失", health.get("has_missing_critical_fields")),
-        ("runtime 快照存在", health.get("runtime_snapshot_exists")),
-        ("runtime 命中 canonical", health.get("runtime_matched_canonical_record")),
+        ("辅助快照存在", health.get("runtime_snapshot_exists")),
+        ("辅助快照命中主记录", health.get("runtime_matched_canonical_record")),
     ]
     if "runtime_consistency" in health:
         runtime_consistency = health.get("runtime_consistency") or {}
         items.extend(
             [
-                ("runtime 明显滞后", runtime_consistency.get("runtime_is_stale")),
-                ("runtime 与 canonical 一致", runtime_consistency.get("runtime_matches_canonical")),
-                ("runtime 不一致字段", runtime_consistency.get("runtime_mismatch_fields")),
+                ("辅助快照明显滞后", runtime_consistency.get("runtime_is_stale")),
+                ("辅助快照与主记录一致", runtime_consistency.get("runtime_matches_canonical")),
+                ("辅助快照不一致字段", runtime_consistency.get("runtime_mismatch_fields")),
             ]
         )
     return _render_kv_table(items)
@@ -72,12 +84,12 @@ def _render_source_notice(source_summary=None):
     return f"""
 <div class="notice">
   <strong>数据来源说明：</strong>
-  canonical SQLite（表：<code>{escape(str(canonical_table_name))}</code>）是主数据源；
-  runtime 仅为辅助快照，只用于一致性对照，不参与主展示口径。
+  主 SQLite 数据表（表：<code>{escape(str(canonical_table_name))}</code>）是唯一真实数据源；
+  辅助快照只用于一致性对照，不参与主展示口径。
   <br>
-  canonical 库：<code>{canonical_database_path or "-"}</code>
+  主库路径：<code>{canonical_database_path or "-"}</code>
   <br>
-  runtime 库：<code>{runtime_database_path or "-"}</code>（存在：{runtime_database_exists}）
+  辅助快照路径：<code>{runtime_database_path or "-"}</code>（存在：{runtime_database_exists}）
 </div>
 """
 
@@ -99,7 +111,7 @@ def _render_source_diagnostics(source_diagnostics=None):
       ("解析结果", source_diagnostics.get("resolution_label") or "-"),
       ("回退命中的工作树", resolved_from_root or "-"),
       ("真实账号记录数", real_record_count),
-      ("当前是否展示 demo 数据", demo_tip),
+      ("当前是否展示演示数据", demo_tip),
   ))}
 </div>
 """
@@ -120,7 +132,7 @@ def _render_edit_notice():
 <div class="edit-notice">
   <strong>当前详情页支持最小编辑：</strong>
   仅允许修改 3 个字段：道具基数、账号状态、余额（万）。
-  不支持批量编辑，不支持自动刷新，也不会改动 runtime 逻辑。
+  不支持批量编辑，不支持自动刷新，也不会改动辅助快照逻辑。
 </div>
 """
 
@@ -181,12 +193,12 @@ def _render_demo_list_notice():
 
 def _render_execution_slot_summary(summary):
     items = [
-        ("expected_execution_slots", summary.get("expected_execution_slots")),
-        ("expected_execution_slot_count", summary.get("expected_execution_slot_count")),
-        ("present_execution_slots", summary.get("present_execution_slots")),
-        ("present_execution_slot_count", summary.get("present_execution_slot_count")),
-        ("missing_execution_slots", summary.get("missing_execution_slots")),
-        ("missing_execution_slot_count", summary.get("missing_execution_slot_count")),
+        ("应有执行位列表", summary.get("expected_execution_slots")),
+        ("应有执行位数量", summary.get("expected_execution_slot_count")),
+        ("已覆盖执行位列表", summary.get("present_execution_slots")),
+        ("已覆盖执行位数量", summary.get("present_execution_slot_count")),
+        ("缺失执行位列表", summary.get("missing_execution_slots")),
+        ("缺失执行位数量", summary.get("missing_execution_slot_count")),
     ]
     return _render_kv_table(items)
 
@@ -194,14 +206,14 @@ def _render_execution_slot_summary(summary):
 def _render_runtime_consistency_summary(runtime_result, runtime_consistency):
     runtime_snapshot = runtime_result.get("snapshot") or {}
     items = [
-        ("runtime 快照存在", runtime_result.get("database_exists")),
-        ("runtime 当前执行位", runtime_snapshot.get("current_execution_slot")),
-        ("runtime 当前昵称", runtime_snapshot.get("current_nickname")),
-        ("runtime 快照更新时间", runtime_snapshot.get("updated_at")),
-        ("runtime 明显滞后", runtime_consistency.get("runtime_is_stale")),
-        ("runtime 滞后秒数", runtime_consistency.get("runtime_lag_seconds")),
-        ("runtime 与 canonical 一致", runtime_consistency.get("runtime_matches_canonical")),
-        ("runtime 不一致字段", runtime_consistency.get("runtime_mismatch_fields")),
+        ("辅助快照存在", runtime_result.get("database_exists")),
+        ("辅助快照当前执行位", runtime_snapshot.get("current_execution_slot")),
+        ("辅助快照当前昵称", runtime_snapshot.get("current_nickname")),
+        ("辅助快照更新时间", runtime_snapshot.get("updated_at")),
+        ("辅助快照明显滞后", runtime_consistency.get("runtime_is_stale")),
+        ("辅助快照滞后秒数", runtime_consistency.get("runtime_lag_seconds")),
+        ("辅助快照与主记录一致", runtime_consistency.get("runtime_matches_canonical")),
+        ("辅助快照不一致字段", runtime_consistency.get("runtime_mismatch_fields")),
     ]
     return _render_kv_table(items)
 
@@ -400,7 +412,7 @@ def _render_account_edit_form(record, edit_meta=None, edit_result=None):
         <input type="text" name="current_balance_wan" inputmode="decimal" required value="{escape(str(form_values.get('current_balance_wan') or ''), quote=True)}">
         <span class="unit-tag">{escape(balance_input_unit)}</span>
       </div>
-      <small>页面输入和展示都按“万”为单位；提交时会按 canonical 当前存储口径写入。</small>
+      <small>页面输入和展示都按“万”为单位；提交时会按主库当前存储口径写入。</small>
       {_render_field_error(field_errors, "current_balance_wan")}
     </label>
     <div class="form-actions">
@@ -528,11 +540,22 @@ def _base_page(title, body_html):
     .inline-result { border-radius: 6px; padding: 6px 8px; font-size: 12px; line-height: 1.5; }
     .inline-result.success { background: #dafbe1; color: #116329; }
     .inline-result.error { background: #ffebe9; color: #cf222e; }
+    .account-table { table-layout: fixed; }
+    .account-table .col-slot { width: 84px; }
+    .account-table .col-name { width: 120px; }
+    .account-table .col-inventory { width: 150px; }
+    .account-table .col-balance { width: 108px; }
+    .account-table .col-runtime { width: 140px; }
+    .account-table .col-status { width: 140px; }
+    .account-table .col-allow { width: 92px; }
+    .account-table .col-cooldown { width: 130px; }
+    .account-table .col-action { width: 150px; }
     @media (max-width: 760px) {
       body { margin: 12px; }
       .section { padding: 12px; }
       .input-with-unit { flex-direction: column; align-items: stretch; }
       .unit-tag { align-self: flex-start; }
+      .account-table { table-layout: auto; }
     }
     """
     return f"""<!DOCTYPE html>
@@ -614,13 +637,13 @@ def render_index_page(view_rows_result, runtime_result, edit_result=None):
     demo_notice_html = _render_demo_list_notice() if using_demo_rows else ""
 
     body_html = f"""
-<h1>SQLite 查看页</h1>
+<h1>账号数据查看页</h1>
 {_render_read_only_notice()}
 {_render_edit_result(edit_result)}
 {_render_source_notice(source_summary)}
 {_render_source_diagnostics(source_diagnostics)}
 <div class="meta">
-  canonical 库：<code>{escape(str(view_rows_result.get("database_path") or ""))}</code><br>
+  主库路径：<code>{escape(str(view_rows_result.get("database_path") or ""))}</code><br>
   生成时间：{_format_value(view_rows_result.get("generated_at"))}
 </div>
 
@@ -631,23 +654,23 @@ def render_index_page(view_rows_result, runtime_result, edit_result=None):
 </div>
 
 <div class="section">
-  <h2>Health 摘要</h2>
+  <h2>数据健康摘要</h2>
   {_render_health_summary(health)}
 </div>
 
 <div class="section">
-  <h2>execution_slot 覆盖情况</h2>
-  <p>首页明确展示 canonical 视角下已覆盖与缺失的执行位，便于快速判断槽位是否齐全。</p>
+  <h2>执行位覆盖情况</h2>
+  <p>首页明确展示主库视角下已覆盖与缺失的执行位，便于快速判断槽位是否齐全。</p>
   {_render_execution_slot_summary(execution_slot_summary)}
 </div>
 
 <div class="section">
-  <h2>Runtime 辅助快照摘要</h2>
+  <h2>辅助快照摘要</h2>
   {_render_kv_table(runtime_items)}
 </div>
 
 <div class="section">
-  <h2>重复 execution_slot</h2>
+  <h2>重复执行位</h2>
   {_render_table(("执行位", "昵称列表"), duplicate_rows)}
 </div>
 
@@ -656,7 +679,7 @@ def render_index_page(view_rows_result, runtime_result, edit_result=None):
   {_render_table(("昵称", "执行位", "缺失字段"), missing_rows)}
 </div>
 """
-    return _base_page("SQLite 查看页", body_html)
+    return _base_page("账号数据查看页", body_html)
 
 
 def render_account_detail_page(detail_result, runtime_result, edit_result=None):
@@ -672,12 +695,12 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None):
 {_render_read_only_notice()}
 {_render_source_notice(source_summary)}
 <div class="meta">
-  查询条件：nickname={_format_value(lookup.get("nickname"))}，
-  execution_slot={_format_value(lookup.get("execution_slot"))}
+  查询条件：昵称={_format_value(lookup.get("nickname"))}，
+  执行位={_format_value(lookup.get("execution_slot"))}
 </div>
 <div class="section">
   <p>未根据当前查询条件找到对应账号记录。</p>
-  <p>请返回首页重新选择，或确认 nickname / execution_slot 是否填写正确。</p>
+  <p>请返回首页重新选择，或确认昵称参数 / 执行位参数是否填写正确。</p>
   <p><a href="/">返回首页</a></p>
 </div>
 """
@@ -708,8 +731,8 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None):
     record_health_items = [
         ("存在关键字段缺失", health.get("has_missing_critical_fields")),
         ("缺失字段", health.get("missing_critical_fields")),
-        ("canonical 更新时间", record.get("updated_at")),
-        ("runtime 快照存在", runtime_result.get("database_exists")),
+        ("主库更新时间", record.get("updated_at")),
+        ("辅助快照存在", runtime_result.get("database_exists")),
     ]
 
     runtime_consistency = health.get("runtime_consistency") or {}
@@ -720,9 +743,9 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None):
 {_render_edit_result(edit_result)}
 {_render_source_notice(source_summary)}
 <div class="meta">
-  canonical 库：<code>{escape(str(detail_result.get("database_path") or ""))}</code><br>
-  查询条件：nickname={_format_value(lookup.get("nickname"))}，
-  execution_slot={_format_value(lookup.get("execution_slot"))}
+  主库路径：<code>{escape(str(detail_result.get("database_path") or ""))}</code><br>
+  查询条件：昵称={_format_value(lookup.get("nickname"))}，
+  执行位={_format_value(lookup.get("execution_slot"))}
 </div>
 
 <div class="section">
@@ -742,14 +765,14 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None):
 </div>
 
 <div class="section">
-  <h2>当前记录 Health</h2>
-  <p>这里只展示当前 canonical 记录本身的完整性和可读性摘要，不写回任何额外数据。</p>
+  <h2>当前记录健康摘要</h2>
+  <p>这里只展示当前主库记录本身的完整性和可读性摘要，不写回任何额外数据。</p>
   {_render_kv_table(record_health_items)}
 </div>
 
 <div class="section">
-  <h2>与 Runtime 的一致性摘要</h2>
-  <p>runtime 仅做辅助对照，以下结果用于观察当前快照与 canonical 详情是否一致。</p>
+  <h2>与辅助快照的一致性摘要</h2>
+  <p>辅助快照仅做对照，以下结果用于观察当前快照与主库详情是否一致。</p>
   {_render_runtime_consistency_summary(runtime_result, runtime_consistency)}
 </div>
 """

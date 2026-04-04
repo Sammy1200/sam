@@ -22,7 +22,7 @@ OVERLAY_NORMAL_GEOMETRY = "+20+20"
 OVERLAY_NORMAL_BG = "black"
 OVERLAY_NORMAL_ALPHA = 0.75
 OVERLAY_SCORE_LABEL_STYLE = {
-    "font": ("Microsoft YaHei", 11, "bold"),
+    "font": ("NSimSun", 12, "bold"),
     "fg": "gold",
     "bg": OVERLAY_NORMAL_BG,
     "justify": "left",
@@ -44,6 +44,26 @@ OVERLAY_MINI_LABEL_STYLE = {
 OVERLAY_MINI_LABEL_PACK = {"padx": 10, "pady": 8, "anchor": "w"}
 
 
+class ChineseLevelFormatter(logging.Formatter):
+    """将日志级别名映射为中文，避免用户看到英文级别。"""
+
+    _LEVEL_NAMES = {
+        logging.DEBUG: "调试",
+        logging.INFO: "信息",
+        logging.WARNING: "警告",
+        logging.ERROR: "错误",
+        logging.CRITICAL: "严重",
+    }
+
+    def format(self, record):
+        original_levelname = record.levelname
+        record.levelname = self._LEVEL_NAMES.get(record.levelno, original_levelname)
+        try:
+            return super().format(record)
+        finally:
+            record.levelname = original_levelname
+
+
 def setup_logger():
     """初始化日志，同时输出到控制台和文件。"""
     logs_dir = os.path.join(SCRIPT_DIR, "logs")
@@ -63,7 +83,7 @@ def setup_logger():
         except:
             pass
 
-    formatter = logging.Formatter(
+    formatter = ChineseLevelFormatter(
         "[%(asctime)s] %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
@@ -456,11 +476,11 @@ def _get_battle_report():
     bal_str = str(state.current_balance)
     return (
         f"--------------------\n"
-        f"余额: {bal_str}\n"
-        f"抢购成功: {state.success_count}\n"
-        f"抢购失败: {state.fail_count}\n"
-        f"累计上架: {state.total_listed_count}\n"
-        f"运行时长: {h}小时 {m}分 {s}秒"
+        f"余额：{bal_str}\n"
+        f"抢购成功：{state.success_count}\n"
+        f"抢购失败：{state.fail_count}\n"
+        f"累计上架：{state.total_listed_count}\n"
+        f"运行时长：{h}小时 {m}分 {s}秒"
     )
 
 

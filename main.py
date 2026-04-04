@@ -444,7 +444,7 @@ def _load_current_account_context():
 
     if not nickname:
         state.account_read_status = "nickname_missing"
-        state.account_read_error = "当前账号昵称为空，无法读取 SQLite。"
+        state.account_read_error = "当前账号昵称为空，无法读取主 SQLite 数据库。"
         state.overlay_status = "未知异常"
         print(f"[账号数据] 读取失败：{state.account_read_error}")
         logger.error(f"[账号数据] 读取失败：{state.account_read_error}")
@@ -453,8 +453,8 @@ def _load_current_account_context():
     database_path, table_name = find_canonical_account_stats_store()
     if not database_path:
         database_path, table_name, inserted_seed_records = ensure_local_canonical_account_stats_store()
-        print(f"[账号数据] 未找到现成账号库，已自动初始化本地 SQLite：{database_path}")
-        logger.info("[账号数据] 未找到现成账号库，已自动初始化本地 SQLite：%s", database_path)
+        print(f"[账号数据] 未找到现成账号库，已自动初始化本地主数据库：{database_path}")
+        logger.info("[账号数据] 未找到现成账号库，已自动初始化本地主数据库：%s", database_path)
         if inserted_seed_records:
             inserted_slots = ",".join(str(record.current_execution_slot) for record in inserted_seed_records)
             inserted_nicknames = ",".join(record.nickname for record in inserted_seed_records)
@@ -478,8 +478,8 @@ def _load_current_account_context():
 
     normalized_count = normalize_canonical_round_status_values(database_path, table_name)
     if normalized_count > 0:
-        print(f"[账号数据] 已归一旧 round_status 样本数据：{normalized_count} 条")
-        logger.info("[账号数据] 已归一旧 round_status 样本数据：%s 条", normalized_count)
+        print(f"[账号数据] 已归一旧状态样本数据：{normalized_count} 条")
+        logger.info("[账号数据] 已归一旧状态样本数据：%s 条", normalized_count)
 
     slot_hint = _parse_slot_from_nickname_hint(nickname)
     record = None
@@ -522,7 +522,7 @@ def _load_current_account_context():
             )
     if record is None:
         state.account_read_status = "account_not_found"
-        state.account_read_error = f"SQLite 中未找到昵称为 {nickname} 的账号记录。"
+        state.account_read_error = f"主 SQLite 数据库中未找到昵称为 {nickname} 的账号记录。"
         state.account_db_path = database_path
         state.account_db_table_name = table_name
         state.overlay_status = "账号未建档"
@@ -766,7 +766,7 @@ def _handle_execution_slot_dispatch(camera):
 
 def _is_web_view_service_response_valid(body_text):
     markers = (
-        "SQLite 查看页",
+        "账号数据查看页",
         "账号详情页",
         "页面不存在。",
         "页面渲染失败",
@@ -829,13 +829,13 @@ def _start_web_view_server_in_background():
         logger.error(message)
         return False
 
-    logger.info("[网页服务] 已发起后台静默启动，pid=%s", process.pid)
-    print(f"[网页服务] 已发起后台静默启动，pid={process.pid}")
+    logger.info("[网页服务] 已发起后台静默启动，进程号=%s", process.pid)
+    print(f"[网页服务] 已发起后台静默启动，进程号={process.pid}")
 
     for _ in range(6):
         time.sleep(0.3)
         if process.poll() is not None:
-            message = f"[网页服务] 子进程已退出，returncode={process.returncode}"
+            message = f"[网页服务] 子进程已退出，返回码={process.returncode}"
             print(message)
             logger.error(message)
             return False
@@ -997,8 +997,8 @@ def main():
                 )
 
                 if state.account_round_writeback_failed:
-                    print(f"[账号数据] SQLite 写回失败：{state.account_round_writeback_error}")
-                    logger.error("[账号数据] SQLite 写回失败：%s", state.account_round_writeback_error)
+                    print(f"[账号数据] 主 SQLite 数据库写回失败：{state.account_round_writeback_error}")
+                    logger.error("[账号数据] 主 SQLite 数据库写回失败：%s", state.account_round_writeback_error)
                     _finalize_current_account_round("未知异常")
                     return
 

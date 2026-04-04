@@ -24,6 +24,11 @@ _render_source_notice = base_templates._render_source_notice
 _render_table = base_templates._render_table
 
 
+def _format_runtime_remaining_text(value):
+    text = str(value or "").strip()
+    return escape(text) if text else "-"
+
+
 def _render_read_only_notice():
     return """
 <div class="readonly-notice">
@@ -39,7 +44,7 @@ def _render_edit_notice():
 <div class="edit-notice">
   <strong>当前详情页支持最小编辑：</strong>
   仅允许修改 3 个字段：道具库存、账号状态、余额（万）。
-  提交后会直接写入 canonical SQLite，并执行回读确认。
+  提交后会直接写入主 SQLite 数据库，并执行回读确认。
 </div>
 """
 
@@ -57,6 +62,7 @@ def _build_demo_account_rows():
             "updated_at_relative": "5小时前",
             "allow_purchase": True,
             "cooldown_remaining_seconds": 0,
+            "runtime_window_remaining_text": "2小时50分0秒",
         },
         {
             "current_execution_slot": 2,
@@ -69,6 +75,7 @@ def _build_demo_account_rows():
             "updated_at_relative": "6小时前",
             "allow_purchase": False,
             "cooldown_remaining_seconds": 1280,
+            "runtime_window_remaining_text": "1小时26分40秒",
         },
         {
             "current_execution_slot": 3,
@@ -81,6 +88,7 @@ def _build_demo_account_rows():
             "updated_at_relative": "7小时前",
             "allow_purchase": False,
             "cooldown_remaining_seconds": 0,
+            "runtime_window_remaining_text": "0秒",
         },
         {
             "current_execution_slot": 4,
@@ -93,6 +101,7 @@ def _build_demo_account_rows():
             "updated_at_relative": "8小时前",
             "allow_purchase": True,
             "cooldown_remaining_seconds": 0,
+            "runtime_window_remaining_text": "48分32秒",
         },
     ]
 
@@ -214,7 +223,7 @@ def _render_account_edit_form(record, edit_meta=None, edit_result=None):
         <input type="text" name="current_balance_wan" inputmode="decimal" required value="{escape(str(form_values.get('current_balance_wan') or ''), quote=True)}">
         <span class="unit-tag">{escape(balance_input_unit)}</span>
       </div>
-      <small>页面输入和展示都按“万”为单位；提交时会按 canonical 当前存储口径写入。</small>
+      <small>页面输入和展示都按“万”为单位；提交时会按主库当前存储口径写入。</small>
       {_render_field_error(field_errors, "current_balance_wan")}
     </label>
     <div class="form-actions">
@@ -239,6 +248,7 @@ def _build_account_list_rows(rows, edit_meta=None, edit_result=None):
                 f'<div class="muted-text">最后入库/更新：{escape(str(row.get("updated_at_relative") or "-"))}</div></div>'
             )
             balance_cell = _format_balance_wan_display(row.get("current_balance_wan"))
+            runtime_cell = _format_runtime_remaining_text(row.get("runtime_window_remaining_text"))
             status_cell = _format_value(row.get("round_status"))
             action_cell = '<span class="muted-text">演示数据，不可操作</span>'
         else:
@@ -248,12 +258,14 @@ def _build_account_list_rows(rows, edit_meta=None, edit_result=None):
                 edit_meta=edit_meta,
                 edit_result=edit_result,
             )
+            runtime_cell = _format_runtime_remaining_text(row.get("runtime_window_remaining_text"))
         row_items.append(
             (
                 _format_value(row.get("current_execution_slot")),
                 _format_value(nickname),
                 inventory_cell,
                 balance_cell,
+                runtime_cell,
                 status_cell,
                 _format_value(row.get("allow_purchase")),
                 _format_cooldown_remaining_time(row.get("cooldown_remaining_seconds")),
@@ -304,42 +316,53 @@ def render_index_page(view_rows_result, runtime_result, edit_result=None):
     ]
 
     demo_notice_html = _render_demo_list_notice() if using_demo_rows else ""
+    account_table_column_classes = (
+        "col-slot",
+        "col-name",
+        "col-inventory",
+        "col-balance",
+        "col-runtime",
+        "col-status",
+        "col-allow",
+        "col-cooldown",
+        "col-action",
+    )
 
     body_html = f"""
-<h1>SQLite 查看页</h1>
+<h1>账号数据查看页</h1>
 {_render_read_only_notice()}
 {_render_edit_result(edit_result)}
 {_render_source_notice(source_summary)}
 {_render_source_diagnostics(source_diagnostics)}
 <div class="meta">
-  canonical 库：<code>{escape(str(view_rows_result.get("database_path") or ""))}</code><br>
+  主库路径：<code>{escape(str(view_rows_result.get("database_path") or ""))}</code><br>
   生成时间：{_format_value(view_rows_result.get("generated_at"))}
 </div>
 
 <div class="section">
   <h2>账号列表</h2>
   {demo_notice_html}
-  {_render_table(("执行位", "昵称", "道具库存", "余额（万）", "账号状态", "允许抢购", "冷却剩余时间", "详情保存"), row_items)}
+  {_render_table(("执行位", "昵称", "道具库存", "余额（万）", "可运行时间", "账号状态", "允许抢购", "冷却剩余时间", "详情保存"), row_items, column_classes=account_table_column_classes, table_class="account-table")}
 </div>
 
 <div class="section">
-  <h2>Health 摘要</h2>
+  <h2>数据健康摘要</h2>
   {_render_health_summary(health)}
 </div>
 
 <div class="section">
-  <h2>execution_slot 覆盖情况</h2>
-  <p>首页明确展示 canonical 视角下已覆盖与缺失的执行位，便于快速判断槽位是否齐全。</p>
+  <h2>执行位覆盖情况</h2>
+  <p>首页明确展示主库视角下已覆盖与缺失的执行位，便于快速判断槽位是否齐全。</p>
   {_render_execution_slot_summary(execution_slot_summary)}
 </div>
 
 <div class="section">
-  <h2>Runtime 辅助快照摘要</h2>
+  <h2>辅助快照摘要</h2>
   {_render_kv_table(runtime_items)}
 </div>
 
 <div class="section">
-  <h2>重复 execution_slot</h2>
+  <h2>重复执行位</h2>
   {_render_table(("执行位", "昵称列表"), duplicate_rows)}
 </div>
 
@@ -348,7 +371,7 @@ def render_index_page(view_rows_result, runtime_result, edit_result=None):
   {_render_table(("昵称", "执行位", "缺失字段"), missing_rows)}
 </div>
 """
-    return _base_page("SQLite 查看页", body_html)
+    return _base_page("账号数据查看页", body_html)
 
 
 def render_account_detail_page(detail_result, runtime_result, edit_result=None):
@@ -364,12 +387,12 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None):
 {_render_read_only_notice()}
 {_render_source_notice(source_summary)}
 <div class="meta">
-  查询条件：nickname={_format_value(lookup.get("nickname"))}，
-  execution_slot={_format_value(lookup.get("execution_slot"))}
+  查询条件：昵称={_format_value(lookup.get("nickname"))}，
+  执行位={_format_value(lookup.get("execution_slot"))}
 </div>
 <div class="section">
   <p>未根据当前查询条件找到对应账号记录。</p>
-  <p>请返回首页重新选择，或确认 nickname / execution_slot 是否填写正确。</p>
+  <p>请返回首页重新选择，或确认昵称参数 / 执行位参数是否填写正确。</p>
   <p><a href="/">返回首页</a></p>
 </div>
 """
@@ -394,14 +417,15 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None):
     derived_items = [
         ("允许开始时间", record.get("allow_start_time")),
         ("当前可抢购", record.get("allow_purchase")),
+        ("可运行时间", record.get("runtime_window_remaining_text")),
         ("冷却剩余时间", _format_cooldown_remaining_time(record.get("cooldown_remaining_seconds"))),
     ]
 
     record_health_items = [
         ("存在关键字段缺失", health.get("has_missing_critical_fields")),
         ("缺失字段", health.get("missing_critical_fields")),
-        ("canonical 更新时间", record.get("updated_at")),
-        ("runtime 快照存在", runtime_result.get("database_exists")),
+        ("主库更新时间", record.get("updated_at")),
+        ("辅助快照存在", runtime_result.get("database_exists")),
     ]
 
     runtime_consistency = health.get("runtime_consistency") or {}
@@ -412,9 +436,9 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None):
 {_render_edit_result(edit_result)}
 {_render_source_notice(source_summary)}
 <div class="meta">
-  canonical 库：<code>{escape(str(detail_result.get("database_path") or ""))}</code><br>
-  查询条件：nickname={_format_value(lookup.get("nickname"))}，
-  execution_slot={_format_value(lookup.get("execution_slot"))}
+  主库路径：<code>{escape(str(detail_result.get("database_path") or ""))}</code><br>
+  查询条件：昵称={_format_value(lookup.get("nickname"))}，
+  执行位={_format_value(lookup.get("execution_slot"))}
 </div>
 
 <div class="section">
@@ -434,14 +458,14 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None):
 </div>
 
 <div class="section">
-  <h2>当前记录 Health</h2>
-  <p>这里只展示当前 canonical 记录本身的完整性和可读性摘要，不写回任何额外数据。</p>
+  <h2>当前记录健康摘要</h2>
+  <p>这里只展示当前主库记录本身的完整性和可读性摘要，不写回任何额外数据。</p>
   {_render_kv_table(record_health_items)}
 </div>
 
 <div class="section">
-  <h2>与 Runtime 的一致性摘要</h2>
-  <p>runtime 仅做辅助对照，以下结果用于观察当前快照与 canonical 详情是否一致。</p>
+  <h2>与辅助快照的一致性摘要</h2>
+  <p>辅助快照仅做辅助对照，以下结果用于观察当前快照与主库详情是否一致。</p>
   {_render_runtime_consistency_summary(runtime_result, runtime_consistency)}
 </div>
     """
