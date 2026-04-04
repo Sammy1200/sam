@@ -530,14 +530,6 @@ def _load_current_account_context():
         logger.error(f"[账号数据] 读取失败：{state.account_read_error}")
         return False
 
-    now = datetime.now()
-    allow_start_time = now
-    allow_purchase = True
-
-    if record.last_limit_time is not None:
-        allow_start_time = record.last_limit_time + timedelta(seconds=ACCOUNT_LIMIT_COOLDOWN_SECONDS)
-        allow_purchase = now >= allow_start_time
-
     state.current_nickname = record.nickname
     state.baseline_item_count = record.baseline_item_count
     state.last_limit_time = record.last_limit_time
@@ -557,6 +549,12 @@ def _load_current_account_context():
     state.account_db_table_name = table_name
     state.account_record_loaded = True
     runtime_window_sync_result = restore_runtime_window_state()
+    now = datetime.now()
+    allow_start_time = now
+    allow_purchase = True
+    if state.last_limit_time is not None:
+        allow_start_time = state.last_limit_time + timedelta(seconds=ACCOUNT_LIMIT_COOLDOWN_SECONDS)
+        allow_purchase = now >= allow_start_time
     state.account_allow_purchase = allow_purchase
     state.account_allow_start_time = allow_start_time
     state.account_read_status = "ready" if allow_purchase else "waiting_limit_time"

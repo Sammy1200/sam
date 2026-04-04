@@ -1217,6 +1217,10 @@ def update_canonical_account_item_balance_fields(
     current_balance="",
     table_name=CANONICAL_ACCOUNT_STATS_TABLE,
     updated_at=None,
+    purchase_running_seconds=None,
+    runtime_window_start_time=None,
+    last_limit_time=None,
+    update_last_limit_time=False,
 ):
     """最小高频同步：直接更新真实库存字段与余额。"""
     normalized_nickname = str(nickname or "").strip()
@@ -1239,6 +1243,17 @@ def update_canonical_account_item_balance_fields(
 
     normalized_balance = str(current_balance or "").strip()
     normalized_updated_at = _serialize_datetime(updated_at or datetime.now())
+    normalized_running_seconds = None
+    if purchase_running_seconds is not None:
+        try:
+            normalized_running_seconds = max(0, int(float(purchase_running_seconds)))
+        except (TypeError, ValueError):
+            return AccountWriteResult(
+                "invalid_running_seconds",
+                f"invalid purchase_running_seconds: {purchase_running_seconds}",
+            )
+    normalized_window_start_time = _serialize_datetime(runtime_window_start_time)
+    normalized_last_limit_time = _serialize_datetime(last_limit_time)
 
     try:
         conn = sqlite3.connect(database_path)
@@ -1268,9 +1283,17 @@ def update_canonical_account_item_balance_fields(
             f"{_quote_identifier('updated_at')} = ?",
         ]
         params = [desired_item_quantity, normalized_updated_at]
+        if normalized_running_seconds is not None:
+            set_clauses.append(f"{_quote_identifier('purchase_running_seconds')} = ?")
+            params.append(normalized_running_seconds)
+            set_clauses.append(f"{_quote_identifier('runtime_window_start_time')} = ?")
+            params.append(normalized_window_start_time)
         if normalized_balance:
             set_clauses.append(f"{_quote_identifier('current_balance')} = ?")
             params.append(normalized_balance)
+        if update_last_limit_time:
+            set_clauses.append(f"{_quote_identifier('last_limit_time')} = ?")
+            params.append(normalized_last_limit_time)
         params.append(normalized_nickname)
 
         conn.execute("BEGIN IMMEDIATE")
