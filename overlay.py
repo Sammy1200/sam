@@ -118,6 +118,40 @@ def update_score_text():
         pass
 
 
+def _get_balance_display_text():
+    live_balance_text = str(state.current_balance or "").strip()
+    if live_balance_text and not live_balance_text.startswith("获取中"):
+        return live_balance_text
+    last_valid_balance_text = str(state.last_valid_balance or "").strip()
+    if last_valid_balance_text:
+        return last_valid_balance_text
+    round_balance_text = str(state.round_current_balance or "").strip()
+    if round_balance_text:
+        return round_balance_text
+    return "获取中..."
+
+
+def update_score_text():
+    if not state.overlay_root or not state.score_var:
+        return
+
+    elapsed_text = _format_duration(get_current_elapsed())
+    slot_text = str(state.current_execution_slot or "--")
+    current_inventory = _get_current_inventory()
+    balance_text = _get_balance_display_text()
+    msg = (
+        _build_overlay_row("执行位：", slot_text, "抢购运行：", elapsed_text) + "\n"
+        + _build_overlay_row("上架成功：", state.round_listing_success_count, "道具库存：", current_inventory) + "\n"
+        + _build_overlay_row("抢购成功：", state.round_purchase_success_count, "抢购失败：", state.round_purchase_fail_count) + "\n"
+        + _build_overlay_row("当前余额：", balance_text, "当前状态：", _get_overlay_status_text())
+    )
+    try:
+        state.score_var.set(msg)
+        fit_overlay_to_content()
+    except Exception:
+        pass
+
+
 def tick_timer():
     drain_overlay_tasks()
     update_score_text()

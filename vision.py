@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 import re
 import time
+import unicodedata
 import state
 from config import (
     MONITOR_PRICE, MONITOR_CAPACITY, MONITOR_BALANCE,
@@ -377,6 +378,42 @@ def read_capacity(frame):
 
 # ---- 余额 ----
 
+BALANCE_OCR_CHAR_TRANSLATIONS = str.maketrans({
+    "I": "1",
+    "l": "1",
+    "i": "1",
+    "|": "1",
+    "!": "1",
+    "｜": "1",
+    "ｌ": "1",
+    "ｉ": "1",
+    "O": "0",
+    "o": "0",
+    "Q": "0",
+    "D": "0",
+    "路": ".",
+    "'": ".",
+    "`": ".",
+    "，": ",",
+    "。": ".",
+})
+
+
+def _normalize_balance_text(raw_text):
+    """余额 OCR 只做定向纠偏，避免连续 1 在清洗阶段被误删。"""
+    text = unicodedata.normalize("NFKC", raw_text or "").strip()
+    if not text:
+        return ""
+
+    text = text.replace(" ", "").translate(BALANCE_OCR_CHAR_TRANSLATIONS)
+    if any(unit in text for unit in ["万", "亿"]):
+        text = text.replace(",", ".")
+    else:
+        text = text.replace(",", "").replace(".", "")
+
+    return re.sub(r"[^\d\.万亿]", "", text)
+
+
 def get_balance(frame):
     try:
         if not state.ocr_engine:
@@ -386,7 +423,8 @@ def get_balance(frame):
         current_hash = tiny.tobytes()
         if state._last_balance_hash is not None and current_hash == state._last_balance_hash:
             return state.current_balance
-        gray_img = cv2.cvtColor(cropped, cv2.COLOR_BGRA2GRAY)
+        padded_crop = cv2.copyMakeBorder(cropped, 0, 0, 6, 6, cv2.BORDER_REPLICATE)
+        gray_img = cv2.cvtColor(padded_crop, cv2.COLOR_BGRA2GRAY)
         resized = cv2.resize(gray_img, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
         kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
         sharpened = cv2.filter2D(resized, -1, kernel)
@@ -394,7 +432,7 @@ def get_balance(frame):
         final_img = cv2.cvtColor(padded, cv2.COLOR_GRAY2BGR)
         result, _ = state.ocr_engine(final_img)
         if result and len(result) > 0:
-            res_str = "".join([item[1] for item in result])
+            res_str = _normalize_balance_text("".join([item[1] for item in result]))
             if res_str:
                 if any(u in res_str for u in ['万', '亿']):
                     res_str = res_str.replace("。", ".").replace(",", ".")
@@ -405,6 +443,34 @@ def get_balance(frame):
                     res_str.replace(" ", "").replace("·", ".").replace("'", ".").replace("`", "."))
                 if res_str:
                     state._last_balance_hash = current_hash
+            return res_str if res_str else None
+        return None
+    except:
+        return None
+
+
+def get_balance(frame):
+    try:
+        if not state.ocr_engine:
+            return None
+        cropped = crop_frame(frame, MONITOR_BALANCE)
+        tiny = cv2.resize(cropped, (8, 8))
+        current_hash = tiny.tobytes()
+        if state._last_balance_hash is not None and current_hash == state._last_balance_hash:
+            return state.current_balance
+
+        padded_crop = cv2.copyMakeBorder(cropped, 0, 0, 6, 6, cv2.BORDER_REPLICATE)
+        gray_img = cv2.cvtColor(padded_crop, cv2.COLOR_BGRA2GRAY)
+        resized = cv2.resize(gray_img, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+        sharpened = cv2.filter2D(resized, -1, kernel)
+        padded = cv2.copyMakeBorder(sharpened, 30, 30, 30, 30, cv2.BORDER_REPLICATE)
+        final_img = cv2.cvtColor(padded, cv2.COLOR_GRAY2BGR)
+        result, _ = state.ocr_engine(final_img)
+        if result and len(result) > 0:
+            res_str = _normalize_balance_text("".join([item[1] for item in result]))
+            if res_str:
+                state._last_balance_hash = current_hash
             return res_str if res_str else None
         return None
     except:
