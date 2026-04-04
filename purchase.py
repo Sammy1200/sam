@@ -33,7 +33,11 @@ from config import (
     SUCCESS_CONFIRM_POS,
 )
 from overlay import toggle_pause, ui_print, update_score_text
-from round_persistence import persist_minimal_item_balance_sync
+from round_persistence import (
+    ensure_active_runtime_window_state,
+    persist_account_limit_reached_if_needed,
+    persist_minimal_item_balance_sync,
+)
 from switch import is_at_gumu, navigate_to_trade
 from utils import (
     click_exit,
@@ -170,6 +174,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
         state.last_resume_time = time.time()
     else:
         state.last_resume_time = None
+    ensure_active_runtime_window_state()
 
     last_refresh = time.time()
     last_frame = None
@@ -178,6 +183,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
     last_stuck_push_time = time.time()
     last_idle_push_time = time.time()
     last_success_time = time.time()
+    last_runtime_state_check = 0.0
 
     gc.disable()
 
@@ -199,6 +205,10 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
 
             try:
                 current_time = time.time()
+                if current_time - last_runtime_state_check >= 1.0:
+                    ensure_active_runtime_window_state()
+                    persist_account_limit_reached_if_needed()
+                    last_runtime_state_check = current_time
 
                 if (current_time - last_refresh > STUCK_PUSH_INTERVAL and
                         current_time - last_stuck_push_time > STUCK_PUSH_INTERVAL):

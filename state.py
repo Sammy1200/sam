@@ -71,6 +71,7 @@ round_status = "手动结束"
 
 # --- 线程 2：时间字段 ---
 round_purchase_running_seconds = 0.0
+runtime_window_start_time = None
 last_limit_time = None
 last_account_end_time = None
 updated_at = None
