@@ -126,7 +126,7 @@ def execute_listing_routine(camera_obj, is_periodic=False):
 
         sync_result = persist_minimal_item_balance_sync()
         if sync_result.status not in ("success", "skipped"):
-            ui_print(f"SQLite 实时库存同步失败: {sync_result.reason}", save_log=True)
+            ui_print(f"实时库存同步失败：{sync_result.reason}", save_log=True)
 
     try:
         ui_print("开始进入背包并执行上架流程。")
@@ -282,7 +282,7 @@ def execute_listing_routine(camera_obj, is_periodic=False):
         ui_print(f"上架流程执行完毕，共上架 {listed} 个。")
 
     except Exception as exc:
-        ui_print(f"上架过程出现意外报错: {exc}")
+        ui_print(f"上架过程出现意外报错：{exc}")
     finally:
         time.sleep(0.5)
         ui_print("退出背包，按退出键返回交易行并继续抢购。")

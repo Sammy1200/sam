@@ -78,7 +78,7 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
                 title="账号详情页",
                 message="当前访问缺少必要参数，无法定位账号详情。",
                 detail_items=[
-                    ("访问限制", "需要通过 nickname 或 execution_slot 指定单个账号"),
+                    ("访问限制", "需要通过昵称参数或执行位参数指定单个账号"),
                     ("建议访问方式", "请从首页点击“查看详情”，或在地址中传入 ?nickname=昵称 / ?execution_slot=执行位"),
                 ],
             )
@@ -90,10 +90,10 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         except ValueError:
             html = render_message_page(
                 title="账号详情页",
-                message="execution_slot 参数格式不正确，必须是整数。",
+                message="执行位参数格式不正确，必须是整数。",
                 detail_items=[
-                    ("nickname", nickname or None),
-                    ("execution_slot 原始值", execution_slot_raw),
+                    ("昵称参数", nickname or None),
+                    ("执行位原始值", execution_slot_raw),
                 ],
             )
             self._send_html(html, status_code=400)
@@ -113,8 +113,8 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
                 title="账号详情页",
                 message="账号详情查询失败，请稍后重试。",
                 detail_items=[
-                    ("nickname", nickname or None),
-                    ("execution_slot", execution_slot),
+                    ("昵称参数", nickname or None),
+                    ("执行位参数", execution_slot),
                     ("错误信息", str(exc)),
                 ],
             )
@@ -127,8 +127,8 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
                 title="账号详情页",
                 message="未找到对应账号记录，请确认查询参数后重试。",
                 detail_items=[
-                    ("nickname", nickname or None),
-                    ("execution_slot", execution_slot),
+                    ("昵称参数", nickname or None),
+                    ("执行位参数", execution_slot),
                     ("提示", "建议优先从首页账号列表进入详情页"),
                 ],
             )
@@ -183,7 +183,7 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
                 title="账号详情页",
                 message=update_result.get("message") or "账号修改失败。",
                 detail_items=[
-                    ("nickname", nickname or None),
+                    ("昵称参数", nickname or None),
                     ("提交的道具库存", baseline_item_count or None),
                     ("提交的账号状态", round_status or None),
                     ("提交的余额（万）", current_balance_wan or None),

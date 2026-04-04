@@ -27,6 +27,7 @@ from utils import (
 
 DEFAULT_OVERLAY_STATUS_TEXT = "状态待更新"
 F12_VK = 0x7B
+OVERLAY_LEFT_COLUMN_WIDTH = 18
 _pause_hotkey_listener_started = False
 _overlay_shutdown_requested = False
 _overlay_closed_event = threading.Event()
@@ -87,26 +88,28 @@ def _get_current_inventory():
     return max(0, int(state.baseline_item_count or 0))
 
 
+def _format_overlay_value(value, fallback="--"):
+    text = str(value or "").strip()
+    return text or fallback
+
+
+def _build_overlay_row(left_label, left_value, right_label, right_value):
+    left_text = f"{left_label}{_format_overlay_value(left_value)}"
+    right_text = f"{right_label}{_format_overlay_value(right_value)}"
+    return f"{left_text:<{OVERLAY_LEFT_COLUMN_WIDTH}}｜ {right_text}"
+
+
 def update_score_text():
     if not state.overlay_root or not state.score_var:
         return
 
     elapsed_text = _format_duration(get_current_elapsed())
-    status_text = _get_overlay_status_text()
-    nickname_text = str(state.current_nickname or "").strip() or "未设置"
     slot_text = str(state.current_execution_slot or "--")
-    wait_flag_text = "是" if state.account_is_waiting else "否"
-    allow_start_text = _format_account_time(state.account_allow_start_time)
-    remaining_text = _format_remaining_time(state.account_allow_start_time) if state.account_is_waiting else "无需等待"
-    balance_text = _get_balance_display_text()
     current_inventory = _get_current_inventory()
-    updated_at_text = _format_account_time(state.updated_at)
     msg = (
-        f"执行位: {slot_text} | 昵称: {nickname_text} | 状态: {status_text}\n"
-        f"冷却中: {wait_flag_text} | 可开抢: {allow_start_text} | 剩余: {remaining_text}\n"
-        f"抢购运行: {elapsed_text} | 当前余额: [ {balance_text} ]\n"
-        f"本轮抢购成功: [ {state.round_purchase_success_count:<2} ] | 本轮抢购失败: [ {state.round_purchase_fail_count:<2} ] | 本轮上架成功: [ {state.round_listing_success_count:<2} ]\n"
-        f"当前道具库存: [ {current_inventory:<2} ] | 最后入库: [ {updated_at_text} ]"
+        _build_overlay_row("执行位：", slot_text, "抢购运行：", elapsed_text) + "\n"
+        + _build_overlay_row("上架成功：", state.round_listing_success_count, "道具库存：", current_inventory) + "\n"
+        + _build_overlay_row("抢购成功：", state.round_purchase_success_count, "抢购失败：", state.round_purchase_fail_count)
     )
     try:
         state.score_var.set(msg)

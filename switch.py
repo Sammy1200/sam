@@ -54,6 +54,33 @@ _TPL_FILES = {
     "shoucan": "shoucan.png",
 }
 _BOUNDARY_SWITCH_ACCOUNTS_CACHE = None
+_SWITCH_WAIT_STEP_LABELS = {
+    "boundary start qidong check": "边界启动页确认",
+    "switch-user entry": "进入切号入口",
+    "account input verify": "账号输入校验",
+    "heping verify": "切号结果确认",
+    "denglu click": "点击登录按钮",
+    "nickname verify": "昵称模板校验",
+    "server list": "打开大区列表",
+    "server select": "选择目标大区",
+}
+_SWITCH_WAIT_KEY_LABELS = {
+    "retry_count": "重试次数",
+    "retry_interval": "重试间隔秒数",
+    "fixup_retry_count": "修复后重试次数",
+    "fixup_retry_interval": "修复后重试间隔秒数",
+    "click_wait": "点击后等待秒数",
+    "entry_timeout": "入口识别超时秒数",
+    "login_click_wait": "登录点击后等待秒数",
+    "login_timeout": "登录页识别超时秒数",
+    "verify_wait": "校验等待秒数",
+    "heping_timeout": "和平精英页识别超时秒数",
+    "maximize_wait": "窗口最大化等待秒数",
+    "select_wait": "选区后等待秒数",
+    "verify_timeout": "识别超时秒数",
+    "open_wait": "打开列表前等待秒数",
+    "qidong_timeout": "启动按钮识别超时秒数",
+}
 
 
 def _tpl(key):
@@ -62,7 +89,7 @@ def _tpl(key):
         path = os.path.join("logo", "huanhao", _TPL_FILES[key])
         img = cv2.imread(path)
         if img is None:
-            logger.error("[switch] template missing: %s", path)
+            logger.error("[切换流程] 模板缺失：%s", path)
         _TPL_CACHE[key] = img
     return _TPL_CACHE[key]
 
@@ -199,7 +226,7 @@ def _pause_switch_flow(title, detail):
     try:
         push_msg_sync(title, detail)
     except Exception as exc:
-        push_fail_message = f"[线程6] 微信推送失败：{exc}"
+        push_fail_message = f"[线程6] 微信推送发送失败：{exc}"
         print(push_fail_message)
         logger.error(push_fail_message)
         flush_logger_handlers()
@@ -278,14 +305,14 @@ def _wait_for_boundary_start_qidong(camera):
             config.SWITCH_BOUNDARY_START_QIDONG_REGION,
             threshold=config.SWITCH_UI_MATCH_THRESHOLD,
         ):
-            print(f"[switch] boundary start qidong matched at attempt {attempt}.")
-            logger.info("[switch] boundary start qidong matched at attempt %s.", attempt)
+            print(f"[切换流程] 已在第 {attempt} 次识别到启动按钮。")
+            logger.info("[切换流程] 已在第 %s 次识别到启动按钮。", attempt)
             return True
         safe_sleep(config.SWITCH_BOUNDARY_START_QIDONG_RETRY_INTERVAL_SECONDS)
 
     # 原等待上限内仍未看到启动按钮时，先尝试窗口最大化修复一次，再补 5 次识别，避免只是窗口状态导致误判失败。
-    print("[switch] boundary start qidong not found, try win+up fixup.")
-    logger.info("[switch] boundary start qidong not found, try win+up fixup.")
+    print("[切换流程] 启动按钮未出现，尝试窗口最大化后重试。")
+    logger.info("[切换流程] 启动按钮未出现，尝试窗口最大化后重试。")
     pyautogui.hotkey("winleft", "up")
     for attempt in range(1, config.SWITCH_BOUNDARY_START_QIDONG_FIXUP_RETRY_COUNT + 1):
         if _match(
@@ -294,8 +321,8 @@ def _wait_for_boundary_start_qidong(camera):
             config.SWITCH_BOUNDARY_START_QIDONG_REGION,
             threshold=config.SWITCH_UI_MATCH_THRESHOLD,
         ):
-            print(f"[switch] boundary start qidong matched after fixup at attempt {attempt}.")
-            logger.info("[switch] boundary start qidong matched after fixup at attempt %s.", attempt)
+            print(f"[切换流程] 窗口修复后第 {attempt} 次识别到启动按钮。")
+            logger.info("[切换流程] 窗口修复后第 %s 次识别到启动按钮。", attempt)
             return True
         safe_sleep(config.SWITCH_BOUNDARY_START_QIDONG_FIXUP_RETRY_INTERVAL_SECONDS)
 
@@ -312,7 +339,7 @@ def _get_boundary_switch_accounts():
     if _BOUNDARY_SWITCH_ACCOUNTS_CACHE is None:
         accounts, source_path = load_boundary_switch_accounts()
         _BOUNDARY_SWITCH_ACCOUNTS_CACHE = accounts
-        message = f"[线程6] 已加载本机换号配置：{os.path.basename(source_path)}"
+        message = f"[线程6] 已加载本机换号配置文件：{os.path.basename(source_path)}"
         print(message)
         logger.info(message)
 
@@ -366,8 +393,12 @@ def _digits_only(value):
 
 
 def _log_switch_waits(step_name, **kwargs):
-    details = ", ".join(f"{key}={value}" for key, value in kwargs.items())
-    message = f"[switch] {step_name} waits: {details}"
+    display_step_name = _SWITCH_WAIT_STEP_LABELS.get(step_name, step_name)
+    details = "，".join(
+        f"{_SWITCH_WAIT_KEY_LABELS.get(key, key)}={value}"
+        for key, value in kwargs.items()
+    )
+    message = f"[切换流程] {display_step_name}等待参数：{details}"
     print(message)
     logger.info(message)
 
@@ -384,8 +415,8 @@ def _click_switch_user_and_wait_login(camera):
     fast_click(config.SWITCH_ACCOUNT_LIST_BUTTON_POS)
     safe_sleep(config.SWITCH_ACCOUNT_LIST_CLICK_WAIT_SECONDS)
 
-    logger.info("[switch] switch-user entry template: qiehuan.png")
-    print("[switch] switch-user entry template: qiehuan.png")
+    logger.info("[切换流程] 切换账号入口模板：qiehuan.png")
+    print("[切换流程] 切换账号入口模板：qiehuan.png")
 
     center = _wait_for_match_center(
         camera,
@@ -443,7 +474,7 @@ def _input_and_verify_account(account_id):
     if actual != expected:
         return pause_thread6_failure(
             "账号输入校验",
-            f"账号输入校验失败，期望账号 {expected}，实际剪贴板为 {actual or 'empty'}。",
+            f"账号输入校验失败，期望账号 {expected}，实际剪贴板为 {actual or '空'}。",
         )
     return True
 
@@ -522,7 +553,7 @@ def _load_nickname_template(slot_number):
 
 def _verify_slot_nickname(camera, slot_number):
     """选区后执行昵称模板校验。"""
-    update_overlay_mini(f"[switch] verify nickname slot {slot_number}")
+    update_overlay_mini(f"正在校验执行位 {slot_number} 的昵称")
     template, template_path = _load_nickname_template(slot_number)
     if template is None:
         return pause_thread6_failure(
@@ -544,8 +575,8 @@ def _verify_slot_nickname(camera, slot_number):
             config.NICKNAME_VERIFY_REGION,
             threshold=config.NICKNAME_MATCH_THRESHOLD,
         ):
-            print(f"[switch] nickname template ok for slot {slot_number}: {template_path}")
-            logger.info("[switch] nickname template ok for slot %s: %s", slot_number, template_path)
+            print(f"[切换流程] 执行位 {slot_number} 的昵称模板校验通过：{template_path}")
+            logger.info("[切换流程] 执行位 %s 的昵称模板校验通过：%s", slot_number, template_path)
             return True
         safe_sleep(0.5)
 
@@ -573,7 +604,7 @@ def _detect_slot_nickname_once(camera):
 
 def detect_current_execution_slot_from_launcher(camera):
     """启动入口：进入选区页后，复用线程6昵称模板链路识别当前执行位。"""
-    update_overlay_mini("[启动] 识别当前昵称")
+    update_overlay_mini("启动中：识别当前昵称")
     if not _step02_server_list(camera, suppress_failure_output=True):
         print("[启动] 未能进入启动器选区页，无法识别当前昵称。")
         logger.error("[启动] 未能进入启动器选区页，无法识别当前昵称。")
@@ -597,8 +628,8 @@ def detect_current_execution_slot_from_launcher(camera):
 
 def _step01_exit(camera):
     """步骤1：ALT+F4 并确认退出。"""
-    update_overlay_mini("[switch] step1 exit game")
-    print("[switch] try exit game")
+    update_overlay_mini("换号中：退出游戏")
+    print("[切换流程] 正在尝试退出游戏。")
     pyautogui.hotkey("alt", "F4")
     time.sleep(1)
     fast_click((1050, 686))
@@ -608,7 +639,7 @@ def _step01_exit(camera):
 
 def _step02_server_list(camera, suppress_failure_output=False):
     """步骤2：打开大区列表。"""
-    update_overlay_mini("[switch] step2 open server list")
+    update_overlay_mini("换区中：打开大区列表")
     _log_switch_waits(
         "server list",
         open_wait=config.SWITCH_SERVER_LIST_OPEN_WAIT_SECONDS,
@@ -620,17 +651,17 @@ def _step02_server_list(camera, suppress_failure_output=False):
 
     if not _wait_for(camera, "qd", config.RGN_QD, timeout=config.SWITCH_QIDONG_MATCH_TIMEOUT_SECONDS):
         if not suppress_failure_output:
-            async_push_msg("[switch] qidong not found", "[switch] qidong button not found within 30 seconds.")
+            async_push_msg("【切换流程】未找到启动按钮", "打开大区列表后 30 秒内未识别到启动按钮。")
         return False
     return True
 
 
 def _step03_select(camera, idx, suppress_failure_output=False):
     """步骤3：点击目标大区。"""
-    update_overlay_mini("[switch] step3 select server")
+    update_overlay_mini("换区中：选择目标大区")
     if idx < 0 or idx >= len(config.SERVER_COORDS):
         if not suppress_failure_output:
-            async_push_msg("[switch] invalid server index", f"[switch] invalid server index: {idx}.")
+            async_push_msg("【切换流程】目标大区无效", f"目标大区索引无效：{idx}。")
         return False
 
     _log_switch_waits(
@@ -651,17 +682,17 @@ def _step03_select(camera, idx, suppress_failure_output=False):
         return True
 
     if not suppress_failure_output:
-        async_push_msg("[switch] server select failed", "[switch] qidong button not found after selecting server.")
+        async_push_msg("【切换流程】选择大区失败", "选择目标大区后未重新识别到启动按钮。")
     return False
 
 
 def _step04_launch(camera, suppress_failure_output=False):
     """步骤4：点击启动游戏。"""
-    update_overlay_mini("[switch] step4 launch game")
+    update_overlay_mini("启动中：启动游戏")
     center = _wait_for_match_center(camera, "qd", config.RGN_QD, timeout=15)
     if center is None:
         if not suppress_failure_output:
-            async_push_msg("[switch] qidong not found", "[switch] qidong button not found within 15 seconds.")
+            async_push_msg("【切换流程】未找到启动按钮", "15 秒内未识别到启动按钮。")
         return False
     fast_click(center)
     time.sleep(0.5)
@@ -671,7 +702,7 @@ def _step04_launch(camera, suppress_failure_output=False):
 
 def _step05_space(camera, suppress_failure_output=False):
     """步骤5：处理启动弹窗。"""
-    update_overlay_mini("[switch] step5 handle kongge")
+    update_overlay_mini("启动中：处理空格弹窗")
     center = _wait_for_match_center(
         camera,
         "kg",
@@ -680,7 +711,7 @@ def _step05_space(camera, suppress_failure_output=False):
     )
     if center is None:
         if not suppress_failure_output:
-            async_push_msg("[switch] kongge not found", "[switch] kongge popup not found within 30 seconds.")
+            async_push_msg("【切换流程】未找到空格弹窗", "30 秒内未识别到空格弹窗。")
         return False
     # 弹窗刚识别到时按钮可能还没完全可点，点击前后各留 1 秒，避免点空或页面还没吃到输入。
     time.sleep(config.SWITCH_SPACE_BEFORE_CLICK_WAIT_SECONDS)
@@ -694,7 +725,7 @@ def _step05_space(camera, suppress_failure_output=False):
 
 def _step06_ads(camera, suppress_failure_output=False):
     """步骤6：持续按 ESC 清理广告流程。"""
-    update_overlay_mini("[switch] step6 clear ads")
+    update_overlay_mini("进场中：清理广告和弹窗")
     end = time.time() + config.SWITCH_ADS_TIMEOUT_SECONDS
     while time.time() < end:
         center = _match_center(camera, "1tc", config.RGN_1TC)
@@ -711,13 +742,13 @@ def _step06_ads(camera, suppress_failure_output=False):
             return True
 
     if not suppress_failure_output:
-        async_push_msg("[switch] ads clear timeout", "[switch] failed to clear ads within 160 seconds.")
+        async_push_msg("【切换流程】清理广告超时", "160 秒内未能完成广告和弹窗清理。")
     return False
 
 
 def _step07_gumu(camera, suppress_failure_output=False):
     """步骤7：传送到古墓大厅。"""
-    update_overlay_mini("[switch] step7 gumu")
+    update_overlay_mini("进场中：前往古墓大厅")
     if is_at_gumu(camera):
         return True
     pyautogui.click(190, 58)
@@ -725,14 +756,14 @@ def _step07_gumu(camera, suppress_failure_output=False):
 
     if not _wait_for(camera, "gumu", config.RGN_GUMU, timeout=30):
         if not suppress_failure_output:
-            async_push_msg("[switch] gumu not reached", "[switch] gumu not reached within 30 seconds.")
+            async_push_msg("【切换流程】未到达古墓大厅", "30 秒内未能到达古墓大厅。")
         return False
     return True
 
 
 def _step08_gold(camera):
     """步骤8：领取金币。"""
-    update_overlay_mini("[switch] step8 gold")
+    update_overlay_mini("进场中：领取金币")
     # 领取金币是连续点固定入口，间隔太短容易前一步动画没收完，统一压到 0.8 秒减少空点。
     pyautogui.click(1868, 1044)
     time.sleep(config.SWITCH_GOLD_CLICK_WAIT_SECONDS)
@@ -745,7 +776,7 @@ def _step08_gold(camera):
 
 def _step09_close(camera, suppress_failure_output=False):
     """步骤9：关闭面板并确认仍在古墓大厅。"""
-    update_overlay_mini("[switch] step9 close panels")
+    update_overlay_mini("进场中：关闭面板")
     # 这里连续按 ESC 的目的只是稳定收起面板，按太多会拖慢节奏，按太快又可能没被页面吃到。
     for _ in range(config.SWITCH_CLOSE_PANEL_ESC_COUNT):
         pyautogui.press("escape")
@@ -758,14 +789,14 @@ def _step09_close(camera, suppress_failure_output=False):
 
     if not _wait_for(camera, "gumu", config.RGN_GUMU, timeout=5):
         if not suppress_failure_output:
-            async_push_msg("[switch] close panel failed", "[switch] gumu not visible after closing panels.")
+            async_push_msg("【切换流程】关闭面板失败", "关闭面板后未能确认仍在古墓大厅。")
         return False
     return True
 
 
 def _step10_trade(camera):
     """步骤10：从古墓大厅前往交易行。"""
-    update_overlay_mini("[switch] step10 trade")
+    update_overlay_mini("进场中：返回交易行")
     # 第一步是打开通往交易行的入口，等待 1.8 秒让页面切到下一层，避免第二次点击打在旧界面。
     pyautogui.click(1470, 1032)
     time.sleep(config.SWITCH_TRADE_FIRST_CLICK_WAIT_SECONDS)
@@ -784,11 +815,11 @@ def _step10_trade(camera):
             trade_ready = True
             break
         if attempt < config.SWITCH_TRADE_SECOND_CLICK_MAX_RETRY:
-            print(f"[switch] trade second click retry {attempt} because shoucan not matched yet.")
-            logger.info("[switch] trade second click retry %s because shoucan not matched yet.", attempt)
+            print(f"[切换流程] 交易行第二次点击重试第 {attempt} 次，仍未识别到收藏入口。")
+            logger.info("[切换流程] 交易行第二次点击重试第 %s 次，仍未识别到收藏入口。", attempt)
 
     if not trade_ready:
-        logger.info("[switch] shoucan not matched after second click retries, continue with existing trade flow.")
+        logger.info("[切换流程] 第二次点击多次重试后仍未识别到收藏入口，继续沿用现有进场链路。")
 
     # 第三步继续进入交易行，仍保留固定等待 1.8 秒，避免最后一次点击后立刻切回业务链路。
     pyautogui.click(1850, 350)
@@ -799,32 +830,32 @@ def _step10_trade(camera):
 
 def _run_startup_from_launcher(camera, server_index, skip_open_server_list=False):
     """执行从启动器到交易行的完整流程。"""
-    set_overlay_mini("[switch] prepare launcher flow")
+    set_overlay_mini("启动准备中")
     state.current_server_index = server_index
 
     steps = []
     if not skip_open_server_list:
-        steps.append(("step2 open server list", lambda: _step02_server_list(camera)))
+        steps.append(("打开大区列表", lambda: _step02_server_list(camera)))
     steps.extend([
-        ("step3 select server", lambda: _step03_select(camera, server_index)),
-        ("step4 launch", lambda: _step04_launch(camera)),
-        ("step5 kongge", lambda: _step05_space(camera)),
-        ("step6 ads", lambda: _step06_ads(camera)),
-        ("step7 gumu", lambda: _step07_gumu(camera)),
-        ("step8 gold", lambda: _step08_gold(camera)),
-        ("step9 close", lambda: _step09_close(camera)),
-        ("step10 trade", lambda: _step10_trade(camera)),
+        ("选择目标大区", lambda: _step03_select(camera, server_index)),
+        ("启动游戏", lambda: _step04_launch(camera)),
+        ("处理空格弹窗", lambda: _step05_space(camera)),
+        ("清理广告和弹窗", lambda: _step06_ads(camera)),
+        ("进入古墓大厅", lambda: _step07_gumu(camera)),
+        ("领取金币", lambda: _step08_gold(camera)),
+        ("关闭面板", lambda: _step09_close(camera)),
+        ("返回交易行", lambda: _step10_trade(camera)),
     ])
 
     for name, fn in steps:
-        logger.info("[switch] %s ...", name)
+        logger.info("[切换流程] %s开始。", name)
         if not fn():
-            logger.error("[switch] %s failed", name)
+            logger.error("[切换流程] %s失败。", name)
             restore_overlay()
             return False
-        logger.info("[switch] %s done", name)
+        logger.info("[切换流程] %s完成。", name)
 
-    logger.info("[switch] server %s ready", server_index + 1)
+    logger.info("[切换流程] 目标大区 %s 已就绪。", server_index + 1)
     return True
 
 
@@ -840,13 +871,13 @@ def startup_from_server_list(camera, server_index):
 
 def full_switch_server(camera, server_index):
     """运行中换区：先退出游戏，再复用启动器流程。"""
-    set_overlay_mini("[switch] prepare full switch")
-    logger.info("[switch] step1 exit game ...")
+    set_overlay_mini("换区准备中")
+    logger.info("[切换流程] 开始执行退出游戏步骤。")
     if not _step01_exit(camera):
-        logger.error("[switch] exit game failed")
+        logger.error("[切换流程] 退出游戏失败。")
         restore_overlay()
         return False
-    logger.info("[switch] exit game done")
+    logger.info("[切换流程] 退出游戏完成。")
 
     result = startup_from_launcher(camera, server_index)
     if not result:
@@ -893,13 +924,13 @@ def switch_server_within_account_after_slot_boundary(camera, transition=None):
         if target["requires_account_switch"]:
             return pause_thread6_failure("校验切换类型", "同账号跨区切换链路收到了需要跨账号切换的目标。")
 
-        set_overlay_mini("[switch] prepare boundary server switch")
+        set_overlay_mini("边界换区准备中")
         print(
-            f"[switch] current slot={target['current_slot']}, "
-            f"next slot={target['next_slot']}, server_index={target['server_coord_index']}"
+            f"[切换流程] 当前执行位={target['current_slot']}，"
+            f"下一执行位={target['next_slot']}，目标大区索引={target['server_coord_index']}"
         )
         logger.info(
-            "[switch] current slot=%s next slot=%s server_index=%s",
+            "[切换流程] 当前执行位=%s 下一执行位=%s 目标大区索引=%s",
             target["current_slot"],
             target["next_slot"],
             target["server_coord_index"],
@@ -944,11 +975,11 @@ def switch_server_within_account_after_slot_boundary(camera, transition=None):
         state.switch_last_unknown_detail = ""
         restore_overlay()
         print(
-            f"[switch] same-account boundary flow done: next slot={target['next_slot']} "
-            f"server_index={target['server_coord_index']} trade_ready=true"
+            f"[切换流程] 同账号边界换区完成：下一执行位={target['next_slot']}，"
+            f"目标大区索引={target['server_coord_index']}，已回到交易行。"
         )
         logger.info(
-            "[switch] same-account boundary flow done: next slot=%s server_index=%s trade_ready=true",
+            "[切换流程] 同账号边界换区完成：下一执行位=%s 目标大区索引=%s 已回到交易行。",
             target["next_slot"],
             target["server_coord_index"],
         )
@@ -966,13 +997,13 @@ def switch_account_after_slot_boundary(camera):
         if target.get("config_error"):
             return pause_thread6_failure("读取本机换号配置", target["config_error"])
 
-        set_overlay_mini("[switch] prepare boundary account switch")
+        set_overlay_mini("边界换号准备中")
         print(
-            f"[switch] current slot={target['current_slot']}, "
-            f"next slot={target['next_slot']}, account={target['account_id']}"
+            f"[切换流程] 当前执行位={target['current_slot']}，"
+            f"下一执行位={target['next_slot']}，目标账号={target['account_id']}"
         )
         logger.info(
-            "[switch] current slot=%s next slot=%s account=%s",
+            "[切换流程] 当前执行位=%s 下一执行位=%s 目标账号=%s",
             target["current_slot"],
             target["next_slot"],
             target["account_id"],
@@ -1024,11 +1055,11 @@ def switch_account_after_slot_boundary(camera):
         state.switch_last_unknown_detail = ""
         restore_overlay()
         print(
-            f"[switch] boundary flow done: next slot={target['next_slot']} "
-            f"account={target['account_id']} trade_ready=true"
+            f"[切换流程] 边界换号完成：下一执行位={target['next_slot']}，"
+            f"目标账号={target['account_id']}，已回到交易行。"
         )
         logger.info(
-            "[switch] boundary flow done: next slot=%s account=%s trade_ready=true",
+            "[切换流程] 边界换号完成：下一执行位=%s 目标账号=%s 已回到交易行。",
             target["next_slot"],
             target["account_id"],
         )
