@@ -58,6 +58,7 @@ from round_persistence import (
     persist_final_round_snapshot,
     refresh_account_limit_reached_at,
     reset_round_runtime_state,
+    restore_runtime_window_state,
     resolve_shutdown_final_status,
 )
 from utils import safe_sleep, safe_get_frame, safe_imread, fast_click, gc_checkpoint
@@ -386,6 +387,7 @@ def _set_account_state_defaults():
     state.round_purchase_fail_count = 0
     state.round_current_balance = ""
     state.round_purchase_running_seconds = 0.0
+    state.runtime_window_start_time = None
     state.round_status = "手动结束"
     state.overlay_status = ""
     state.account_round_end_status = ""
@@ -547,20 +549,27 @@ def _load_current_account_context():
     state.round_listing_success_count = record.round_listing_success_count
     state.round_purchase_fail_count = record.round_purchase_fail_count
     state.round_current_balance = record.current_balance
+    state.total_running_time = float(record.purchase_running_seconds)
     state.round_purchase_running_seconds = float(record.purchase_running_seconds)
+    state.runtime_window_start_time = record.runtime_window_start_time
     state.round_status = record.round_status
     state.account_db_path = database_path
     state.account_db_table_name = table_name
     state.account_record_loaded = True
+    runtime_window_sync_result = restore_runtime_window_state()
     state.account_allow_purchase = allow_purchase
     state.account_allow_start_time = allow_start_time
     state.account_read_status = "ready" if allow_purchase else "waiting_limit_time"
     state.account_is_waiting = not allow_purchase
     state.account_read_error = ""
     state.overlay_status = "抢购中" if allow_purchase else "等待抢购时间"
+    if runtime_window_sync_result["changed"]:
+        for action_text in runtime_window_sync_result["actions"]:
+            print(f"[运行窗口] {action_text}")
+            logger.info("[运行窗口] %s", action_text)
 
     print(
-        "[账号数据] 昵称={0}，当前道具库存={1}，最后一次限制时间={2}，最后下号时间={3}，更新时间={4}，执行位={5}，允许开始时间={6}，当前可抢购={7}".format(
+        "[账号数据] 昵称={0}，当前道具库存={1}，最后一次限制时间={2}，最后下号时间={3}，更新时间={4}，执行位={5}，允许开始时间={6}，当前可抢购={7}，累计抢购秒数={8}，运行窗口起点={9}".format(
             state.current_nickname,
             state.baseline_item_count,
             _format_account_time(state.last_limit_time),
@@ -569,10 +578,12 @@ def _load_current_account_context():
             state.current_execution_slot,
             _format_account_time(state.account_allow_start_time),
             "是" if state.account_allow_purchase else "否",
+            int(state.total_running_time),
+            _format_account_time(state.runtime_window_start_time),
         )
     )
     logger.info(
-        "[账号数据] 昵称=%s 当前道具库存=%s 最后一次限制时间=%s 最后下号时间=%s 更新时间=%s 执行位=%s 允许开始时间=%s 当前可抢购=%s 来源=%s:%s",
+        "[账号数据] 昵称=%s 当前道具库存=%s 最后一次限制时间=%s 最后下号时间=%s 更新时间=%s 执行位=%s 允许开始时间=%s 当前可抢购=%s 累计抢购秒数=%s 运行窗口起点=%s 来源=%s:%s",
         state.current_nickname,
         state.baseline_item_count,
         _format_account_time(state.last_limit_time),
@@ -581,6 +592,8 @@ def _load_current_account_context():
         state.current_execution_slot,
         _format_account_time(state.account_allow_start_time),
         state.account_allow_purchase,
+        int(state.total_running_time),
+        _format_account_time(state.runtime_window_start_time),
         database_path,
         table_name,
     )
@@ -634,7 +647,7 @@ def _run_pre_listing_flow(
     if not _load_current_account_context():
         return False
     if reset_runtime_before_listing:
-        reset_round_runtime_state(reset_reason)
+        reset_round_runtime_state(reset_reason, reset_purchase_runtime=False)
         reset_purchase_counters(purchase_reset_reason)
     ui_print("开始执行预上架流程...")
     execute_listing_routine(camera)
@@ -652,7 +665,7 @@ def _run_direct_account_flow(camera):
             reset_reason="冷却等待前预上架清空当前账号运行态",
             purchase_reset_reason="冷却等待前开始当前账号流程",
         )
-    reset_round_runtime_state("已加载当前账号")
+    reset_round_runtime_state("已加载当前账号", reset_purchase_runtime=False)
     return _wait_until_account_ready()
 
 

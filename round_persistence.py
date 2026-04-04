@@ -1,5 +1,5 @@
 """Account round settlement and canonical SQLite write-back."""
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 
 import state
@@ -14,9 +14,10 @@ from account_db import (
     ROUND_STATUS_RUNNING,
     ROUND_STATUS_UNKNOWN,
     save_canonical_account_stats_record,
+    update_canonical_account_runtime_fields,
     update_canonical_account_item_balance_fields,
 )
-from config import ACCOUNT_MAX_PURCHASE_SECONDS
+from config import ACCOUNT_LIMIT_COOLDOWN_SECONDS, ACCOUNT_MAX_PURCHASE_SECONDS
 from utils import get_current_elapsed, logger
 
 
@@ -24,7 +25,7 @@ PLACEHOLDER_BALANCE = "\u83b7\u53d6\u4e2d"
 STATUS_NORMAL_SWITCH = "\u5f53\u524d\u8d26\u53f7\u6b63\u5e38\u5b8c\u6210\u5e76\u5207\u5230\u4e0b\u4e00\u4e2a\u8d26\u53f7"
 
 
-def reset_round_runtime_state(reason):
+def reset_round_runtime_state(reason, reset_purchase_runtime=True):
     """Reset per-round runtime stats after mandatory pre-listing."""
     state.success_count = 0
     state.fail_count = 0
@@ -33,16 +34,20 @@ def reset_round_runtime_state(reason):
     state.round_listing_success_count = 0
     state.round_purchase_fail_count = 0
     state.round_current_balance = ""
-    state.round_purchase_running_seconds = 0.0
     state.round_status = ROUND_STATUS_RUNNING
-    state.total_running_time = 0.0
     state.last_resume_time = None
     state.purchase_timer_active = False
     state.account_round_end_status = ""
     state.account_round_finalized = False
     state.account_round_writeback_failed = False
     state.account_round_writeback_error = ""
-    state.account_limit_reached_at = None
+    if reset_purchase_runtime:
+        state.round_purchase_running_seconds = 0.0
+        state.total_running_time = 0.0
+        state.runtime_window_start_time = None
+        state.account_limit_reached_at = None
+    else:
+        state.round_purchase_running_seconds = float(max(0.0, state.total_running_time))
     print(f"[round-settlement] {reason}, round counters reset.")
     logger.info("[round-settlement] %s, round counters reset.", reason)
 
@@ -51,6 +56,167 @@ def resolve_shutdown_final_status(default_status):
     if state.account_round_end_status:
         return state.account_round_end_status
     return default_status
+
+
+def _runtime_window_seconds():
+    return int(ACCOUNT_LIMIT_COOLDOWN_SECONDS)
+
+
+def _build_runtime_window_result(changed, actions, persist_result=None):
+    return {
+        "changed": changed,
+        "actions": actions,
+        "persist_result": persist_result,
+    }
+
+
+def _persist_runtime_window_fields(reason, update_last_limit_time=False, last_limit_time=None):
+    if state.temporary_purchase_mode:
+        return AccountWriteResult("skipped", "\u4e34\u65f6\u6a21\u5f0f\u4e0d\u5199\u5165 canonical SQLite")
+
+    nickname = (state.current_nickname or "").strip()
+    if state.account_read_status == "account_not_found" or not state.account_record_loaded or not nickname:
+        return AccountWriteResult("skipped", f"\u5f53\u524d\u8d26\u53f7\u672a\u52a0\u8f7d SQLite \u8bb0\u5f55: {nickname}")
+    if not state.account_db_path:
+        return AccountWriteResult("skipped", "canonical database path is empty")
+
+    runtime_seconds = max(0, int(get_current_elapsed()))
+    write_time = datetime.now()
+    result = update_canonical_account_runtime_fields(
+        state.account_db_path,
+        nickname,
+        runtime_seconds,
+        state.runtime_window_start_time,
+        table_name=state.account_db_table_name or CANONICAL_ACCOUNT_STATS_TABLE,
+        updated_at=write_time,
+        last_limit_time=last_limit_time,
+        update_last_limit_time=update_last_limit_time,
+    )
+    if result.status == "success":
+        state.updated_at = write_time
+        state.round_purchase_running_seconds = float(runtime_seconds)
+        if update_last_limit_time:
+            state.last_limit_time = last_limit_time
+        logger.info(
+            "[\u8fd0\u884c\u7a97\u53e3] %s\uff1a\u6635\u79f0=%s\uff0c\u7d2f\u8ba1\u62a2\u8d2d\u79d2\u6570=%s\uff0c\u7a97\u53e3\u8d77\u70b9=%s",
+            reason,
+            nickname,
+            runtime_seconds,
+            state.runtime_window_start_time.strftime("%Y-%m-%d %H:%M:%S")
+            if state.runtime_window_start_time is not None
+            else "\u65e0",
+        )
+    else:
+        logger.warning("[\u8fd0\u884c\u7a97\u53e3] %s\u5199\u5e93\u5931\u8d25\uff1a%s", reason, result.reason)
+    return result
+
+
+def sync_runtime_window_state(
+    persist_if_changed=False,
+    initialize_if_missing=False,
+    allow_legacy_fallback=False,
+):
+    """\u540c\u6b65 24 \u5c0f\u65f6 05 \u5206\u8fd0\u884c\u7a97\u53e3\u72b6\u6001\u3002"""
+    if state.temporary_purchase_mode:
+        return _build_runtime_window_result(False, [])
+
+    actions = []
+    changed = False
+    persist_result = None
+    now_ts = time.time()
+    now_dt = datetime.fromtimestamp(now_ts)
+    current_elapsed_seconds = max(0.0, float(get_current_elapsed()))
+
+    if state.runtime_window_start_time is None:
+        if allow_legacy_fallback and current_elapsed_seconds > 0:
+            restored_start = state.updated_at or state.last_account_end_time or now_dt
+            state.runtime_window_start_time = restored_start
+            changed = True
+            actions.append(
+                f"\u8865\u9f50\u8fd0\u884c\u7a97\u53e3\u8d77\u70b9\u4e3a {restored_start.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+        elif initialize_if_missing:
+            state.runtime_window_start_time = now_dt
+            changed = True
+            actions.append(
+                f"\u521d\u59cb\u5316\u8fd0\u884c\u7a97\u53e3\u8d77\u70b9\u4e3a {now_dt.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+        else:
+            state.round_purchase_running_seconds = 0.0
+            return _build_runtime_window_result(False, actions)
+
+    window_start_time = state.runtime_window_start_time
+    window_seconds = _runtime_window_seconds()
+    elapsed_since_window_start = (now_dt - window_start_time).total_seconds()
+    if elapsed_since_window_start >= window_seconds:
+        window_step_count = int(elapsed_since_window_start // window_seconds)
+        new_window_start = window_start_time + timedelta(seconds=window_step_count * window_seconds)
+        is_active = (
+            state.purchase_timer_active
+            and not state.IS_PAUSED
+            and state.last_resume_time is not None
+        )
+        if is_active and state.last_resume_time < new_window_start.timestamp():
+            state.last_resume_time = new_window_start.timestamp()
+        state.total_running_time = 0.0
+        state.round_purchase_running_seconds = 0.0
+        state.runtime_window_start_time = new_window_start
+        state.account_limit_reached_at = None
+        changed = True
+        actions.append(
+            f"24\u5c0f\u65f605\u5206\u8fd0\u884c\u7a97\u53e3\u5df2\u6eda\u52a8\u5230 {new_window_start.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+    else:
+        state.round_purchase_running_seconds = current_elapsed_seconds
+
+    if changed and persist_if_changed:
+        persist_result = _persist_runtime_window_fields("\u540c\u6b65\u8fd0\u884c\u7a97\u53e3")
+
+    return _build_runtime_window_result(changed, actions, persist_result)
+
+
+def restore_runtime_window_state():
+    """\u8d26\u53f7\u8f7d\u5165\u540e\u6062\u590d\u8fd0\u884c\u7a97\u53e3\u72b6\u6001\uff0c\u4fdd\u8bc1\u91cd\u542f\u540e\u53ef\u7ee7\u7eed\u8ba1\u7b97\u5269\u4f59\u65f6\u957f\u3002"""
+    return sync_runtime_window_state(
+        persist_if_changed=True,
+        initialize_if_missing=False,
+        allow_legacy_fallback=True,
+    )
+
+
+def ensure_active_runtime_window_state():
+    """\u8fdb\u5165\u771f\u5b9e\u62a2\u8d2d\u5faa\u73af\u524d\uff0c\u786e\u4fdd\u5f53\u524d\u8d26\u53f7\u5df2\u6709\u8fd0\u884c\u7a97\u53e3\u8d77\u70b9\u3002"""
+    return sync_runtime_window_state(
+        persist_if_changed=True,
+        initialize_if_missing=True,
+        allow_legacy_fallback=False,
+    )
+
+
+def get_runtime_window_remaining_seconds():
+    sync_runtime_window_state(
+        persist_if_changed=False,
+        initialize_if_missing=False,
+        allow_legacy_fallback=False,
+    )
+    used_seconds = max(0, int(get_current_elapsed()))
+    remaining_seconds = ACCOUNT_MAX_PURCHASE_SECONDS - min(ACCOUNT_MAX_PURCHASE_SECONDS, used_seconds)
+    return max(0, remaining_seconds)
+
+
+def persist_account_limit_reached_if_needed():
+    """\u5728\u8fbe\u5230 2 \u5c0f\u65f6 50 \u5206\u9608\u503c\u65f6\u7acb\u5373\u843d\u5e93 last_limit_time\u3002"""
+    previous_limit_time = state.account_limit_reached_at
+    reached_time = refresh_account_limit_reached_at()
+    if reached_time is None or previous_limit_time is not None:
+        return AccountWriteResult("skipped", "limit time unchanged")
+    if state.last_limit_time is not None and state.last_limit_time == reached_time:
+        return AccountWriteResult("skipped", "last_limit_time already persisted")
+    return _persist_runtime_window_fields(
+        "\u5230\u8fbe\u62a2\u8d2d\u65f6\u957f\u9608\u503c",
+        update_last_limit_time=True,
+        last_limit_time=reached_time,
+    )
 
 
 def refresh_account_limit_reached_at():
@@ -62,7 +228,9 @@ def refresh_account_limit_reached_at():
     if state.purchase_timer_active and not state.IS_PAUSED and state.last_resume_time is not None:
         remaining_before_limit = threshold_seconds - state.total_running_time
         if remaining_before_limit <= 0:
-            reached_ts = state.last_resume_time
+            if state.last_limit_time is not None:
+                state.account_limit_reached_at = state.last_limit_time
+            return state.account_limit_reached_at
         else:
             current_segment_elapsed = time.time() - state.last_resume_time
             if current_segment_elapsed < remaining_before_limit:
@@ -110,6 +278,11 @@ def _build_record(is_final, round_status):
             f"sqlite record not found for nickname: {nickname}",
         )
 
+    sync_runtime_window_state(
+        persist_if_changed=False,
+        initialize_if_missing=False,
+        allow_legacy_fallback=False,
+    )
     refresh_account_limit_reached_at()
     state.round_purchase_running_seconds = float(get_current_elapsed())
     new_baseline_item_count = int(state.baseline_item_count)
@@ -141,6 +314,7 @@ def _build_record(is_final, round_status):
         round_purchase_fail_count=int(state.round_purchase_fail_count),
         current_balance=_get_effective_balance(),
         purchase_running_seconds=int(state.round_purchase_running_seconds),
+        runtime_window_start_time=state.runtime_window_start_time,
         round_status=effective_round_status,
     )
     return record, None
@@ -158,6 +332,7 @@ def _save_record(record):
     state.last_limit_time = record.last_limit_time
     state.last_account_end_time = record.last_account_end_time
     state.updated_at = record.updated_at
+    state.runtime_window_start_time = record.runtime_window_start_time
     state.round_status = record.round_status
     return result
 

@@ -198,6 +198,7 @@ CANONICAL_ACCOUNT_STATS_COLUMNS = (
     "round_purchase_fail_count",
     "current_balance",
     "purchase_running_seconds",
+    "runtime_window_start_time",
     "round_status",
 )
 CANONICAL_BASELINE_FIELDS = (
@@ -216,6 +217,7 @@ CANONICAL_STATUS_FIELDS = (
 )
 CANONICAL_TIME_FIELDS = (
     "purchase_running_seconds",
+    "runtime_window_start_time",
     "last_limit_time",
     "last_account_end_time",
     "updated_at",
@@ -279,6 +281,7 @@ class AccountStatsRecord:
     round_purchase_fail_count: int = 0
     current_balance: str = ""
     purchase_running_seconds: int = 0
+    runtime_window_start_time: datetime | None = None
     round_status: str = ROUND_STATUS_MANUAL_END
 
 
@@ -329,6 +332,7 @@ def build_canonical_account_stats_table_sql(table_name=CANONICAL_ACCOUNT_STATS_T
             round_purchase_fail_count INTEGER NOT NULL DEFAULT 0,
             current_balance TEXT NOT NULL DEFAULT '',
             purchase_running_seconds INTEGER NOT NULL DEFAULT 0,
+            runtime_window_start_time TEXT,
             round_status TEXT NOT NULL DEFAULT '{ROUND_STATUS_MANUAL_END}'
                 CHECK (round_status IN ({escaped_status_values}))
         )
@@ -425,6 +429,11 @@ def _inspect_table(conn, table_name):
     if not columns:
         return None
     return _resolve_column_mapping([column[1] for column in columns])
+
+
+def _get_table_column_names(conn, table_name):
+    pragma_sql = f"PRAGMA table_info({_quote_identifier(table_name)})"
+    return [column[1] for column in conn.execute(pragma_sql).fetchall()]
 
 
 def _find_matching_table(conn):
@@ -767,8 +776,20 @@ def _row_to_account_stats_record(row):
         round_purchase_fail_count=_parse_int(row["round_purchase_fail_count"]),
         current_balance=str(row["current_balance"] or "").strip(),
         purchase_running_seconds=_parse_int(row["purchase_running_seconds"]),
+        runtime_window_start_time=_parse_datetime(row["runtime_window_start_time"]),
         round_status=round_status,
     )
+
+
+def _build_canonical_select_columns_sql(conn, table_name):
+    existing_columns = set(_get_table_column_names(conn, table_name))
+    select_columns = []
+    for column_name in CANONICAL_ACCOUNT_STATS_COLUMNS:
+        if column_name in existing_columns:
+            select_columns.append(_quote_identifier(column_name))
+        else:
+            select_columns.append(f"NULL AS {_quote_identifier(column_name)}")
+    return ", ".join(select_columns)
 
 
 def normalize_canonical_round_status_values(
@@ -841,6 +862,12 @@ def ensure_canonical_account_stats_table(
     conn = sqlite3.connect(database_path)
     try:
         conn.execute(build_canonical_account_stats_table_sql(table_name))
+        existing_columns = set(_get_table_column_names(conn, table_name))
+        if "runtime_window_start_time" not in existing_columns:
+            conn.execute(
+                f"ALTER TABLE {_quote_identifier(table_name)} "
+                f"ADD COLUMN {_quote_identifier('runtime_window_start_time')} TEXT"
+            )
         conn.commit()
     finally:
         conn.close()
@@ -910,8 +937,9 @@ def read_canonical_account_stats_record(
     try:
         if not _canonical_table_exists(conn, table_name):
             return None
+        select_columns_sql = _build_canonical_select_columns_sql(conn, table_name)
         row = conn.execute(
-            f"SELECT {', '.join(_quote_identifier(name) for name in CANONICAL_ACCOUNT_STATS_COLUMNS)} "
+            f"SELECT {select_columns_sql} "
             f"FROM {_quote_identifier(table_name)} "
             f"WHERE {_quote_identifier('nickname')} = ? "
             "LIMIT 1",
@@ -945,8 +973,9 @@ def read_canonical_account_stats_record_by_execution_slot(
     try:
         if not _canonical_table_exists(conn, table_name):
             return None
+        select_columns_sql = _build_canonical_select_columns_sql(conn, table_name)
         row = conn.execute(
-            f"SELECT {', '.join(_quote_identifier(name) for name in CANONICAL_ACCOUNT_STATS_COLUMNS)} "
+            f"SELECT {select_columns_sql} "
             f"FROM {_quote_identifier(table_name)} "
             f"WHERE {_quote_identifier('current_execution_slot')} = ? "
             "LIMIT 1",
@@ -999,8 +1028,9 @@ def read_preferred_canonical_account_stats_record_by_execution_slot(
     try:
         if not _canonical_table_exists(conn, table_name):
             return None
+        select_columns_sql = _build_canonical_select_columns_sql(conn, table_name)
         rows = conn.execute(
-            f"SELECT {', '.join(_quote_identifier(name) for name in CANONICAL_ACCOUNT_STATS_COLUMNS)} "
+            f"SELECT {select_columns_sql} "
             f"FROM {_quote_identifier(table_name)} "
             f"WHERE {_quote_identifier('current_execution_slot')} = ? "
             f"ORDER BY {_quote_identifier('updated_at')} DESC, {_quote_identifier('nickname')}",
@@ -1056,6 +1086,7 @@ def save_canonical_account_stats_record(
             {_quote_identifier('round_purchase_fail_count')} = excluded.{_quote_identifier('round_purchase_fail_count')},
             {_quote_identifier('current_balance')} = excluded.{_quote_identifier('current_balance')},
             {_quote_identifier('purchase_running_seconds')} = excluded.{_quote_identifier('purchase_running_seconds')},
+            {_quote_identifier('runtime_window_start_time')} = excluded.{_quote_identifier('runtime_window_start_time')},
             {_quote_identifier('round_status')} = excluded.{_quote_identifier('round_status')}
     """
     values = (
@@ -1070,6 +1101,7 @@ def save_canonical_account_stats_record(
         int(record.round_purchase_fail_count),
         str(record.current_balance or ""),
         int(record.purchase_running_seconds),
+        _serialize_datetime(record.runtime_window_start_time),
         normalized_round_status,
     )
 
@@ -1085,6 +1117,97 @@ def save_canonical_account_stats_record(
         "",
         int(record.baseline_item_count),
     )
+
+
+def update_canonical_account_runtime_fields(
+    database_path,
+    nickname,
+    purchase_running_seconds,
+    runtime_window_start_time,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+    updated_at=None,
+    last_limit_time=None,
+    update_last_limit_time=False,
+):
+    """仅更新运行时间窗口相关字段，避免高频全量覆盖写库。"""
+    normalized_nickname = str(nickname or "").strip()
+    if not normalized_nickname:
+        return AccountWriteResult("nickname_missing", "current nickname is empty")
+
+    try:
+        normalized_running_seconds = max(0, int(float(purchase_running_seconds)))
+    except (TypeError, ValueError):
+        return AccountWriteResult(
+            "invalid_running_seconds",
+            f"invalid purchase_running_seconds: {purchase_running_seconds}",
+        )
+
+    ensure_canonical_account_stats_table(database_path, table_name)
+
+    try:
+        conn = sqlite3.connect(database_path)
+    except sqlite3.Error as exc:
+        return AccountWriteResult("db_unavailable", f"database unavailable: {exc}")
+
+    normalized_updated_at = _serialize_datetime(updated_at or datetime.now())
+    normalized_window_start_time = _serialize_datetime(runtime_window_start_time)
+    normalized_last_limit_time = _serialize_datetime(last_limit_time)
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _canonical_table_exists(conn, table_name):
+            return AccountWriteResult("schema_not_found", f"canonical table not found: {table_name}")
+
+        row = conn.execute(
+            f"SELECT 1 "
+            f"FROM {_quote_identifier(table_name)} "
+            f"WHERE {_quote_identifier('nickname')} = ? "
+            "LIMIT 1",
+            (normalized_nickname,),
+        ).fetchone()
+        if row is None:
+            return AccountWriteResult(
+                "account_not_found",
+                f"account record not found for nickname: {normalized_nickname}",
+            )
+
+        set_clauses = [
+            f"{_quote_identifier('purchase_running_seconds')} = ?",
+            f"{_quote_identifier('runtime_window_start_time')} = ?",
+            f"{_quote_identifier('updated_at')} = ?",
+        ]
+        params = [
+            normalized_running_seconds,
+            normalized_window_start_time,
+            normalized_updated_at,
+        ]
+        if update_last_limit_time:
+            set_clauses.append(f"{_quote_identifier('last_limit_time')} = ?")
+            params.append(normalized_last_limit_time)
+        params.append(normalized_nickname)
+
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.execute(
+            f"UPDATE {_quote_identifier(table_name)} "
+            f"SET {', '.join(set_clauses)} "
+            f"WHERE {_quote_identifier('nickname')} = ?",
+            params,
+        )
+        if cursor.rowcount <= 0:
+            conn.rollback()
+            return AccountWriteResult(
+                "account_not_found",
+                f"account record not found for nickname: {normalized_nickname}",
+            )
+        conn.commit()
+        return AccountWriteResult("success", "", normalized_running_seconds)
+    except sqlite3.Error as exc:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return AccountWriteResult("write_failed", f"runtime fields write failed: {exc}")
+    finally:
+        conn.close()
 
 
 def update_canonical_account_item_balance_fields(
@@ -1234,6 +1357,7 @@ def ensure_canonical_execution_slot_seed_records(
             round_purchase_fail_count=0,
             current_balance="",
             purchase_running_seconds=0,
+            runtime_window_start_time=None,
             round_status=ROUND_STATUS_MANUAL_END,
         )
         save_canonical_account_stats_record(database_path, seed_record, table_name)
