@@ -42,6 +42,42 @@ def _quote_identifier(name):
     return '"' + str(name).replace('"', '""') + '"'
 
 
+def _get_table_column_names(conn, table_name):
+    try:
+        pragma_sql = f"PRAGMA table_info({_quote_identifier(table_name)})"
+        rows = conn.execute(pragma_sql).fetchall()
+    except sqlite3.Error:
+        return set()
+
+    column_names = set()
+    for row in rows:
+        if len(row) > 1 and row[1]:
+            column_names.add(str(row[1]).strip())
+    return column_names
+
+
+def _build_canonical_select_columns_sql(conn, table_name):
+    existing_columns = _get_table_column_names(conn, table_name)
+    select_columns = []
+    for column_name in CANONICAL_ACCOUNT_STATS_COLUMNS:
+        if column_name in existing_columns:
+            select_columns.append(_quote_identifier(column_name))
+        else:
+            # 兼容旧表结构，缺列时以 NULL 补齐，避免网页层因新字段直接报错
+            select_columns.append(f"NULL AS {_quote_identifier(column_name)}")
+    return ", ".join(select_columns)
+
+
+def _row_value(row, field_name, default=None):
+    if row is None:
+        return default
+
+    try:
+        return row[field_name]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
 def _parse_datetime(raw_value):
     if raw_value in (None, ""):
         return None
@@ -463,29 +499,30 @@ def _build_runtime_snapshot_health(rows, runtime_snapshot):
 
 
 def _row_to_view_record(row, now):
-    last_limit_time = _parse_datetime(row["last_limit_time"])
-    last_account_end_time = _parse_datetime(row["last_account_end_time"])
-    updated_at = _parse_datetime(row["updated_at"])
-    runtime_window_start_time = _parse_datetime(row["runtime_window_start_time"])
+    last_limit_time = _parse_datetime(_row_value(row, "last_limit_time"))
+    last_account_end_time = _parse_datetime(_row_value(row, "last_account_end_time"))
+    updated_at = _parse_datetime(_row_value(row, "updated_at"))
+    runtime_window_start_time = _parse_datetime(_row_value(row, "runtime_window_start_time"))
+    current_execution_slot = _row_value(row, "current_execution_slot")
 
     record = {
-        "nickname": str(row["nickname"] or "").strip(),
-        "baseline_item_count": _parse_int(row["baseline_item_count"]),
+        "nickname": str(_row_value(row, "nickname") or "").strip(),
+        "baseline_item_count": _parse_int(_row_value(row, "baseline_item_count")),
         "last_limit_time": _serialize_datetime(last_limit_time),
         "last_account_end_time": _serialize_datetime(last_account_end_time),
         "updated_at": _serialize_datetime(updated_at),
         "current_execution_slot": (
-            _parse_int(row["current_execution_slot"])
-            if row["current_execution_slot"] not in (None, "")
+            _parse_int(current_execution_slot)
+            if current_execution_slot not in (None, "")
             else None
         ),
-        "round_purchase_success_count": _parse_int(row["round_purchase_success_count"]),
-        "round_listing_success_count": _parse_int(row["round_listing_success_count"]),
-        "round_purchase_fail_count": _parse_int(row["round_purchase_fail_count"]),
-        "current_balance": str(row["current_balance"] or "").strip(),
-        "purchase_running_seconds": _parse_int(row["purchase_running_seconds"]),
+        "round_purchase_success_count": _parse_int(_row_value(row, "round_purchase_success_count")),
+        "round_listing_success_count": _parse_int(_row_value(row, "round_listing_success_count")),
+        "round_purchase_fail_count": _parse_int(_row_value(row, "round_purchase_fail_count")),
+        "current_balance": str(_row_value(row, "current_balance") or "").strip(),
+        "purchase_running_seconds": _parse_int(_row_value(row, "purchase_running_seconds")),
         "runtime_window_start_time": _serialize_datetime(runtime_window_start_time),
-        "round_status": str(row["round_status"] or "").strip(),
+        "round_status": str(_row_value(row, "round_status") or "").strip(),
     }
     record["item_quantity"] = record["baseline_item_count"]
     record["inventory_quantity"] = record["baseline_item_count"]
@@ -501,6 +538,9 @@ def _row_to_view_record(row, now):
             now,
         )
     )
+    record.setdefault("inventory_quantity", 0)
+    record.setdefault("updated_at_relative", "")
+    record.setdefault("runtime_window_remaining_text", _format_duration_text(0))
     return record
 
 
@@ -690,13 +730,14 @@ def get_account_view_rows():
     conn = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
+        select_columns_sql = _build_canonical_select_columns_sql(conn, table_name)
         order_by_sql = (
             f"CASE WHEN {_quote_identifier('current_execution_slot')} IS NULL THEN 1 ELSE 0 END, "
             f"{_quote_identifier('current_execution_slot')}, "
             f"{_quote_identifier('nickname')}"
         )
         rows = conn.execute(
-            f"SELECT {', '.join(_quote_identifier(name) for name in CANONICAL_ACCOUNT_STATS_COLUMNS)} "
+            f"SELECT {select_columns_sql} "
             f"FROM {_quote_identifier(table_name or CANONICAL_ACCOUNT_STATS_TABLE)} "
             f"ORDER BY {order_by_sql}"
         ).fetchall()
@@ -757,8 +798,9 @@ def get_account_view_detail(nickname=None, execution_slot=None):
     conn = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
+        select_columns_sql = _build_canonical_select_columns_sql(conn, table_name)
         base_sql = (
-            f"SELECT {', '.join(_quote_identifier(name) for name in CANONICAL_ACCOUNT_STATS_COLUMNS)} "
+            f"SELECT {select_columns_sql} "
             f"FROM {_quote_identifier(table_name or CANONICAL_ACCOUNT_STATS_TABLE)} "
         )
         row = None
