@@ -472,7 +472,7 @@ def _prepare_canonical_cleanup_once():
     print(
         "[账号数据] 强重置版保留原值字段："
         f"{'、'.join(before_summary['preserved_foundation_fields'])}；"
-        "更新时间字段：updated_at 会改为本次清理时间；"
+        "更新时间字段：updated_at 会清空为 NULL；"
         f"重置字段：{'、'.join(before_summary['resettable_runtime_fields'])}。"
     )
 

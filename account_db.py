@@ -232,7 +232,6 @@ CANONICAL_PRESERVED_FOUNDATION_FIELDS = (
     "current_balance",
 )
 CANONICAL_BOUNDARY_FIELDS = (
-    "updated_at",
 )
 CANONICAL_RESETTABLE_RUNTIME_FIELDS = (
     "round_purchase_success_count",
@@ -965,6 +964,7 @@ def _build_legacy_cleanup_summary(rows):
             or raw_status != ROUND_STATUS_MANUAL_PAUSE
             or str(row["last_limit_time"] or "").strip()
             or str(row["last_account_end_time"] or "").strip()
+            or str(row["updated_at"] or "").strip()
         ):
             aggressive_reset_candidates += 1
 
@@ -1068,7 +1068,6 @@ def reset_canonical_account_stats_legacy_fields(
         }
 
     conn.row_factory = sqlite3.Row
-    cleanup_time = _serialize_datetime(datetime.now())
     try:
         if not _canonical_table_exists(conn, table_name):
             return {
@@ -1114,6 +1113,7 @@ def reset_canonical_account_stats_legacy_fields(
                     or raw_status != ROUND_STATUS_MANUAL_PAUSE
                     or str(row["last_limit_time"] or "").strip() != ""
                     or str(row["last_account_end_time"] or "").strip() != ""
+                    or str(row["updated_at"] or "").strip() != ""
                 )
             if should_reset:
                 target_rowids.append(row["rowid"])
@@ -1133,9 +1133,9 @@ def reset_canonical_account_stats_legacy_fields(
             f"{_quote_identifier('purchase_running_seconds')} = 0",
             f"{_quote_identifier('runtime_window_start_time')} = NULL",
             f"{_quote_identifier('round_status')} = ?",
-            f"{_quote_identifier('updated_at')} = ?",
+            f"{_quote_identifier('updated_at')} = NULL",
         ]
-        params_prefix = [ROUND_STATUS_MANUAL_PAUSE, cleanup_time]
+        params_prefix = [ROUND_STATUS_MANUAL_PAUSE]
         if mode == CANONICAL_RESET_MODE_AGGRESSIVE:
             set_clauses.append(f"{_quote_identifier('last_limit_time')} = NULL")
             set_clauses.append(f"{_quote_identifier('last_account_end_time')} = NULL")
@@ -1235,6 +1235,7 @@ def ensure_canonical_account_stats_table(
         os.makedirs(directory, exist_ok=True)
 
     conn = sqlite3.connect(database_path)
+    conn.row_factory = sqlite3.Row
     try:
         conn.execute(build_canonical_account_stats_table_sql(table_name))
         if _canonical_status_schema_requires_rebuild(conn, table_name):
