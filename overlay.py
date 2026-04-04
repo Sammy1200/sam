@@ -10,7 +10,7 @@ import tkinter as tk
 from datetime import datetime
 
 import state
-from round_persistence import persist_pause_snapshot
+from round_persistence import persist_pause_snapshot, persist_resume_snapshot
 from utils import (
     OVERLAY_LOG_LABEL_PACK,
     OVERLAY_LOG_LABEL_STYLE,
@@ -236,9 +236,9 @@ def toggle_pause():
         ui_print("脚本已暂停（按 F12 恢复）")
         pause_persist_result = persist_pause_snapshot()
         if pause_persist_result.status == "success":
-            ui_print("暂停后已完成全量入库，网页可立即读取最新数据。", save_log=True)
+            ui_print("暂停后已写入当前账号最小必要字段，账号状态已更新为人工暂停。", save_log=True)
         elif pause_persist_result.status != "skipped":
-            ui_print(f"暂停后全量入库失败：{pause_persist_result.reason}", save_log=True)
+            ui_print(f"暂停后最小写库失败：{pause_persist_result.reason}", save_log=True)
         if state.overlay_root:
             try:
                 enqueue_overlay_task(state.overlay_root.withdraw)
@@ -251,7 +251,13 @@ def toggle_pause():
                 enqueue_overlay_task(state.overlay_root.deiconify)
             except Exception:
                 pass
-        ui_print("脚本已恢复（按 F12 暂停）")
+        resume_persist_result = persist_resume_snapshot()
+        if resume_persist_result.status == "success":
+            ui_print("脚本已恢复（按 F12 暂停），当前账号状态已从人工暂停恢复为运行中。")
+        elif resume_persist_result.status == "skipped":
+            ui_print("脚本已恢复（按 F12 暂停）")
+        else:
+            ui_print(f"脚本已恢复（按 F12 暂停），但状态回写失败：{resume_persist_result.reason}", save_log=True)
 
 
 def _pause_hotkey_loop():

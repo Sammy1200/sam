@@ -11,8 +11,10 @@ from account_db import (
     AccountStatsRecord,
     CANONICAL_ACCOUNT_STATS_COLUMNS,
     CANONICAL_ACCOUNT_STATS_TABLE,
+    ROUND_STATUS_MANUAL_PAUSE,
     ROUND_STATUS_VALUES,
     find_canonical_account_stats_store,
+    normalize_round_status_value,
     read_canonical_account_stats_record,
     read_runtime_execution_state,
     save_canonical_account_stats_record,
@@ -133,6 +135,13 @@ def _parse_int(raw_value):
     if not text:
         return 0
     return int(text)
+
+
+def _normalize_view_round_status(raw_status):
+    normalized_status = normalize_round_status_value(raw_status)
+    if normalized_status not in ROUND_STATUS_VALUES:
+        return ROUND_STATUS_MANUAL_PAUSE
+    return normalized_status
 
 
 def _serialize_datetime(value):
@@ -522,7 +531,7 @@ def _row_to_view_record(row, now):
         "current_balance": str(_row_value(row, "current_balance") or "").strip(),
         "purchase_running_seconds": _parse_int(_row_value(row, "purchase_running_seconds")),
         "runtime_window_start_time": _serialize_datetime(runtime_window_start_time),
-        "round_status": str(_row_value(row, "round_status") or "").strip(),
+        "round_status": _normalize_view_round_status(_row_value(row, "round_status")),
     }
     record["item_quantity"] = record["baseline_item_count"]
     record["inventory_quantity"] = record["baseline_item_count"]

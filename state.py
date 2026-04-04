@@ -72,7 +72,7 @@ listing_periodic_disabled_reason = ""
 listing_periodic_skip_logged = False
 
 # --- 线程 2：状态字段 ---
-round_status = "手动结束"
+round_status = "人工暂停"
 
 # --- 线程 2：时间字段 ---
 round_purchase_running_seconds = 0.0
@@ -86,6 +86,7 @@ account_limit_reached_at = None
 account_db_path = ""
 account_db_table_name = ""
 account_record_loaded = False
+canonical_cleanup_completed = False
 account_allow_purchase = True
 account_allow_start_time = None
 account_read_status = ""

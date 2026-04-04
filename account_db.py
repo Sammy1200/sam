@@ -156,7 +156,8 @@ ROUND_STATUS_LIMITED = "\u8d26\u53f7\u9650\u5236"
 ROUND_STATUS_BALANCE_LOW = "\u4f59\u989d\u4e0d\u8db3"
 ROUND_STATUS_NORMAL_END = "\u6b63\u5e38\u7ed3\u675f"
 ROUND_STATUS_UNKNOWN = "\u672a\u77e5\u5f02\u5e38"
-ROUND_STATUS_MANUAL_END = "\u624b\u52a8\u7ed3\u675f"
+ROUND_STATUS_MANUAL_PAUSE = "\u4eba\u5de5\u6682\u505c"
+ROUND_STATUS_LEGACY_MANUAL_END = "\u624b\u52a8\u7ed3\u675f"
 
 ROUND_STATUS_VALUES = (
     ROUND_STATUS_RUNNING,
@@ -164,7 +165,7 @@ ROUND_STATUS_VALUES = (
     ROUND_STATUS_BALANCE_LOW,
     ROUND_STATUS_NORMAL_END,
     ROUND_STATUS_UNKNOWN,
-    ROUND_STATUS_MANUAL_END,
+    ROUND_STATUS_MANUAL_PAUSE,
 )
 ROUND_STATUS_VALUE_ALIASES = {
     ROUND_STATUS_RUNNING: ROUND_STATUS_RUNNING,
@@ -172,7 +173,8 @@ ROUND_STATUS_VALUE_ALIASES = {
     ROUND_STATUS_BALANCE_LOW: ROUND_STATUS_BALANCE_LOW,
     ROUND_STATUS_NORMAL_END: ROUND_STATUS_NORMAL_END,
     ROUND_STATUS_UNKNOWN: ROUND_STATUS_UNKNOWN,
-    ROUND_STATUS_MANUAL_END: ROUND_STATUS_MANUAL_END,
+    ROUND_STATUS_MANUAL_PAUSE: ROUND_STATUS_MANUAL_PAUSE,
+    ROUND_STATUS_LEGACY_MANUAL_END: ROUND_STATUS_MANUAL_PAUSE,
     "\u62a2\u8d2d\u4e2d": ROUND_STATUS_RUNNING,
     "running": ROUND_STATUS_RUNNING,
     "account_limited": ROUND_STATUS_LIMITED,
@@ -182,7 +184,8 @@ ROUND_STATUS_VALUE_ALIASES = {
     "normal_end": ROUND_STATUS_NORMAL_END,
     "unknown": ROUND_STATUS_UNKNOWN,
     "unknown_error": ROUND_STATUS_UNKNOWN,
-    "manual_end": ROUND_STATUS_MANUAL_END,
+    "manual_end": ROUND_STATUS_MANUAL_PAUSE,
+    "manual_pause": ROUND_STATUS_MANUAL_PAUSE,
 }
 
 CANONICAL_ACCOUNT_STATS_TABLE = "account_stats"
@@ -221,6 +224,31 @@ CANONICAL_TIME_FIELDS = (
     "last_limit_time",
     "last_account_end_time",
     "updated_at",
+)
+CANONICAL_PRESERVED_FOUNDATION_FIELDS = (
+    "nickname",
+    "current_execution_slot",
+    "baseline_item_count",
+    "current_balance",
+)
+CANONICAL_BOUNDARY_FIELDS = (
+    "last_limit_time",
+    "last_account_end_time",
+    "updated_at",
+)
+CANONICAL_RESETTABLE_RUNTIME_FIELDS = (
+    "round_purchase_success_count",
+    "round_listing_success_count",
+    "round_purchase_fail_count",
+    "purchase_running_seconds",
+    "runtime_window_start_time",
+    "round_status",
+)
+CANONICAL_RESET_MODE_CONSERVATIVE = "conservative"
+CANONICAL_RESET_MODE_AGGRESSIVE = "aggressive"
+CANONICAL_RESET_MODE_VALUES = (
+    CANONICAL_RESET_MODE_CONSERVATIVE,
+    CANONICAL_RESET_MODE_AGGRESSIVE,
 )
 CANONICAL_DB_HINT_PATHS = (
     ACCOUNT_STATS_DB_PATH,
@@ -282,7 +310,7 @@ class AccountStatsRecord:
     current_balance: str = ""
     purchase_running_seconds: int = 0
     runtime_window_start_time: datetime | None = None
-    round_status: str = ROUND_STATUS_MANUAL_END
+    round_status: str = ROUND_STATUS_MANUAL_PAUSE
 
 
 @dataclass
@@ -333,7 +361,7 @@ def build_canonical_account_stats_table_sql(table_name=CANONICAL_ACCOUNT_STATS_T
             current_balance TEXT NOT NULL DEFAULT '',
             purchase_running_seconds INTEGER NOT NULL DEFAULT 0,
             runtime_window_start_time TEXT,
-            round_status TEXT NOT NULL DEFAULT '{ROUND_STATUS_MANUAL_END}'
+            round_status TEXT NOT NULL DEFAULT '{ROUND_STATUS_MANUAL_PAUSE}'
                 CHECK (round_status IN ({escaped_status_values}))
         )
     """
@@ -752,13 +780,20 @@ def normalize_round_status_value(round_status):
     return ROUND_STATUS_VALUE_ALIASES.get(text, text)
 
 
+def _normalize_round_status_for_storage(round_status):
+    normalized = normalize_round_status_value(round_status)
+    if normalized not in ROUND_STATUS_VALUES:
+        return ROUND_STATUS_MANUAL_PAUSE
+    return normalized
+
+
 def _row_to_account_stats_record(row):
     if row is None:
         return None
 
     round_status = normalize_round_status_value(row["round_status"])
     if round_status not in ROUND_STATUS_VALUES:
-        round_status = ROUND_STATUS_MANUAL_END
+        round_status = ROUND_STATUS_MANUAL_PAUSE
 
     return AccountStatsRecord(
         nickname=str(row["nickname"] or "").strip(),
@@ -792,6 +827,348 @@ def _build_canonical_select_columns_sql(conn, table_name):
     return ", ".join(select_columns)
 
 
+def _build_canonical_insert_sql(table_name):
+    return (
+        f"INSERT INTO {_quote_identifier(table_name)} ("
+        f"{', '.join(_quote_identifier(name) for name in CANONICAL_ACCOUNT_STATS_COLUMNS)}"
+        f") VALUES ({', '.join('?' for _ in CANONICAL_ACCOUNT_STATS_COLUMNS)})"
+    )
+
+
+def _account_stats_record_to_row_values(record):
+    normalized_round_status = _normalize_round_status_for_storage(record.round_status)
+    return (
+        str(record.nickname).strip(),
+        int(record.baseline_item_count),
+        _serialize_datetime(record.last_limit_time),
+        _serialize_datetime(record.last_account_end_time),
+        _serialize_datetime(record.updated_at),
+        int(record.current_execution_slot) if record.current_execution_slot is not None else None,
+        int(record.round_purchase_success_count),
+        int(record.round_listing_success_count),
+        int(record.round_purchase_fail_count),
+        str(record.current_balance or ""),
+        int(record.purchase_running_seconds),
+        _serialize_datetime(record.runtime_window_start_time),
+        normalized_round_status,
+    )
+
+
+def _fetch_table_sql(conn, table_name):
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1",
+        (table_name,),
+    ).fetchone()
+    if row is None:
+        return ""
+    if isinstance(row, sqlite3.Row):
+        return str(row["sql"] or "")
+    return str(row[0] or "")
+
+
+def _canonical_status_schema_requires_rebuild(conn, table_name):
+    create_sql = _fetch_table_sql(conn, table_name)
+    if not create_sql:
+        return False
+    return (
+        ROUND_STATUS_LEGACY_MANUAL_END in create_sql
+        or ROUND_STATUS_MANUAL_PAUSE not in create_sql
+    )
+
+
+def _rebuild_canonical_account_stats_table(conn, table_name):
+    select_columns_sql = _build_canonical_select_columns_sql(conn, table_name)
+    existing_rows = conn.execute(
+        f"SELECT {select_columns_sql} FROM {_quote_identifier(table_name)}"
+    ).fetchall()
+
+    restored_records = []
+    for row in existing_rows:
+        record = _row_to_account_stats_record(row)
+        if record is None or not record.nickname:
+            continue
+        record.round_status = _normalize_round_status_for_storage(record.round_status)
+        restored_records.append(record)
+
+    legacy_table_name = f"{table_name}__legacy_status_schema"
+    if _canonical_table_exists(conn, legacy_table_name):
+        conn.execute(f"DROP TABLE {_quote_identifier(legacy_table_name)}")
+
+    conn.execute(f"ALTER TABLE {_quote_identifier(table_name)} RENAME TO {_quote_identifier(legacy_table_name)}")
+    conn.execute(build_canonical_account_stats_table_sql(table_name))
+    if restored_records:
+        conn.executemany(
+            _build_canonical_insert_sql(table_name),
+            [_account_stats_record_to_row_values(record) for record in restored_records],
+        )
+    conn.execute(f"DROP TABLE {_quote_identifier(legacy_table_name)}")
+
+
+def _build_legacy_cleanup_summary(rows):
+    status_counts = {}
+    legacy_status_count = 0
+    invalid_status_count = 0
+    round_field_residue_count = 0
+    runtime_field_residue_count = 0
+    cooldown_present_count = 0
+    end_time_present_count = 0
+    updated_at_present_count = 0
+    preserve_balance_count = 0
+    preserve_item_count = 0
+    conservative_reset_candidates = 0
+    aggressive_reset_candidates = 0
+
+    for row in rows:
+        raw_status = str(row["round_status"] or "").strip()
+        normalized_status = normalize_round_status_value(raw_status)
+        if normalized_status not in ROUND_STATUS_VALUES:
+            normalized_status = ROUND_STATUS_MANUAL_PAUSE
+            invalid_status_count += 1
+        elif normalized_status != raw_status:
+            legacy_status_count += 1
+
+        status_counts[normalized_status] = status_counts.get(normalized_status, 0) + 1
+
+        has_round_residue = any(
+            _parse_int(row[field_name]) > 0
+            for field_name in (
+                "round_purchase_success_count",
+                "round_listing_success_count",
+                "round_purchase_fail_count",
+            )
+        )
+        has_runtime_residue = (
+            _parse_int(row["purchase_running_seconds"]) > 0
+            or str(row["runtime_window_start_time"] or "").strip() != ""
+        )
+        if has_round_residue:
+            round_field_residue_count += 1
+        if has_runtime_residue:
+            runtime_field_residue_count += 1
+        if str(row["last_limit_time"] or "").strip():
+            cooldown_present_count += 1
+        if str(row["last_account_end_time"] or "").strip():
+            end_time_present_count += 1
+        if str(row["updated_at"] or "").strip():
+            updated_at_present_count += 1
+        if str(row["current_balance"] or "").strip():
+            preserve_balance_count += 1
+        if _parse_int(row["baseline_item_count"]) > 0:
+            preserve_item_count += 1
+
+        if has_round_residue or has_runtime_residue or raw_status != normalized_status or not raw_status:
+            conservative_reset_candidates += 1
+
+        if (
+            has_round_residue
+            or has_runtime_residue
+            or raw_status != ROUND_STATUS_MANUAL_PAUSE
+            or str(row["last_limit_time"] or "").strip()
+            or str(row["last_account_end_time"] or "").strip()
+        ):
+            aggressive_reset_candidates += 1
+
+    return {
+        "total_records": len(rows),
+        "status_counts": status_counts,
+        "legacy_status_count": legacy_status_count,
+        "invalid_status_count": invalid_status_count,
+        "round_field_residue_count": round_field_residue_count,
+        "runtime_field_residue_count": runtime_field_residue_count,
+        "cooldown_present_count": cooldown_present_count,
+        "last_account_end_present_count": end_time_present_count,
+        "updated_at_present_count": updated_at_present_count,
+        "preserve_balance_count": preserve_balance_count,
+        "preserve_item_count": preserve_item_count,
+        "conservative_reset_candidates": conservative_reset_candidates,
+        "aggressive_reset_candidates": aggressive_reset_candidates,
+        "preserved_foundation_fields": CANONICAL_PRESERVED_FOUNDATION_FIELDS,
+        "boundary_fields": CANONICAL_BOUNDARY_FIELDS,
+        "resettable_runtime_fields": CANONICAL_RESETTABLE_RUNTIME_FIELDS,
+    }
+
+
+def inspect_canonical_account_stats_cleanup_scope(
+    database_path,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+):
+    """盘点当前 canonical 表中受旧规则影响的字段残留。"""
+    summary = {
+        "database_path": database_path or "",
+        "table_name": table_name,
+        "database_exists": bool(database_path and os.path.isfile(database_path)),
+        "table_exists": False,
+        "total_records": 0,
+        "status_counts": {},
+        "legacy_status_count": 0,
+        "invalid_status_count": 0,
+        "round_field_residue_count": 0,
+        "runtime_field_residue_count": 0,
+        "cooldown_present_count": 0,
+        "last_account_end_present_count": 0,
+        "updated_at_present_count": 0,
+        "preserve_balance_count": 0,
+        "preserve_item_count": 0,
+        "conservative_reset_candidates": 0,
+        "aggressive_reset_candidates": 0,
+        "preserved_foundation_fields": CANONICAL_PRESERVED_FOUNDATION_FIELDS,
+        "boundary_fields": CANONICAL_BOUNDARY_FIELDS,
+        "resettable_runtime_fields": CANONICAL_RESETTABLE_RUNTIME_FIELDS,
+    }
+    if not database_path or not os.path.isfile(database_path):
+        return summary
+
+    try:
+        conn = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return summary
+
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _canonical_table_exists(conn, table_name):
+            return summary
+
+        summary["table_exists"] = True
+        select_columns_sql = _build_canonical_select_columns_sql(conn, table_name)
+        rows = conn.execute(
+            f"SELECT rowid, {select_columns_sql} "
+            f"FROM {_quote_identifier(table_name)}"
+        ).fetchall()
+        summary.update(_build_legacy_cleanup_summary(rows))
+        return summary
+    finally:
+        conn.close()
+
+
+def reset_canonical_account_stats_legacy_fields(
+    database_path,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+    mode=CANONICAL_RESET_MODE_CONSERVATIVE,
+):
+    """按模式选择性重置旧轮次/旧运行态字段。"""
+    if mode not in CANONICAL_RESET_MODE_VALUES:
+        raise ValueError(f"unsupported cleanup mode: {mode}")
+    if not database_path or not os.path.isfile(database_path):
+        return {
+            "status": "skipped",
+            "mode": mode,
+            "updated_rows": 0,
+            "reason": "database file not found",
+        }
+
+    ensure_canonical_account_stats_table(database_path, table_name)
+    try:
+        conn = sqlite3.connect(database_path)
+    except sqlite3.Error as exc:
+        return {
+            "status": "error",
+            "mode": mode,
+            "updated_rows": 0,
+            "reason": str(exc),
+        }
+
+    conn.row_factory = sqlite3.Row
+    cleanup_time = _serialize_datetime(datetime.now())
+    try:
+        if not _canonical_table_exists(conn, table_name):
+            return {
+                "status": "skipped",
+                "mode": mode,
+                "updated_rows": 0,
+                "reason": f"canonical table not found: {table_name}",
+            }
+
+        select_columns_sql = _build_canonical_select_columns_sql(conn, table_name)
+        rows = conn.execute(
+            f"SELECT rowid, {select_columns_sql} "
+            f"FROM {_quote_identifier(table_name)}"
+        ).fetchall()
+
+        target_rowids = []
+        for row in rows:
+            raw_status = str(row["round_status"] or "").strip()
+            normalized_status = normalize_round_status_value(raw_status)
+            has_round_residue = any(
+                _parse_int(row[field_name]) > 0
+                for field_name in (
+                    "round_purchase_success_count",
+                    "round_listing_success_count",
+                    "round_purchase_fail_count",
+                )
+            )
+            has_runtime_residue = (
+                _parse_int(row["purchase_running_seconds"]) > 0
+                or str(row["runtime_window_start_time"] or "").strip() != ""
+            )
+            has_legacy_status = (
+                not raw_status
+                or normalized_status not in ROUND_STATUS_VALUES
+                or raw_status != normalized_status
+            )
+            if mode == CANONICAL_RESET_MODE_CONSERVATIVE:
+                should_reset = has_round_residue or has_runtime_residue or has_legacy_status
+            else:
+                should_reset = (
+                    has_round_residue
+                    or has_runtime_residue
+                    or raw_status != ROUND_STATUS_MANUAL_PAUSE
+                    or str(row["last_limit_time"] or "").strip() != ""
+                    or str(row["last_account_end_time"] or "").strip() != ""
+                )
+            if should_reset:
+                target_rowids.append(row["rowid"])
+
+        if not target_rowids:
+            return {
+                "status": "success",
+                "mode": mode,
+                "updated_rows": 0,
+                "reason": "",
+            }
+
+        set_clauses = [
+            f"{_quote_identifier('round_purchase_success_count')} = 0",
+            f"{_quote_identifier('round_listing_success_count')} = 0",
+            f"{_quote_identifier('round_purchase_fail_count')} = 0",
+            f"{_quote_identifier('purchase_running_seconds')} = 0",
+            f"{_quote_identifier('runtime_window_start_time')} = NULL",
+            f"{_quote_identifier('round_status')} = ?",
+            f"{_quote_identifier('updated_at')} = ?",
+        ]
+        params_prefix = [ROUND_STATUS_MANUAL_PAUSE, cleanup_time]
+        if mode == CANONICAL_RESET_MODE_AGGRESSIVE:
+            set_clauses.append(f"{_quote_identifier('last_limit_time')} = NULL")
+            set_clauses.append(f"{_quote_identifier('last_account_end_time')} = NULL")
+
+        conn.execute("BEGIN IMMEDIATE")
+        conn.executemany(
+            f"UPDATE {_quote_identifier(table_name)} "
+            f"SET {', '.join(set_clauses)} "
+            "WHERE rowid = ?",
+            [tuple(params_prefix + [rowid]) for rowid in target_rowids],
+        )
+        conn.commit()
+        return {
+            "status": "success",
+            "mode": mode,
+            "updated_rows": len(target_rowids),
+            "reason": "",
+        }
+    except sqlite3.Error as exc:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return {
+            "status": "error",
+            "mode": mode,
+            "updated_rows": 0,
+            "reason": str(exc),
+        }
+    finally:
+        conn.close()
+
+
 def normalize_canonical_round_status_values(
     database_path,
     table_name=CANONICAL_ACCOUNT_STATS_TABLE,
@@ -818,9 +1195,7 @@ def normalize_canonical_round_status_values(
         updates = []
         for row in rows:
             raw_status = str(row["round_status"] or "").strip()
-            normalized_status = normalize_round_status_value(raw_status)
-            if normalized_status not in ROUND_STATUS_VALUES:
-                continue
+            normalized_status = _normalize_round_status_for_storage(raw_status)
             if normalized_status == raw_status:
                 continue
             updates.append((normalized_status, row["rowid"]))
@@ -862,6 +1237,10 @@ def ensure_canonical_account_stats_table(
     conn = sqlite3.connect(database_path)
     try:
         conn.execute(build_canonical_account_stats_table_sql(table_name))
+        if _canonical_status_schema_requires_rebuild(conn, table_name):
+            conn.execute("BEGIN IMMEDIATE")
+            _rebuild_canonical_account_stats_table(conn, table_name)
+            conn.commit()
         existing_columns = set(_get_table_column_names(conn, table_name))
         if "runtime_window_start_time" not in existing_columns:
             conn.execute(
@@ -1063,7 +1442,7 @@ def save_canonical_account_stats_record(
         raise TypeError("record must be AccountStatsRecord")
     if not record.nickname or not str(record.nickname).strip():
         raise ValueError("nickname is empty")
-    normalized_round_status = normalize_round_status_value(record.round_status)
+    normalized_round_status = _normalize_round_status_for_storage(record.round_status)
     if not _validate_round_status(normalized_round_status):
         raise ValueError(f"invalid round_status: {record.round_status}")
 
@@ -1321,6 +1700,132 @@ def update_canonical_account_item_balance_fields(
         conn.close()
 
 
+def update_canonical_account_status_fields(
+    database_path,
+    nickname,
+    round_status,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+    updated_at=None,
+    expected_current_status=None,
+    item_quantity=None,
+    current_balance=None,
+    purchase_running_seconds=None,
+    runtime_window_start_time=None,
+):
+    """按昵称最小更新状态相关字段，可选带当前状态前置条件。"""
+    normalized_nickname = str(nickname or "").strip()
+    if not normalized_nickname:
+        return AccountWriteResult("nickname_missing", "当前昵称为空")
+    if not database_path or not os.path.isfile(database_path):
+        return AccountWriteResult("db_unavailable", f"数据库文件不存在: {database_path}")
+
+    normalized_round_status = _normalize_round_status_for_storage(round_status)
+    normalized_expected_status = None
+    if expected_current_status is not None:
+        normalized_expected_status = _normalize_round_status_for_storage(expected_current_status)
+
+    normalized_updated_at = _serialize_datetime(updated_at or datetime.now())
+    normalized_item_quantity = None
+    if item_quantity is not None:
+        try:
+            normalized_item_quantity = int(item_quantity)
+        except (TypeError, ValueError):
+            return AccountWriteResult("invalid_item_quantity", f"道具数量无效: {item_quantity}")
+        if normalized_item_quantity < 0:
+            return AccountWriteResult("invalid_item_quantity", f"道具数量为负数: {normalized_item_quantity}")
+
+    normalized_balance = None
+    if current_balance is not None:
+        normalized_balance = str(current_balance or "").strip()
+
+    normalized_running_seconds = None
+    if purchase_running_seconds is not None:
+        try:
+            normalized_running_seconds = max(0, int(float(purchase_running_seconds)))
+        except (TypeError, ValueError):
+            return AccountWriteResult(
+                "invalid_running_seconds",
+                f"invalid purchase_running_seconds: {purchase_running_seconds}",
+            )
+
+    normalized_window_start_time = None
+    if runtime_window_start_time is not None:
+        normalized_window_start_time = _serialize_datetime(runtime_window_start_time)
+
+    try:
+        conn = sqlite3.connect(database_path)
+    except sqlite3.Error as exc:
+        return AccountWriteResult("db_unavailable", f"数据库不可用: {exc}")
+
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _canonical_table_exists(conn, table_name):
+            return AccountWriteResult("schema_not_found", f"canonical 表不存在: {table_name}")
+
+        row = conn.execute(
+            f"SELECT {_quote_identifier('round_status')} "
+            f"FROM {_quote_identifier(table_name)} "
+            f"WHERE {_quote_identifier('nickname')} = ? "
+            "LIMIT 1",
+            (normalized_nickname,),
+        ).fetchone()
+        if row is None:
+            return AccountWriteResult(
+                "account_not_found",
+                f"未找到昵称为 {normalized_nickname} 的账号记录",
+            )
+
+        current_status = _normalize_round_status_for_storage(row["round_status"])
+        if normalized_expected_status is not None and current_status != normalized_expected_status:
+            return AccountWriteResult(
+                "skipped",
+                f"current status mismatch: expected={normalized_expected_status}, actual={current_status}",
+            )
+
+        set_clauses = [
+            f"{_quote_identifier('round_status')} = ?",
+            f"{_quote_identifier('updated_at')} = ?",
+        ]
+        params = [normalized_round_status, normalized_updated_at]
+        if normalized_item_quantity is not None:
+            set_clauses.append(f"{_quote_identifier('baseline_item_count')} = ?")
+            params.append(normalized_item_quantity)
+        if normalized_balance:
+            set_clauses.append(f"{_quote_identifier('current_balance')} = ?")
+            params.append(normalized_balance)
+        if normalized_running_seconds is not None:
+            set_clauses.append(f"{_quote_identifier('purchase_running_seconds')} = ?")
+            params.append(normalized_running_seconds)
+        if runtime_window_start_time is not None:
+            set_clauses.append(f"{_quote_identifier('runtime_window_start_time')} = ?")
+            params.append(normalized_window_start_time)
+        params.append(normalized_nickname)
+
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.execute(
+            f"UPDATE {_quote_identifier(table_name)} "
+            f"SET {', '.join(set_clauses)} "
+            f"WHERE {_quote_identifier('nickname')} = ?",
+            params,
+        )
+        if cursor.rowcount <= 0:
+            conn.rollback()
+            return AccountWriteResult(
+                "account_not_found",
+                f"未找到昵称为 {normalized_nickname} 的账号记录",
+            )
+        conn.commit()
+        return AccountWriteResult("success", "", normalized_item_quantity)
+    except sqlite3.Error as exc:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return AccountWriteResult("write_failed", f"写入失败: {exc}")
+    finally:
+        conn.close()
+
+
 def ensure_canonical_execution_slot_seed_records(
     database_path,
     table_name=CANONICAL_ACCOUNT_STATS_TABLE,
@@ -1381,7 +1886,7 @@ def ensure_canonical_execution_slot_seed_records(
             current_balance="",
             purchase_running_seconds=0,
             runtime_window_start_time=None,
-            round_status=ROUND_STATUS_MANUAL_END,
+            round_status=ROUND_STATUS_MANUAL_PAUSE,
         )
         save_canonical_account_stats_record(database_path, seed_record, table_name)
         existing_nicknames.add(seed_nickname)
@@ -1432,7 +1937,7 @@ def write_account_round_record(database_path, table_name, nickname, payload):
             ("round_purchase_fail", payload.round_purchase_fail_count),
             ("current_balance", payload.current_balance),
             ("purchase_running_seconds", payload.purchase_running_seconds),
-            ("round_status", payload.round_status),
+            ("round_status", _normalize_round_status_for_storage(payload.round_status)),
             ("updated_at", _serialize_datetime(payload.updated_at)),
         ]
 

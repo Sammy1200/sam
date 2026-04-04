@@ -9,11 +9,12 @@ from account_db import (
     CANONICAL_ACCOUNT_STATS_TABLE,
     ROUND_STATUS_BALANCE_LOW,
     ROUND_STATUS_LIMITED,
-    ROUND_STATUS_MANUAL_END,
+    ROUND_STATUS_MANUAL_PAUSE,
     ROUND_STATUS_NORMAL_END,
     ROUND_STATUS_RUNNING,
     ROUND_STATUS_UNKNOWN,
     save_canonical_account_stats_record,
+    update_canonical_account_status_fields,
     update_canonical_account_runtime_fields,
     update_canonical_account_item_balance_fields,
 )
@@ -265,8 +266,8 @@ def _normalize_round_status(raw_status, is_final):
         return ROUND_STATUS_LIMITED
     if normalized == "\u4f59\u989d\u4e0d\u8db3":
         return ROUND_STATUS_BALANCE_LOW
-    if normalized == "\u624b\u52a8\u7ed3\u675f":
-        return ROUND_STATUS_MANUAL_END
+    if normalized in ("\u624b\u52a8\u7ed3\u675f", "\u4eba\u5de5\u6682\u505c"):
+        return ROUND_STATUS_MANUAL_PAUSE
     if normalized == "\u672a\u77e5\u5f02\u5e38":
         return ROUND_STATUS_UNKNOWN
     if normalized == STATUS_NORMAL_SWITCH:
@@ -415,7 +416,7 @@ def persist_minimal_item_balance_sync():
 
 
 def persist_pause_snapshot():
-    """F12 暂停后补一次当前账号全量关键数据写库。"""
+    """F12 暂停后只补当前账号最小必要字段，并写入人工暂停状态。"""
     if state.temporary_purchase_mode:
         return AccountWriteResult("skipped", "临时模式不写入 canonical SQLite")
 
@@ -423,7 +424,78 @@ def persist_pause_snapshot():
     if state.account_read_status == "account_not_found" or not state.account_record_loaded or not nickname:
         return AccountWriteResult("skipped", f"当前账号未加载 SQLite 记录: {nickname}")
 
-    return persist_lightweight_round_snapshot()
+    runtime_item_quantity = int(state.baseline_item_count)
+    if runtime_item_quantity < 0:
+        return AccountWriteResult(
+            "invalid_item_quantity",
+            f"运行中道具库存为负数: {runtime_item_quantity}",
+        )
+
+    table_name = state.account_db_table_name or CANONICAL_ACCOUNT_STATS_TABLE
+    sync_runtime_window_state(
+        persist_if_changed=False,
+        initialize_if_missing=False,
+        allow_legacy_fallback=False,
+    )
+    runtime_seconds = max(0, int(get_current_elapsed()))
+    effective_balance = _get_effective_balance()
+    write_time = datetime.now()
+    result = update_canonical_account_status_fields(
+        state.account_db_path,
+        nickname,
+        ROUND_STATUS_MANUAL_PAUSE,
+        table_name=table_name,
+        updated_at=write_time,
+        item_quantity=runtime_item_quantity,
+        current_balance=effective_balance or None,
+        purchase_running_seconds=runtime_seconds,
+        runtime_window_start_time=state.runtime_window_start_time,
+    )
+    if result.status == "success":
+        state.updated_at = write_time
+        state.round_purchase_running_seconds = float(runtime_seconds)
+        state.round_status = ROUND_STATUS_MANUAL_PAUSE
+        logger.info(
+            "[账号数据] F12 暂停最小写库完成：昵称=%s 状态=%s 道具库存=%s 余额=%s 累计抢购秒数=%s",
+            nickname,
+            ROUND_STATUS_MANUAL_PAUSE,
+            runtime_item_quantity,
+            effective_balance or "保持原值",
+            runtime_seconds,
+        )
+    elif result.status != "skipped":
+        logger.warning("[账号数据] F12 暂停最小写库失败：昵称=%s 原因=%s", nickname, result.reason)
+    return result
+
+
+def persist_resume_snapshot():
+    """F12 恢复后仅在库内当前状态为人工暂停时恢复为运行中。"""
+    if state.temporary_purchase_mode:
+        return AccountWriteResult("skipped", "临时模式不写入 canonical SQLite")
+
+    nickname = (state.current_nickname or "").strip()
+    if state.account_read_status == "account_not_found" or not state.account_record_loaded or not nickname:
+        return AccountWriteResult("skipped", f"当前账号未加载 SQLite 记录: {nickname}")
+
+    table_name = state.account_db_table_name or CANONICAL_ACCOUNT_STATS_TABLE
+    write_time = datetime.now()
+    result = update_canonical_account_status_fields(
+        state.account_db_path,
+        nickname,
+        ROUND_STATUS_RUNNING,
+        table_name=table_name,
+        updated_at=write_time,
+        expected_current_status=ROUND_STATUS_MANUAL_PAUSE,
+    )
+    if result.status == "success":
+        state.updated_at = write_time
+        state.round_status = ROUND_STATUS_RUNNING
+        logger.info("[账号数据] F12 恢复状态写库完成：昵称=%s 状态=%s", nickname, ROUND_STATUS_RUNNING)
+    elif result.status == "skipped":
+        logger.info("[账号数据] F12 恢复跳过写库：昵称=%s 原因=%s", nickname, result.reason)
+    else:
+        logger.warning("[账号数据] F12 恢复状态写库失败：昵称=%s 原因=%s", nickname, result.reason)
+    return result
 
 
 def persist_lightweight_round_snapshot():

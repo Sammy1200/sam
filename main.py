@@ -46,10 +46,15 @@ from config import (
 )
 from account_db import (
     CANONICAL_ACCOUNT_STATS_TABLE,
+    CANONICAL_RESET_MODE_CONSERVATIVE,
+    ROUND_STATUS_MANUAL_PAUSE,
+    ensure_canonical_account_stats_table,
     ensure_canonical_execution_slot_seed_records,
     ensure_local_canonical_account_stats_store,
     find_canonical_account_stats_store,
+    inspect_canonical_account_stats_cleanup_scope,
     normalize_canonical_round_status_values,
+    reset_canonical_account_stats_legacy_fields,
     read_preferred_canonical_account_stats_record_by_execution_slot,
     read_canonical_account_stats_record,
     read_canonical_account_stats_record_by_execution_slot,
@@ -392,7 +397,7 @@ def _set_account_state_defaults():
     state.listing_periodic_skip_logged = False
     state.round_purchase_running_seconds = 0.0
     state.runtime_window_start_time = None
-    state.round_status = "手动结束"
+    state.round_status = ROUND_STATUS_MANUAL_PAUSE
     state.overlay_status = ""
     state.account_round_end_status = ""
     state.account_round_finalized = False
@@ -418,6 +423,82 @@ def _prepare_temporary_purchase_context(item_count):
     ui_print(f"临时抢购模式已启动，当前道具库存：{item_count}", save_log=True)
     print(f"[临时模式] 已启动，当前道具库存={item_count}")
     logger.info("[临时模式] 已启动，当前道具库存=%s", item_count)
+
+
+def _format_canonical_status_counts(status_counts):
+    if not status_counts:
+        return "无"
+    return "，".join(
+        f"{status_name}:{status_counts[status_name]}"
+        for status_name in sorted(status_counts)
+    )
+
+
+def _prepare_canonical_cleanup_once():
+    """启动时先盘点 canonical 库，再按稳妥版做一次选择性重置。"""
+    if getattr(state, "canonical_cleanup_completed", False):
+        return
+
+    database_path, table_name = find_canonical_account_stats_store()
+    if not database_path:
+        database_path, table_name, inserted_seed_records = ensure_local_canonical_account_stats_store()
+        print(f"[账号数据] 未找到现成 canonical 主库，已初始化本地主数据库：{database_path}")
+        logger.info("[账号数据] 未找到现成 canonical 主库，已初始化本地主数据库：%s", database_path)
+        if inserted_seed_records:
+            inserted_slots = ",".join(str(record.current_execution_slot) for record in inserted_seed_records)
+            print(f"[账号数据] 初始化时已补齐执行位建档：执行位={inserted_slots}")
+            logger.info("[账号数据] 初始化时已补齐执行位建档：执行位=%s", inserted_slots)
+
+    ensure_canonical_account_stats_table(database_path, table_name)
+    before_summary = inspect_canonical_account_stats_cleanup_scope(database_path, table_name)
+    print(
+        "[账号数据] canonical 旧规则盘点："
+        f"总记录={before_summary['total_records']}，"
+        f"旧状态残留={before_summary['legacy_status_count']}，"
+        f"非法状态={before_summary['invalid_status_count']}，"
+        f"旧轮次残留={before_summary['round_field_residue_count']}，"
+        f"旧运行态残留={before_summary['runtime_field_residue_count']}，"
+        f"冷却字段存在={before_summary['cooldown_present_count']}。"
+    )
+    logger.info(
+        "[账号数据] canonical 旧规则盘点：总记录=%s 旧状态残留=%s 非法状态=%s 旧轮次残留=%s 旧运行态残留=%s 冷却字段存在=%s",
+        before_summary["total_records"],
+        before_summary["legacy_status_count"],
+        before_summary["invalid_status_count"],
+        before_summary["round_field_residue_count"],
+        before_summary["runtime_field_residue_count"],
+        before_summary["cooldown_present_count"],
+    )
+    print(
+        "[账号数据] 稳妥版保留字段："
+        f"{'、'.join(before_summary['preserved_foundation_fields'])}；"
+        "边界字段保留：last_limit_time、last_account_end_time；"
+        f"重置字段：{'、'.join(before_summary['resettable_runtime_fields'])}。"
+    )
+    print("[账号数据] 激进版额外重置：last_limit_time、last_account_end_time。默认按稳妥版执行。")
+
+    cleanup_result = reset_canonical_account_stats_legacy_fields(
+        database_path,
+        table_name,
+        mode=CANONICAL_RESET_MODE_CONSERVATIVE,
+    )
+    if cleanup_result.get("status") == "error":
+        raise RuntimeError(f"canonical 稳妥版选择性重置失败：{cleanup_result.get('reason')}")
+    normalized_count = normalize_canonical_round_status_values(database_path, table_name)
+    after_summary = inspect_canonical_account_stats_cleanup_scope(database_path, table_name)
+    print(
+        "[账号数据] 稳妥版选择性重置完成："
+        f"更新行数={cleanup_result.get('updated_rows', 0)}，"
+        f"补充状态迁移={normalized_count}，"
+        f"当前状态分布={_format_canonical_status_counts(after_summary['status_counts'])}。"
+    )
+    logger.info(
+        "[账号数据] 稳妥版选择性重置完成：更新行数=%s 补充状态迁移=%s 当前状态分布=%s",
+        cleanup_result.get("updated_rows", 0),
+        normalized_count,
+        _format_canonical_status_counts(after_summary["status_counts"]),
+    )
+    state.canonical_cleanup_completed = True
 
 
 def _clear_runtime_state_after_account_finalize(reason):
@@ -469,6 +550,7 @@ def _load_current_account_context():
                 inserted_nicknames,
             )
 
+    ensure_canonical_account_stats_table(database_path, table_name)
     inserted_seed_records = ensure_canonical_execution_slot_seed_records(database_path, table_name)
     if inserted_seed_records:
         inserted_slots = ",".join(str(record.current_execution_slot) for record in inserted_seed_records)
@@ -881,6 +963,9 @@ def main():
     mode = _prompt_main_mode()
     start_overlay()
     try:
+        if mode == "launcher":
+            _prepare_canonical_cleanup_once()
+
         if os.name == 'nt':
             try:
                 handle = ctypes.windll.kernel32.GetCurrentProcess()
@@ -1032,7 +1117,7 @@ if __name__ == "__main__":
     except SystemExit:
         pass
     except KeyboardInterrupt:
-        _finalize_current_account_round("手动结束")
+        _finalize_current_account_round("人工暂停")
         sys.exit()
     except Exception as e:
         _finalize_current_account_round("未知异常")
