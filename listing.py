@@ -12,6 +12,7 @@ from config import (
     CLICK_JIAOSHI,
     CONFIRM_BTN_POS,
     LIST_INTERVAL,
+    LISTING_SCAN_MISS_THRESHOLD,
     MAX_LISTING_RETRY,
     MONITOR_TEXT_JIAOSHI,
     MONITOR_TEXT_SHANGJIA,
@@ -93,6 +94,24 @@ def input_price_with_verify():
     press_key(0x1B)
     safe_sleep(0.5)
     return False
+
+
+def _reset_listing_scan_miss_count():
+    if state.listing_scan_miss_count > 0:
+        ui_print(
+            f"[扫描] 已重新找到上架道具，连续未找到计数清零（此前 {state.listing_scan_miss_count} 次）。"
+        )
+    state.listing_scan_miss_count = 0
+
+
+def _disable_periodic_listing(reason):
+    if state.listing_periodic_disabled and state.listing_periodic_disabled_reason == reason:
+        return
+
+    state.listing_periodic_disabled = True
+    state.listing_periodic_disabled_reason = reason
+    state.listing_periodic_skip_logged = False
+    ui_print(reason, save_log=True)
 
 
 def execute_listing_routine(camera_obj, is_periodic=False):
@@ -180,6 +199,7 @@ def execute_listing_routine(camera_obj, is_periodic=False):
             found, abs_x, abs_y = match_item_in_scan(frame)
 
             if found:
+                _reset_listing_scan_miss_count()
                 safe_sleep(0.08)
                 fast_click((abs_x, abs_y))
                 safe_sleep(0.5)
@@ -260,6 +280,7 @@ def execute_listing_routine(camera_obj, is_periodic=False):
                         if before_frame is not None and after_frame is not None:
                             similarity = compare_region_similarity(before_frame, after_frame, SCAN_REGION)
                             if similarity >= SIMILARITY_THRESHOLD:
+                                _disable_periodic_listing("[上架限制] 已判断翻页到底，本轮后续停止 10 分钟自动上架。")
                                 ui_print("[翻页] 相似度过高，确认已经到底，结束上架。")
                                 break
                         fail_strike = 0
@@ -274,8 +295,17 @@ def execute_listing_routine(camera_obj, is_periodic=False):
                 if after_frame is not None:
                     similarity = compare_region_similarity(before_frame, after_frame, SCAN_REGION)
                     if similarity < SIMILARITY_THRESHOLD:
-                        ui_print("[翻页] 翻页成功，继续扫描。")
+                        state.listing_scan_miss_count += 1
+                        ui_print(
+                            f"[翻页] 翻页成功，继续扫描（连续未找到 {state.listing_scan_miss_count}/{LISTING_SCAN_MISS_THRESHOLD}）。"
+                        )
+                        if state.listing_scan_miss_count >= LISTING_SCAN_MISS_THRESHOLD:
+                            _disable_periodic_listing(
+                                f"[上架限制] 连续翻页 {LISTING_SCAN_MISS_THRESHOLD} 次未找到上架道具，本轮后续停止 10 分钟自动上架。"
+                            )
+                            break
                         continue
+                    _disable_periodic_listing("[上架限制] 已判断翻页到底，本轮后续停止 10 分钟自动上架。")
                     ui_print("[翻页] 相似度过高，确认已经到底，结束上架。")
                     break
 
@@ -302,6 +332,12 @@ def execute_listing_routine(camera_obj, is_periodic=False):
 
 def check_trigger_listing(camera):
     elapsed = get_current_elapsed()
+    if state.listing_periodic_disabled:
+        if not state.listing_periodic_skip_logged:
+            reason = state.listing_periodic_disabled_reason or "当前轮次已停用 10 分钟自动上架。"
+            ui_print(f"[上架限制] 已跳过本轮后续 10 分钟自动上架：{reason}", save_log=True)
+            state.listing_periodic_skip_logged = True
+        return True
     if elapsed - state.last_list_time >= LIST_INTERVAL:
         execute_listing_routine(camera, is_periodic=True)
         if state.account_round_writeback_failed:

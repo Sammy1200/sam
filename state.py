@@ -47,6 +47,7 @@ overlay_root = None
 log_text_var = None
 score_var = None
 log_lines = []
+overlay_last_log_replaceable = False
 
 current_server_index = 0
 current_account_index = 0
@@ -65,6 +66,10 @@ round_purchase_success_count = 0
 round_listing_success_count = 0
 round_purchase_fail_count = 0
 round_current_balance = ""
+listing_scan_miss_count = 0
+listing_periodic_disabled = False
+listing_periodic_disabled_reason = ""
+listing_periodic_skip_logged = False
 
 # --- 线程 2：状态字段 ---
 round_status = "手动结束"

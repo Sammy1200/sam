@@ -138,6 +138,8 @@ def create_overlay():
     root.config(bg=OVERLAY_NORMAL_BG)
     root._overlay_is_mini = False
     root._overlay_normal_position = OVERLAY_NORMAL_GEOMETRY
+    state.log_lines = []
+    state.overlay_last_log_replaceable = False
 
     state.score_var = tk.StringVar()
     root._overlay_score_label = tk.Label(
@@ -205,10 +207,11 @@ def ui_print(msg, is_replace=False, save_log=False, show_console=True):
         return
 
     gui_msg = f"[{now}] {msg}"
-    if is_replace and state.log_lines:
+    if is_replace and state.log_lines and state.overlay_last_log_replaceable:
         state.log_lines[-1] = gui_msg
     else:
         state.log_lines.append(gui_msg)
+    state.overlay_last_log_replaceable = bool(is_replace)
     if len(state.log_lines) > 20:
         state.log_lines.pop(0)
 

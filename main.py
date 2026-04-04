@@ -386,6 +386,10 @@ def _set_account_state_defaults():
     state.round_listing_success_count = 0
     state.round_purchase_fail_count = 0
     state.round_current_balance = ""
+    state.listing_scan_miss_count = 0
+    state.listing_periodic_disabled = False
+    state.listing_periodic_disabled_reason = ""
+    state.listing_periodic_skip_logged = False
     state.round_purchase_running_seconds = 0.0
     state.runtime_window_start_time = None
     state.round_status = "手动结束"
