@@ -46,7 +46,7 @@ from config import (
 )
 from account_db import (
     CANONICAL_ACCOUNT_STATS_TABLE,
-    CANONICAL_RESET_MODE_CONSERVATIVE,
+    CANONICAL_RESET_MODE_AGGRESSIVE,
     ROUND_STATUS_MANUAL_PAUSE,
     ensure_canonical_account_stats_table,
     ensure_canonical_execution_slot_seed_records,
@@ -435,7 +435,7 @@ def _format_canonical_status_counts(status_counts):
 
 
 def _prepare_canonical_cleanup_once():
-    """启动时先盘点 canonical 库，再按稳妥版做一次选择性重置。"""
+    """启动时先盘点 canonical 库，再按强重置版做一次统一清理。"""
     if getattr(state, "canonical_cleanup_completed", False):
         return
 
@@ -470,30 +470,29 @@ def _prepare_canonical_cleanup_once():
         before_summary["cooldown_present_count"],
     )
     print(
-        "[账号数据] 稳妥版保留字段："
+        "[账号数据] 强重置版保留原值字段："
         f"{'、'.join(before_summary['preserved_foundation_fields'])}；"
-        "边界字段保留：last_limit_time、last_account_end_time；"
+        "更新时间字段：updated_at 会改为本次清理时间；"
         f"重置字段：{'、'.join(before_summary['resettable_runtime_fields'])}。"
     )
-    print("[账号数据] 激进版额外重置：last_limit_time、last_account_end_time。默认按稳妥版执行。")
 
     cleanup_result = reset_canonical_account_stats_legacy_fields(
         database_path,
         table_name,
-        mode=CANONICAL_RESET_MODE_CONSERVATIVE,
+        mode=CANONICAL_RESET_MODE_AGGRESSIVE,
     )
     if cleanup_result.get("status") == "error":
-        raise RuntimeError(f"canonical 稳妥版选择性重置失败：{cleanup_result.get('reason')}")
+        raise RuntimeError(f"canonical 强重置版清理失败：{cleanup_result.get('reason')}")
     normalized_count = normalize_canonical_round_status_values(database_path, table_name)
     after_summary = inspect_canonical_account_stats_cleanup_scope(database_path, table_name)
     print(
-        "[账号数据] 稳妥版选择性重置完成："
+        "[账号数据] 强重置版清理完成："
         f"更新行数={cleanup_result.get('updated_rows', 0)}，"
         f"补充状态迁移={normalized_count}，"
         f"当前状态分布={_format_canonical_status_counts(after_summary['status_counts'])}。"
     )
     logger.info(
-        "[账号数据] 稳妥版选择性重置完成：更新行数=%s 补充状态迁移=%s 当前状态分布=%s",
+        "[账号数据] 强重置版清理完成：更新行数=%s 补充状态迁移=%s 当前状态分布=%s",
         cleanup_result.get("updated_rows", 0),
         normalized_count,
         _format_canonical_status_counts(after_summary["status_counts"]),

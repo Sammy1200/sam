@@ -437,7 +437,6 @@ def persist_pause_snapshot():
         initialize_if_missing=False,
         allow_legacy_fallback=False,
     )
-    runtime_seconds = max(0, int(get_current_elapsed()))
     effective_balance = _get_effective_balance()
     write_time = datetime.now()
     result = update_canonical_account_status_fields(
@@ -448,20 +447,17 @@ def persist_pause_snapshot():
         updated_at=write_time,
         item_quantity=runtime_item_quantity,
         current_balance=effective_balance or None,
-        purchase_running_seconds=runtime_seconds,
-        runtime_window_start_time=state.runtime_window_start_time,
     )
     if result.status == "success":
         state.updated_at = write_time
-        state.round_purchase_running_seconds = float(runtime_seconds)
+        state.round_purchase_running_seconds = float(max(0, int(get_current_elapsed())))
         state.round_status = ROUND_STATUS_MANUAL_PAUSE
         logger.info(
-            "[账号数据] F12 暂停最小写库完成：昵称=%s 状态=%s 道具库存=%s 余额=%s 累计抢购秒数=%s",
+            "[账号数据] F12 暂停最小写库完成：昵称=%s 状态=%s 道具库存=%s 余额=%s",
             nickname,
             ROUND_STATUS_MANUAL_PAUSE,
             runtime_item_quantity,
             effective_balance or "保持原值",
-            runtime_seconds,
         )
     elif result.status != "skipped":
         logger.warning("[账号数据] F12 暂停最小写库失败：昵称=%s 原因=%s", nickname, result.reason)

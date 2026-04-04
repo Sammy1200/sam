@@ -232,8 +232,6 @@ CANONICAL_PRESERVED_FOUNDATION_FIELDS = (
     "current_balance",
 )
 CANONICAL_BOUNDARY_FIELDS = (
-    "last_limit_time",
-    "last_account_end_time",
     "updated_at",
 )
 CANONICAL_RESETTABLE_RUNTIME_FIELDS = (
@@ -243,6 +241,8 @@ CANONICAL_RESETTABLE_RUNTIME_FIELDS = (
     "purchase_running_seconds",
     "runtime_window_start_time",
     "round_status",
+    "last_limit_time",
+    "last_account_end_time",
 )
 CANONICAL_RESET_MODE_CONSERVATIVE = "conservative"
 CANONICAL_RESET_MODE_AGGRESSIVE = "aggressive"
@@ -1043,9 +1043,9 @@ def inspect_canonical_account_stats_cleanup_scope(
 def reset_canonical_account_stats_legacy_fields(
     database_path,
     table_name=CANONICAL_ACCOUNT_STATS_TABLE,
-    mode=CANONICAL_RESET_MODE_CONSERVATIVE,
+    mode=CANONICAL_RESET_MODE_AGGRESSIVE,
 ):
-    """按模式选择性重置旧轮次/旧运行态字段。"""
+    """按模式重置旧轮次、旧运行态和旧时间污染字段。"""
     if mode not in CANONICAL_RESET_MODE_VALUES:
         raise ValueError(f"unsupported cleanup mode: {mode}")
     if not database_path or not os.path.isfile(database_path):
