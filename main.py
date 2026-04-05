@@ -35,7 +35,6 @@ def ensure_admin_context():
     if _is_started_from_scheduled_task():
         print("计划任务启动失败：当前不是管理员权限。")
         print("请重新执行 scripts/register_scheduled_task.ps1，确认任务已设置为“使用最高权限运行”。")
-        os.system('pause')
         sys.exit(1)
 
     if os.environ.get(SKIP_ELEVATE_FLAG) == "1":
