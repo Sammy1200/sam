@@ -6,6 +6,7 @@ import time
 import cv2
 
 import state
+from local_switch_account_config import load_listing_target_price
 from config import (
     CLICK_1,
     CLICK_2,
@@ -22,7 +23,6 @@ from config import (
     PRICE_INPUT_POS,
     SCAN_REGION,
     SIMILARITY_THRESHOLD,
-    TARGET_PRICE,
 )
 from overlay import move_overlay, ui_print, update_score_text
 from round_persistence import (
@@ -49,6 +49,8 @@ from vision import (
     read_capacity,
     wait_for_ocr_text,
 )
+
+LISTING_TARGET_PRICE = load_listing_target_price()[0]
 
 
 def check_and_click_tishi(camera_obj):
@@ -78,7 +80,7 @@ def input_price_with_verify():
         fast_click(PRICE_INPUT_POS)
         safe_sleep(0.15)
         hotkey(0x11, 0x41)
-        type_digits(TARGET_PRICE)
+        type_digits(LISTING_TARGET_PRICE)
         safe_sleep(0.2)
         hotkey(0x11, 0x41)
         safe_sleep(0.1)
@@ -86,7 +88,7 @@ def input_price_with_verify():
         safe_sleep(0.15)
         clipboard_raw = get_clipboard_text()
         actual = "".join(ch for ch in clipboard_raw if ch.isdigit())
-        if actual == TARGET_PRICE:
+        if actual == LISTING_TARGET_PRICE:
             press_key(0x23)
             return True
         ui_print(f"价格校验失败（{attempt}/3），重试中。")

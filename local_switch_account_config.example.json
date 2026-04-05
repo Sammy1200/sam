@@ -1,4 +1,8 @@
 {
+  "_comment_after_slot_4_account_id": "4号位换号后要登录的账号ID，只填写纯数字。",
   "after_slot_4_account_id": "2536158225",
-  "after_slot_8_account_id": "88078011"
+  "_comment_after_slot_8_account_id": "8号位换号后要登录的账号ID，只填写纯数字。",
+  "after_slot_8_account_id": "88078011",
+  "_comment_listing_price": "自动上架售价。上架输入价格和价格校验共用这个字段，只填写纯数字字符串，例如 3149111。",
+  "listing_price": "3149111"
 }
