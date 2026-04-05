@@ -37,6 +37,7 @@ try {
         -Principal $principal `
         -Settings $settings `
         -Description $description `
+        -ErrorAction Stop `
         -Force | Out-Null
 } catch {
     throw "Scheduled task registration requires an elevated token. Run scripts/register_scheduled_task.ps1 once as administrator."
