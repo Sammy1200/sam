@@ -1,0 +1,31 @@
+$ErrorActionPreference = "Stop"
+
+$taskName = "codex-PYjiaoben-Launcher"
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$configDir = Join-Path $env:LOCALAPPDATA "codex-PYjiaoben"
+$targetFile = Join-Path $configDir "task_target_path.txt"
+
+if (-not (Test-Path -LiteralPath $configDir)) {
+    New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+}
+
+Set-Content -LiteralPath $targetFile -Value $projectRoot -Encoding UTF8
+Write-Host "已写入计划任务目标目录：$projectRoot"
+
+$taskExists = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if (-not $taskExists) {
+    throw "未找到计划任务：$taskName。请先运行 scripts/register_scheduled_task.ps1 注册任务。"
+}
+
+$runOutput = & schtasks.exe /Run /TN $taskName 2>&1
+$runText = ($runOutput | Out-String).Trim()
+
+if ($LASTEXITCODE -ne 0) {
+    throw "计划任务触发失败：$runText"
+}
+
+if ($runText) {
+    Write-Host $runText
+}
+
+Write-Host "已触发计划任务：$taskName"
