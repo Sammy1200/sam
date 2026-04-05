@@ -30,13 +30,17 @@ $settings = New-ScheduledTaskSettingsSet `
 
 $description = "codex-PYjiaoben fixed elevated launcher. Scheduled task reads local target path and starts main.py."
 
-Register-ScheduledTask `
-    -TaskName $taskName `
-    -Action $action `
-    -Principal $principal `
-    -Settings $settings `
-    -Description $description `
-    -Force | Out-Null
+try {
+    Register-ScheduledTask `
+        -TaskName $taskName `
+        -Action $action `
+        -Principal $principal `
+        -Settings $settings `
+        -Description $description `
+        -Force | Out-Null
+} catch {
+    throw "Scheduled task registration requires an elevated token. Run scripts/register_scheduled_task.ps1 once as administrator."
+}
 
 Write-Host "Scheduled task registered or updated: $taskName"
 Write-Host "Launcher script: $launcherScript"
