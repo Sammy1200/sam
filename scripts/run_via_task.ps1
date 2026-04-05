@@ -10,22 +10,22 @@ if (-not (Test-Path -LiteralPath $configDir)) {
 }
 
 Set-Content -LiteralPath $targetFile -Value $projectRoot -Encoding UTF8
-Write-Host "已写入计划任务目标目录：$projectRoot"
+Write-Host "Scheduled task target root saved: $projectRoot"
 
 $taskExists = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if (-not $taskExists) {
-    throw "未找到计划任务：$taskName。请先运行 scripts/register_scheduled_task.ps1 注册任务。"
+    throw "Scheduled task not found: $taskName. Run scripts/register_scheduled_task.ps1 first."
 }
 
 $runOutput = & schtasks.exe /Run /TN $taskName 2>&1
 $runText = ($runOutput | Out-String).Trim()
 
 if ($LASTEXITCODE -ne 0) {
-    throw "计划任务触发失败：$runText"
+    throw "Scheduled task run failed: $runText"
 }
 
 if ($runText) {
     Write-Host $runText
 }
 
-Write-Host "已触发计划任务：$taskName"
+Write-Host "Scheduled task triggered: $taskName"

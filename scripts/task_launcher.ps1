@@ -16,20 +16,20 @@ if (Test-Path -LiteralPath $targetFile) {
 $pythonExe = Join-Path $targetRoot ".venv\Scripts\python.exe"
 $mainScript = Join-Path $targetRoot "main.py"
 
-Write-Host "[$taskName] 当前目标目录：$targetRoot"
+Write-Host "[$taskName] Target root: $targetRoot"
 
 if (-not (Test-Path -LiteralPath $pythonExe)) {
-    throw "未找到 Python 解释器：$pythonExe"
+    throw "Python executable not found: $pythonExe"
 }
 
 if (-not (Test-Path -LiteralPath $mainScript)) {
-    throw "未找到主脚本：$mainScript"
+    throw "main.py not found: $mainScript"
 }
 
 Set-Location -LiteralPath $targetRoot
 $env:FROM_SCHEDULED_TASK = "1"
 
-Write-Host "[$taskName] 正在启动 main.py"
+Write-Host "[$taskName] Starting main.py"
 & $pythonExe $mainScript
 $exitCode = $LASTEXITCODE
 

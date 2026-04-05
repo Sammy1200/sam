@@ -6,7 +6,7 @@ $launcherScript = Join-Path $PSScriptRoot "task_launcher.ps1"
 $powershellExe = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
 
 if (-not (Test-Path -LiteralPath $launcherScript)) {
-    throw "未找到任务启动脚本：$launcherScript"
+    throw "Task launcher script not found: $launcherScript"
 }
 
 $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -28,7 +28,7 @@ $settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit (New-TimeSpan -Hours 0) `
     -StartWhenAvailable
 
-$description = "codex-PYjiaoben 固定高权限启动器。统一由计划任务读取本地目标目录并启动 main.py。"
+$description = "codex-PYjiaoben fixed elevated launcher. Scheduled task reads local target path and starts main.py."
 
 Register-ScheduledTask `
     -TaskName $taskName `
@@ -38,6 +38,6 @@ Register-ScheduledTask `
     -Description $description `
     -Force | Out-Null
 
-Write-Host "计划任务已注册/更新：$taskName"
-Write-Host "启动脚本：$launcherScript"
-Write-Host "默认正式根目录：$projectRoot"
+Write-Host "Scheduled task registered or updated: $taskName"
+Write-Host "Launcher script: $launcherScript"
+Write-Host "Default project root: $projectRoot"
