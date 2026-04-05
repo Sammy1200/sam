@@ -160,6 +160,17 @@ def _normalize_decimal_text(value):
     return text or "0"
 
 
+def _truncate_decimal_text(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        truncated_value = int(Decimal(text))
+    except (InvalidOperation, ValueError):
+        return ""
+    return str(truncated_value)
+
+
 def _extract_balance_number(raw_value):
     text = str(raw_value or "").strip()
     if not text:
@@ -187,7 +198,7 @@ def _format_balance_for_wan_input(raw_balance):
         wan_value = amount
     else:
         wan_value = amount / Decimal("10000")
-    return _normalize_decimal_text(wan_value)
+    return _truncate_decimal_text(wan_value)
 
 
 def _normalize_balance_wan_input(balance_wan_text):
@@ -202,7 +213,8 @@ def _normalize_balance_wan_input(balance_wan_text):
         raise ValueError("余额必须是数字，单位为万") from exc
     if value < 0:
         raise ValueError("余额不能为负数")
-    return _normalize_decimal_text(value), f"{_normalize_decimal_text(value)}{BALANCE_STORAGE_SUFFIX}"
+    truncated_value_text = _truncate_decimal_text(value)
+    return truncated_value_text, f"{truncated_value_text}{BALANCE_STORAGE_SUFFIX}"
 
 
 def _parse_integer_input(raw_text, field_label):
