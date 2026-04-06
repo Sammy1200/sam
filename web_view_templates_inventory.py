@@ -29,6 +29,65 @@ def _format_runtime_remaining_text(value):
     return escape(text) if text else "-"
 
 
+def _format_remote_remaining_text(seconds_value):
+    seconds = max(0, int(seconds_value or 0))
+    return _format_cooldown_remaining_time(seconds)
+
+
+def _render_remote_countdown_cell(row, field_name):
+    remaining_seconds = max(0, int(row.get(field_name) or 0))
+    report_time = str(row.get("report_time") or "").strip()
+    initial_text = _format_remote_remaining_text(remaining_seconds)
+    if not report_time:
+        return initial_text
+
+    return (
+        f'<span class="remote-countdown" '
+        f'data-remaining-seconds="{escape(str(remaining_seconds), quote=True)}" '
+        f'data-report-time="{escape(report_time, quote=True)}">{initial_text}</span>'
+    )
+
+
+def _render_remote_countdown_script():
+    return """
+<script>
+(function () {
+  function parseReportTime(text) {
+    if (!text) return NaN;
+    return Date.parse(String(text).trim().replace(" ", "T"));
+  }
+
+  function formatDuration(totalSeconds) {
+    totalSeconds = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+    var hours = Math.floor(totalSeconds / 3600);
+    var minutes = Math.floor((totalSeconds % 3600) / 60);
+    var seconds = totalSeconds % 60;
+    if (hours > 0) return hours + "小时" + minutes + "分" + seconds + "秒";
+    if (minutes > 0) return minutes + "分" + seconds + "秒";
+    return seconds + "秒";
+  }
+
+  function updateCountdownNodes() {
+    var now = Date.now();
+    document.querySelectorAll(".remote-countdown").forEach(function (node) {
+      var baseSeconds = Number(node.dataset.remainingSeconds || 0);
+      var reportTimeMs = parseReportTime(node.dataset.reportTime || "");
+      if (!Number.isFinite(reportTimeMs)) {
+        node.textContent = formatDuration(baseSeconds);
+        return;
+      }
+      var remainingSeconds = Math.max(0, Math.floor((reportTimeMs + baseSeconds * 1000 - now) / 1000));
+      node.textContent = formatDuration(remainingSeconds);
+    });
+  }
+
+  updateCountdownNodes();
+  window.setInterval(updateCountdownNodes, 1000);
+})();
+</script>
+"""
+
+
 def _render_read_only_notice():
     return """
 <div class="readonly-notice">
@@ -351,16 +410,16 @@ def _render_remote_refresh_toolbar(section, refresh_result=None):
         hint_text = "当前还没有可回连地址，需先收到一次远端镜像后才能手动刷新。"
 
     last_refresh_time = str(section.get("last_report_time") or "").strip() or "暂无"
+    machine_label = str(section.get("machine_display_name") or section.get("machine_id") or "远端").strip()
+    machine_label = machine_label.replace("电脑", "").strip() or "远端"
     return f"""
 <div class="meta">
-  最后刷新时间：{escape(last_refresh_time)}<br>
-  刷新说明：{escape(hint_text)}
-</div>
-<div class="form-actions">
-  <form method="post" action="/remote-sync/refresh">
+  <form method="post" action="/remote-sync/refresh" style="display:inline-block; margin-right:12px;">
     <input type="hidden" name="target_machine_id" value="{escape(str(section.get('machine_id') or ''), quote=True)}">
     <button{button_attrs}>刷新</button>
   </form>
+  {escape(machine_label)}最后快照时间：{escape(last_refresh_time)}<br>
+  刷新说明：{escape(hint_text)}
 </div>
 {_render_remote_refresh_result(section, refresh_result)}
 """
@@ -437,24 +496,6 @@ def _render_machine_section_title(title, badge_text):
     )
 
 
-def _build_remote_account_list_rows(rows):
-    row_items = []
-    for row in rows:
-        row_items.append(
-            (
-                _format_value(row.get("current_execution_slot")),
-                _format_value(row.get("nickname")),
-                _format_value(row.get("region")),
-                _format_value(row.get("baseline_item_count")),
-                _format_balance_wan_display(row.get("current_balance_wan")),
-                _format_value(row.get("round_status")),
-                _format_value(row.get("updated_at")),
-                _format_value(row.get("report_time")),
-            )
-        )
-    return row_items
-
-
 def _build_remote_account_list_rows_with_edit(section, edit_result=None):
     row_items = []
     for row_index, row in enumerate(section.get("rows") or [], start=1):
@@ -468,12 +509,12 @@ def _build_remote_account_list_rows_with_edit(section, edit_result=None):
             (
                 _format_value(row.get("current_execution_slot")),
                 _format_value(row.get("nickname")),
-                _format_value(row.get("region")),
                 inventory_cell,
                 balance_cell,
+                _render_remote_countdown_cell(row, "runtime_window_remaining_seconds"),
+                _render_remote_countdown_cell(row, "cooldown_remaining_seconds"),
                 status_cell,
                 _format_value(row.get("updated_at")),
-                _format_value(row.get("report_time")),
                 action_cell,
             )
         )
@@ -499,7 +540,7 @@ def _render_remote_machine_section(section, edit_result=None, refresh_result=Non
   {_render_machine_section_title(section.get("machine_display_name") or section.get("machine_id") or "远端机器", "远端镜像 / 最小写回")}
   {_render_remote_refresh_toolbar(section, refresh_result)}
   {empty_html}
-  {_render_table(("执行位", "昵称", "区服", "道具库存", "余额（万）", "账号状态", "最后更新时间", "最后同步/上报时间", "远端提交"), row_items)}
+  {_render_table(("执行位", "昵称", "道具库存", "余额（万）", "可运行时间", "冷却剩余时间", "账号状态", "最后更新时间", "远端提交"), row_items)}
 </div>
 """
 
@@ -589,6 +630,7 @@ def render_index_page(
 </div>
 
 {remote_sections_html}
+{_render_remote_countdown_script() if remote_machine_sections else ""}
 
 <div class="section">
   <h2>本机数据健康摘要</h2>

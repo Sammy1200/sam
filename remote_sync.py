@@ -128,6 +128,7 @@ def _ensure_remote_sync_table(conn):
             last_account_end_time TEXT,
             last_limit_time TEXT,
             allow_purchase INTEGER NOT NULL DEFAULT 0,
+            runtime_window_remaining_seconds INTEGER NOT NULL DEFAULT 0,
             cooldown_remaining_seconds INTEGER NOT NULL DEFAULT 0,
             report_time TEXT,
             source_client_ip TEXT NOT NULL DEFAULT '',
@@ -136,6 +137,16 @@ def _ensure_remote_sync_table(conn):
         )
         """
     )
+    existing_columns = {
+        str(row[1]).strip()
+        for row in conn.execute(f"PRAGMA table_info({REMOTE_SYNC_TABLE})").fetchall()
+        if len(row) > 1 and row[1]
+    }
+    if "runtime_window_remaining_seconds" not in existing_columns:
+        conn.execute(
+            f"ALTER TABLE {REMOTE_SYNC_TABLE} "
+            "ADD COLUMN runtime_window_remaining_seconds INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def _normalize_snapshot_entry(item, report_time):
@@ -162,6 +173,10 @@ def _normalize_snapshot_entry(item, report_time):
         "last_account_end_time": _serialize_datetime(item.get("last_account_end_time")),
         "last_limit_time": _serialize_datetime(item.get("last_limit_time")),
         "allow_purchase": 1 if bool(item.get("allow_purchase")) else 0,
+        "runtime_window_remaining_seconds": max(
+            0,
+            _parse_int(item.get("runtime_window_remaining_seconds"), default=0),
+        ),
         "cooldown_remaining_seconds": max(
             0,
             _parse_int(item.get("cooldown_remaining_seconds"), default=0),
@@ -217,11 +232,12 @@ def save_remote_sync_report(payload, client_ip=""):
                     last_account_end_time,
                     last_limit_time,
                     allow_purchase,
+                    runtime_window_remaining_seconds,
                     cooldown_remaining_seconds,
                     report_time,
                     source_client_ip,
                     received_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     machine_id,
@@ -237,6 +253,7 @@ def save_remote_sync_report(payload, client_ip=""):
                     account["last_account_end_time"],
                     account["last_limit_time"],
                     account["allow_purchase"],
+                    account["runtime_window_remaining_seconds"],
                     account["cooldown_remaining_seconds"],
                     account["report_time"],
                     str(client_ip or "").strip(),
@@ -674,6 +691,10 @@ def build_local_snapshot_payload():
                 "last_account_end_time": _serialize_datetime(row.get("last_account_end_time")),
                 "last_limit_time": _serialize_datetime(row.get("last_limit_time")),
                 "allow_purchase": bool(row.get("allow_purchase")),
+                "runtime_window_remaining_seconds": max(
+                    0,
+                    _parse_int(row.get("runtime_window_remaining_seconds"), default=0),
+                ),
                 "cooldown_remaining_seconds": max(
                     0,
                     _parse_int(row.get("cooldown_remaining_seconds"), default=0),
@@ -1052,6 +1073,7 @@ def get_remote_machine_sections(exclude_machine_id=None):
                 last_account_end_time,
                 last_limit_time,
                 allow_purchase,
+                runtime_window_remaining_seconds,
                 cooldown_remaining_seconds,
                 report_time,
                 source_client_ip
@@ -1112,6 +1134,10 @@ def get_remote_machine_sections(exclude_machine_id=None):
                 "last_account_end_time": _serialize_datetime(row["last_account_end_time"]),
                 "last_limit_time": _serialize_datetime(row["last_limit_time"]),
                 "allow_purchase": bool(row["allow_purchase"]),
+                "runtime_window_remaining_seconds": max(
+                    0,
+                    _parse_int(row["runtime_window_remaining_seconds"]),
+                ),
                 "cooldown_remaining_seconds": max(0, _parse_int(row["cooldown_remaining_seconds"])),
                 "report_time": report_time,
             }
