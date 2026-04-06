@@ -4,5 +4,11 @@
   "_comment_after_slot_8_account_id": "8号位换号后要登录的账号ID，只填写纯数字。",
   "after_slot_8_account_id": "88078011",
   "_comment_listing_price": "自动上架售价。上架输入价格和价格校验共用这个字段，只填写纯数字字符串，例如 3149111。",
-  "listing_price": "3149111"
+  "listing_price": "3149111",
+  "_comment_nickname_template_dir": "可选。本机昵称模板目录。留空或省略时继续使用默认目录 logo/huanhao/nichen；2号电脑可改成例如 local_nickname_templates/pc2。",
+  "nickname_template_dir": "logo/huanhao/nichen",
+  "_comment_nickname_verify_region": "可选。本机昵称识别固定区域，格式 [x1, y1, x2, y2]。留空或省略时继续使用 config.py 默认值。",
+  "nickname_verify_region": [1422, 604, 1451, 625],
+  "_comment_nickname_match_threshold": "可选。本机昵称模板匹配阈值。留空或省略时继续使用 config.py 默认值。",
+  "nickname_match_threshold": 0.8
 }

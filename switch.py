@@ -21,7 +21,10 @@ import pyautogui
 
 import config
 import state
-from local_switch_account_config import load_boundary_switch_accounts
+from local_switch_account_config import (
+    load_boundary_switch_accounts,
+    load_local_nickname_match_config,
+)
 from overlay import toggle_pause
 from utils import (
     async_push_msg,
@@ -54,6 +57,7 @@ _TPL_FILES = {
     "shoucan": "shoucan.png",
 }
 _BOUNDARY_SWITCH_ACCOUNTS_CACHE = None
+_LOCAL_NICKNAME_MATCH_CONFIG_CACHE = None
 _SWITCH_WAIT_STEP_LABELS = {
     "boundary start qidong check": "边界启动页确认",
     "switch-user entry": "进入切号入口",
@@ -346,6 +350,25 @@ def _get_boundary_switch_accounts():
     return _BOUNDARY_SWITCH_ACCOUNTS_CACHE
 
 
+def _get_local_nickname_match_config():
+    """读取并缓存本机昵称模板配置。"""
+    global _LOCAL_NICKNAME_MATCH_CONFIG_CACHE
+
+    if _LOCAL_NICKNAME_MATCH_CONFIG_CACHE is None:
+        nickname_match_config, source_path = load_local_nickname_match_config()
+        _LOCAL_NICKNAME_MATCH_CONFIG_CACHE = nickname_match_config
+        message = (
+            f"[线程6] 已加载本机昵称模板配置：文件={os.path.basename(source_path)}，"
+            f"模板目录={nickname_match_config['template_dir']}，"
+            f"识别区域={nickname_match_config['verify_region']}，"
+            f"阈值={nickname_match_config['match_threshold']}"
+        )
+        print(message)
+        logger.info(message)
+
+    return _LOCAL_NICKNAME_MATCH_CONFIG_CACHE
+
+
 def resolve_execution_slot_transition(current_execution_slot):
     """根据当前执行位解析下一目标执行位和切换类型。"""
     try:
@@ -545,8 +568,9 @@ def _load_nickname_template(slot_number):
     if slot_number < 1 or slot_number > len(config.EXECUTION_SLOT_NICKNAME_TEMPLATE_FILES):
         return None, ""
 
+    nickname_match_config = _get_local_nickname_match_config()
     template_name = config.EXECUTION_SLOT_NICKNAME_TEMPLATE_FILES[slot_number - 1]
-    template_path = os.path.join(config.NICKNAME_TEMPLATE_DIR, template_name)
+    template_path = os.path.join(nickname_match_config["template_dir"], template_name)
     template = cv2.imread(template_path)
     return template, template_path
 
@@ -554,6 +578,11 @@ def _load_nickname_template(slot_number):
 def _verify_slot_nickname(camera, slot_number):
     """选区后执行昵称模板校验。"""
     update_overlay_mini(f"正在校验执行位 {slot_number} 的昵称")
+    try:
+        nickname_match_config = _get_local_nickname_match_config()
+    except Exception as exc:
+        return pause_thread6_failure("读取本机昵称模板配置", f"读取失败：{exc}")
+
     template, template_path = _load_nickname_template(slot_number)
     if template is None:
         return pause_thread6_failure(
@@ -572,8 +601,8 @@ def _verify_slot_nickname(camera, slot_number):
         if _match_image(
             camera,
             template,
-            config.NICKNAME_VERIFY_REGION,
-            threshold=config.NICKNAME_MATCH_THRESHOLD,
+            nickname_match_config["verify_region"],
+            threshold=nickname_match_config["match_threshold"],
         ):
             print(f"[切换流程] 执行位 {slot_number} 的昵称模板校验通过：{template_path}")
             logger.info("[切换流程] 执行位 %s 的昵称模板校验通过：%s", slot_number, template_path)
@@ -586,7 +615,7 @@ def _verify_slot_nickname(camera, slot_number):
     )
 
 
-def _detect_slot_nickname_once(camera):
+def _detect_slot_nickname_once(camera, nickname_match_config):
     """在昵称校验区域内扫描当前命中的执行位模板。"""
     for slot_number in range(1, int(config.EXECUTION_SLOT_COUNT) + 1):
         template, _ = _load_nickname_template(slot_number)
@@ -595,8 +624,8 @@ def _detect_slot_nickname_once(camera):
         if _match_image(
             camera,
             template,
-            config.NICKNAME_VERIFY_REGION,
-            threshold=config.NICKNAME_MATCH_THRESHOLD,
+            nickname_match_config["verify_region"],
+            threshold=nickname_match_config["match_threshold"],
         ):
             return slot_number
     return None
@@ -610,11 +639,19 @@ def detect_current_execution_slot_from_launcher(camera):
         logger.error("[启动] 未能进入启动器选区页，无法识别当前昵称。")
         return None
 
+    try:
+        nickname_match_config = _get_local_nickname_match_config()
+    except Exception as exc:
+        message = f"[启动] 本机昵称模板配置读取失败：{exc}"
+        print(message)
+        logger.error(message)
+        return None
+
     print("[启动] 已进入选区页，开始识别当前昵称模板。")
     logger.info("[启动] 已进入选区页，开始识别当前昵称模板。")
     end = time.time() + config.SWITCH_NICKNAME_VERIFY_TIMEOUT_SECONDS
     while time.time() < end:
-        slot_number = _detect_slot_nickname_once(camera)
+        slot_number = _detect_slot_nickname_once(camera, nickname_match_config)
         if slot_number is not None:
             print(f"[启动] 已识别当前执行位：{slot_number}")
             logger.info("[启动] 已识别当前执行位：%s", slot_number)
