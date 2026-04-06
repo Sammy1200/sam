@@ -20,6 +20,24 @@
 
 ---
 
+# 本机网页同步 / 远端最小写回配置
+
+当前主线事实：
+- 双机网页汇总配置仍由 `local_web_sync_config.json` 承接
+- 线程 14 第一阶段新增可选开关 `receive_remote_writeback`
+
+含义：
+- `local_web_sync_config.json` 仍属于真实本机配置，不应被示例文件覆盖
+- `receive_remote_writeback` 只控制“当前机器是否接受远端最小写回”
+- 该能力只用于线程 14 第一阶段定义的 3 个字段，不代表开放任意远端写入口
+
+当前边界：
+- 1 号电脑通常负责展示与发起提交，可不开启 `receive_remote_writeback`
+- 2 号电脑如需接受来自 1 号电脑的最小写回，应在真实本机 `local_web_sync_config.json` 中显式开启 `receive_remote_writeback`
+- 当 `receive_remote_sync` 或 `receive_remote_writeback` 任一开启时，网页服务绑定地址应能被另一台机器访问
+
+---
+
 # 本机昵称模板目录外置
 
 当前主线事实：

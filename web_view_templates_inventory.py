@@ -117,6 +117,13 @@ def _build_list_form_values(row, edit_result):
     return form_values
 
 
+def _get_local_edit_result(edit_result):
+    if not edit_result:
+        return None
+    scope = str(edit_result.get("scope") or "local").strip()
+    return edit_result if scope == "local" else None
+
+
 def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
     nickname = str(row.get("nickname") or "").strip()
     if not nickname:
@@ -234,6 +241,7 @@ def _render_account_edit_form(record, edit_meta=None, edit_result=None):
 
 
 def _build_account_list_rows(rows, edit_meta=None, edit_result=None):
+    edit_result = _get_local_edit_result(edit_result)
     using_demo_rows = not bool(rows)
     effective_rows = rows if rows else _build_demo_account_rows()
 
@@ -274,6 +282,108 @@ def _build_account_list_rows(rows, edit_meta=None, edit_result=None):
     return row_items, using_demo_rows
 
 
+def _is_active_remote_edit_row(section, row, edit_result):
+    if not edit_result or str(edit_result.get("scope") or "").strip() != "remote":
+        return False
+    form_values = edit_result.get("form_values") or {}
+    active_machine_id = str(form_values.get("target_machine_id") or "").strip()
+    active_nickname = str(form_values.get("nickname") or "").strip()
+    section_machine_id = str(section.get("machine_id") or "").strip()
+    row_nickname = str(row.get("nickname") or "").strip()
+    return bool(
+        active_machine_id
+        and active_nickname
+        and active_machine_id == section_machine_id
+        and active_nickname == row_nickname
+    )
+
+
+def _build_remote_list_form_values(section, row, edit_result):
+    form_values = {
+        "target_machine_id": str(section.get("machine_id") or "").strip(),
+        "nickname": str(row.get("nickname") or "").strip(),
+        "baseline_item_count": str(row.get("baseline_item_count") or 0),
+        "round_status": str(row.get("round_status") or "").strip(),
+        "current_balance_wan": str(row.get("current_balance_wan") or "").strip(),
+    }
+    if _is_active_remote_edit_row(section, row, edit_result):
+        form_values.update(edit_result.get("form_values") or {})
+    return form_values
+
+
+def _render_remote_inline_row_result(section, row, edit_result):
+    if not _is_active_remote_edit_row(section, row, edit_result):
+        return ""
+    status = str(edit_result.get("status") or "").strip()
+    css_class = "flash-success" if status == "success" else "flash-error"
+    message = escape(str(edit_result.get("message") or ""))
+    return f'<div class="{css_class} inline-row-result"><strong>回执：</strong>{message}</div>'
+
+
+def _render_remote_inline_edit_cells(section, row, row_index, edit_result=None):
+    nickname = str(row.get("nickname") or "").strip()
+    if not nickname:
+        muted_html = '<span class="muted-text">缺少昵称，暂不可远端写回</span>'
+        return muted_html, muted_html, muted_html, muted_html
+
+    if not section.get("allow_remote_writeback"):
+        inventory_text = _format_value(row.get("baseline_item_count"))
+        balance_text = _format_balance_wan_display(row.get("current_balance_wan"))
+        status_text = _format_value(row.get("round_status"))
+        action_html = '<span class="muted-text">缺少可回连地址，当前仅镜像只读</span>'
+        return inventory_text, balance_text, status_text, action_html
+
+    edit_meta = section.get("edit_meta") or {}
+    form_id = f"remote-inline-edit-form-{escape(str(section.get('machine_id') or 'machine'), quote=True)}-{row_index}"
+    field_errors = (
+        (edit_result or {}).get("field_errors")
+        if _is_active_remote_edit_row(section, row, edit_result)
+        else {}
+    )
+    form_values = _build_remote_list_form_values(section, row, edit_result)
+    status_options = list(edit_meta.get("status_options") or [])
+    balance_input_unit = str(edit_meta.get("balance_input_unit") or "万")
+    status_options_html = _build_status_options_html(
+        status_options,
+        str(form_values.get("round_status") or ""),
+    )
+
+    inventory_cell = f"""
+<div class="inline-field">
+  <input form="{form_id}" type="number" name="baseline_item_count" step="1" min="0" required value="{escape(str(form_values.get('baseline_item_count') or ''), quote=True)}">
+  {_render_field_error(field_errors, "baseline_item_count")}
+</div>
+"""
+    balance_cell = f"""
+<div class="inline-field">
+  <div class="input-with-unit inline-balance">
+    <input form="{form_id}" type="text" name="current_balance_wan" inputmode="decimal" required value="{escape(str(form_values.get('current_balance_wan') or ''), quote=True)}">
+    <span class="unit-tag">{escape(balance_input_unit)}</span>
+  </div>
+  {_render_field_error(field_errors, "current_balance_wan")}
+</div>
+"""
+    status_cell = f"""
+<div class="inline-field">
+  <select form="{form_id}" name="round_status" required>
+    {status_options_html}
+  </select>
+  {_render_field_error(field_errors, "round_status")}
+</div>
+"""
+    action_cell = f"""
+<div class="inline-save">
+  <form id="{form_id}" method="post" action="/remote-account/update">
+    <input type="hidden" name="target_machine_id" value="{escape(str(section.get('machine_id') or ''), quote=True)}">
+    <input type="hidden" name="nickname" value="{escape(nickname, quote=True)}">
+  </form>
+  <button type="submit" form="{form_id}">提交到对端真源</button>
+  {_render_remote_inline_row_result(section, row, edit_result)}
+</div>
+"""
+    return inventory_cell, balance_cell, status_cell, action_cell
+
+
 def _render_machine_section_title(title, badge_text):
     return (
         f'<h2>{escape(str(title))} '
@@ -299,19 +409,50 @@ def _build_remote_account_list_rows(rows):
     return row_items
 
 
-def _render_remote_machine_section(section):
+def _build_remote_account_list_rows_with_edit(section, edit_result=None):
+    row_items = []
+    for row_index, row in enumerate(section.get("rows") or [], start=1):
+        inventory_cell, balance_cell, status_cell, action_cell = _render_remote_inline_edit_cells(
+            section,
+            row,
+            row_index,
+            edit_result=edit_result,
+        )
+        row_items.append(
+            (
+                _format_value(row.get("current_execution_slot")),
+                _format_value(row.get("nickname")),
+                _format_value(row.get("region")),
+                inventory_cell,
+                balance_cell,
+                status_cell,
+                _format_value(row.get("updated_at")),
+                _format_value(row.get("report_time")),
+                action_cell,
+            )
+        )
+    return row_items
+
+
+def _render_remote_machine_section(section, edit_result=None):
     rows = section.get("rows") or []
-    row_items = _build_remote_account_list_rows(rows)
+    row_items = _build_remote_account_list_rows_with_edit(section, edit_result=edit_result)
     empty_html = ""
     if not rows:
         empty_html = f'<p class="muted-text">{escape(str(section.get("message") or "暂无远端镜像数据。"))}</p>'
+    elif section.get("allow_remote_writeback"):
+        empty_html = (
+            '<p class="muted-text">此板块显示的是远端镜像；提交后会转发到对端本机 canonical 真源，'
+            '成功后立即刷新当前镜像显示。</p>'
+        )
+    else:
+        empty_html = f'<p class="muted-text">{escape(str(section.get("message") or "当前仅展示远端镜像。"))}</p>'
 
     return f"""
 <div class="section">
-  {_render_machine_section_title(section.get("machine_display_name") or section.get("machine_id") or "远端机器", "远端同步镜像，只读")}
-  <p class="muted-text">此板块只显示局域网最小账号快照，不写入本机 canonical 主表，也不支持网页编辑。</p>
+  {_render_machine_section_title(section.get("machine_display_name") or section.get("machine_id") or "远端机器", "远端镜像 / 最小写回")}
   {empty_html}
-  {_render_table(("执行位", "昵称", "区服", "道具库存", "余额（万）", "账号状态", "最后更新时间", "最后同步/上报时间"), row_items)}
+  {_render_table(("执行位", "昵称", "区服", "道具库存", "余额（万）", "账号状态", "最后更新时间", "最后同步/上报时间", "远端提交"), row_items)}
 </div>
 """
 
@@ -372,7 +513,7 @@ def render_index_page(view_rows_result, runtime_result, remote_machine_sections=
     local_role_label = view_rows_result.get("data_role_label") or "本机真实数据"
     remote_machine_sections = list(remote_machine_sections or [])
     remote_sections_html = "".join(
-        _render_remote_machine_section(section)
+        _render_remote_machine_section(section, edit_result=edit_result)
         for section in remote_machine_sections
     )
 

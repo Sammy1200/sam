@@ -13,7 +13,12 @@ from account_view_repo import (
     update_account_view_record,
 )
 from machine_sync_config import resolve_web_bind_host
-from remote_sync import get_remote_machine_sections, handle_remote_sync_report_payload
+from remote_sync import (
+    get_remote_machine_sections,
+    handle_remote_sync_report_payload,
+    handle_remote_writeback_payload,
+    submit_remote_account_update,
+)
 from web_view_templates_inventory import (
     render_account_detail_page,
     render_index_page,
@@ -53,8 +58,14 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
             if path == "/account/update":
                 self._handle_account_update()
                 return
+            if path == "/remote-account/update":
+                self._handle_remote_account_update()
+                return
             if path == "/remote-sync/report":
                 self._handle_remote_sync_report()
+                return
+            if path == "/remote-sync/writeback":
+                self._handle_remote_writeback()
                 return
             self._send_html("<h1>404</h1><p>页面不存在。</p>", status_code=404)
         except Exception as exc:
@@ -174,6 +185,7 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
             balance_wan_text=current_balance_wan,
             baseline_update_mode=return_to,
         )
+        update_result["scope"] = "local"
         status_code = 200 if update_result.get("status") == "success" else 400
 
         if return_to == "index":
@@ -215,6 +227,50 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         )
         self._send_html(html, status_code=status_code)
 
+    def _handle_remote_account_update(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = 0
+
+        raw_body = self.rfile.read(content_length) if content_length > 0 else b""
+        form = parse_qs(raw_body.decode("utf-8"), keep_blank_values=True)
+
+        target_machine_id = ((form.get("target_machine_id") or [""])[0] or "").strip()
+        nickname = ((form.get("nickname") or [""])[0] or "").strip()
+        baseline_item_count = ((form.get("baseline_item_count") or [""])[0] or "").strip()
+        round_status = ((form.get("round_status") or [""])[0] or "").strip()
+        current_balance_wan = ((form.get("current_balance_wan") or [""])[0] or "").strip()
+
+        update_result = submit_remote_account_update(
+            target_machine_id=target_machine_id,
+            nickname=nickname,
+            baseline_item_count_text=baseline_item_count,
+            round_status=round_status,
+            balance_wan_text=current_balance_wan,
+        )
+        update_result["scope"] = "remote"
+        status = str(update_result.get("status") or "").strip()
+        if status == "success":
+            status_code = 200
+        elif status == "forbidden":
+            status_code = 403
+        else:
+            status_code = 400
+
+        view_rows_result = get_account_view_rows()
+        runtime_result = get_runtime_snapshot()
+        remote_machine_sections = get_remote_machine_sections(
+            exclude_machine_id=view_rows_result.get("machine_id"),
+        )
+        html = render_index_page(
+            view_rows_result,
+            runtime_result,
+            remote_machine_sections=remote_machine_sections,
+            edit_result=update_result,
+        )
+        self._send_html(html, status_code=status_code)
+
     def _handle_remote_sync_report(self):
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
@@ -235,6 +291,38 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
             return
 
         result = handle_remote_sync_report_payload(
+            payload,
+            client_ip=self.client_address[0] if self.client_address else "",
+        )
+        status = str(result.get("status") or "").strip()
+        if status == "success":
+            status_code = 200
+        elif status == "forbidden":
+            status_code = 403
+        else:
+            status_code = 400
+        self._send_json(result, status_code=status_code)
+
+    def _handle_remote_writeback(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = 0
+
+        raw_body = self.rfile.read(content_length) if content_length > 0 else b""
+        try:
+            payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+        except json.JSONDecodeError as exc:
+            self._send_json(
+                {
+                    "status": "error",
+                    "message": f"远端写回 JSON 解析失败：{exc}",
+                },
+                status_code=400,
+            )
+            return
+
+        result = handle_remote_writeback_payload(
             payload,
             client_ip=self.client_address[0] if self.client_address else "",
         )

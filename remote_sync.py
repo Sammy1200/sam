@@ -9,13 +9,20 @@ import sqlite3
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
-from account_view_repo import get_account_view_rows
+from account_db import ROUND_STATUS_VALUES
+from account_view_repo import get_account_view_rows, update_account_view_record
 from config import REMOTE_SYNC_MIRROR_DB_PATH, WEB_VIEW_PORT
 from machine_sync_config import get_machine_sync_runtime_context
 
 
 REMOTE_SYNC_SOURCE_TYPE = "remote_sync_mirror"
 REMOTE_SYNC_TABLE = "remote_account_snapshots"
+REMOTE_WRITEBACK_ALLOWED_FIELDS = (
+    "baseline_item_count",
+    "round_status",
+    "current_balance_wan",
+)
+REMOTE_WRITEBACK_BALANCE_INPUT_UNIT = "万"
 
 
 def _serialize_datetime(value):
@@ -249,6 +256,82 @@ def save_remote_sync_report(payload, client_ip=""):
     }
 
 
+def _build_remote_edit_meta():
+    return {
+        "editable_fields": REMOTE_WRITEBACK_ALLOWED_FIELDS,
+        "status_options": list(ROUND_STATUS_VALUES),
+        "balance_input_unit": REMOTE_WRITEBACK_BALANCE_INPUT_UNIT,
+    }
+
+
+def _build_remote_update_form_values(
+    machine_id,
+    nickname,
+    baseline_item_count_text,
+    round_status,
+    balance_wan_text,
+):
+    return {
+        "target_machine_id": str(machine_id or "").strip(),
+        "nickname": str(nickname or "").strip(),
+        "baseline_item_count": str(baseline_item_count_text or "").strip(),
+        "round_status": str(round_status or "").strip(),
+        "current_balance_wan": str(balance_wan_text or "").strip(),
+    }
+
+
+def _read_remote_machine_writeback_target(machine_id):
+    normalized_machine_id = str(machine_id or "").strip()
+    if not normalized_machine_id:
+        return None
+    if not os.path.isfile(REMOTE_SYNC_MIRROR_DB_PATH):
+        return None
+
+    conn = sqlite3.connect(f"file:{REMOTE_SYNC_MIRROR_DB_PATH}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            f"""
+            SELECT
+                machine_id,
+                machine_display_name,
+                source_client_ip,
+                report_time,
+                received_at
+            FROM {REMOTE_SYNC_TABLE}
+            WHERE machine_id = ?
+            ORDER BY report_time DESC, received_at DESC
+            LIMIT 1
+            """,
+            (normalized_machine_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+    if row is None:
+        return None
+
+    source_client_ip = str(row["source_client_ip"] or "").strip()
+    if not source_client_ip:
+        return {
+            "machine_id": normalized_machine_id,
+            "machine_display_name": str(row["machine_display_name"] or normalized_machine_id).strip(),
+            "source_client_ip": "",
+            "base_url": "",
+            "report_time": _serialize_datetime(row["report_time"]) or "",
+        }
+
+    return {
+        "machine_id": normalized_machine_id,
+        "machine_display_name": str(row["machine_display_name"] or normalized_machine_id).strip(),
+        "source_client_ip": source_client_ip,
+        "base_url": f"http://{source_client_ip}:{WEB_VIEW_PORT}",
+        "report_time": _serialize_datetime(row["report_time"]) or "",
+    }
+
+
 def handle_remote_sync_report_payload(payload, client_ip=""):
     runtime_context = get_machine_sync_runtime_context()
     if runtime_context.get("config_status") != "ready":
@@ -277,6 +360,263 @@ def handle_remote_sync_report_payload(payload, client_ip=""):
             "status": "error",
             "message": f"写入远端同步镜像失败：{exc}",
         }
+
+
+def handle_remote_writeback_payload(payload, client_ip=""):
+    runtime_context = get_machine_sync_runtime_context()
+    if runtime_context.get("config_status") != "ready":
+        return {
+            "status": "error",
+            "message": f"本机网页同步配置不可用：{runtime_context.get('config_error')}",
+        }
+
+    if not runtime_context.get("receive_remote_writeback"):
+        return {
+            "status": "forbidden",
+            "message": "当前机器未开启 receive_remote_writeback，拒绝远端最小写回。",
+        }
+
+    if not isinstance(payload, dict):
+        return {
+            "status": "error",
+            "message": "远端写回载荷必须是 JSON 对象。",
+        }
+
+    operator_machine_id = str(payload.get("operator_machine_id") or "").strip()
+    target_machine_id = str(payload.get("target_machine_id") or "").strip()
+    nickname = str(payload.get("nickname") or "").strip()
+    raw_fields = payload.get("fields")
+
+    if not target_machine_id:
+        return {
+            "status": "error",
+            "message": "target_machine_id 不能为空。",
+        }
+    if target_machine_id != str(runtime_context.get("machine_id") or "").strip():
+        return {
+            "status": "forbidden",
+            "message": "target_machine_id 与当前机器不匹配，拒绝写回。",
+        }
+    if operator_machine_id and operator_machine_id == target_machine_id:
+        return {
+            "status": "error",
+            "message": "operator_machine_id 与 target_machine_id 相同，拒绝自回写。",
+        }
+    if not nickname:
+        return {
+            "status": "error",
+            "message": "nickname 不能为空。",
+        }
+    if not isinstance(raw_fields, dict):
+        return {
+            "status": "error",
+            "message": "fields 必须是对象，且仅允许提交 3 个最小字段。",
+        }
+
+    unknown_fields = sorted(
+        field_name
+        for field_name in raw_fields.keys()
+        if field_name not in REMOTE_WRITEBACK_ALLOWED_FIELDS
+    )
+    missing_fields = [
+        field_name
+        for field_name in REMOTE_WRITEBACK_ALLOWED_FIELDS
+        if field_name not in raw_fields
+    ]
+    if unknown_fields or missing_fields:
+        problems = []
+        if unknown_fields:
+            problems.append(f"存在非法字段：{', '.join(unknown_fields)}")
+        if missing_fields:
+            problems.append(f"缺少必填字段：{', '.join(missing_fields)}")
+        return {
+            "status": "error",
+            "message": "；".join(problems),
+            "field_errors": {
+                field_name: "该字段不允许远端写回。"
+                for field_name in unknown_fields
+            },
+            "form_values": _build_remote_update_form_values(
+                target_machine_id,
+                nickname,
+                raw_fields.get("baseline_item_count"),
+                raw_fields.get("round_status"),
+                raw_fields.get("current_balance_wan"),
+            ),
+        }
+
+    update_result = update_account_view_record(
+        nickname=nickname,
+        baseline_item_delta_text="",
+        baseline_item_count_text=raw_fields.get("baseline_item_count"),
+        round_status=raw_fields.get("round_status"),
+        balance_wan_text=raw_fields.get("current_balance_wan"),
+        baseline_update_mode="detail",
+    )
+    if update_result.get("status") != "success":
+        return {
+            "status": "error",
+            "message": update_result.get("message") or "远端真源写回失败。",
+            "field_errors": dict(update_result.get("field_errors") or {}),
+            "form_values": _build_remote_update_form_values(
+                target_machine_id,
+                nickname,
+                raw_fields.get("baseline_item_count"),
+                raw_fields.get("round_status"),
+                raw_fields.get("current_balance_wan"),
+            ),
+            "canonical_confirmed": False,
+        }
+
+    snapshot_result = build_local_snapshot_payload()
+    if snapshot_result.get("status") != "success":
+        return {
+            "status": "error",
+            "message": (
+                "远端真源已写入并回读确认，但构建镜像刷新快照失败："
+                f"{snapshot_result.get('message') or '未知错误'}"
+            ),
+            "field_errors": {},
+            "form_values": _build_remote_update_form_values(
+                target_machine_id,
+                nickname,
+                raw_fields.get("baseline_item_count"),
+                raw_fields.get("round_status"),
+                raw_fields.get("current_balance_wan"),
+            ),
+            "canonical_confirmed": True,
+        }
+
+    return {
+        "status": "success",
+        "message": "远端真源写入成功，已完成本机回读确认并生成最新镜像快照。",
+        "field_errors": {},
+        "form_values": _build_remote_update_form_values(
+            target_machine_id,
+            nickname,
+            raw_fields.get("baseline_item_count"),
+            raw_fields.get("round_status"),
+            raw_fields.get("current_balance_wan"),
+        ),
+        "canonical_confirmed": True,
+        "target_machine_id": target_machine_id,
+        "target_machine_display_name": runtime_context.get("machine_display_name") or target_machine_id,
+        "source_client_ip": str(client_ip or "").strip(),
+        "snapshot_payload": snapshot_result.get("payload"),
+    }
+
+
+def submit_remote_account_update(
+    target_machine_id,
+    nickname,
+    baseline_item_count_text,
+    round_status,
+    balance_wan_text,
+    timeout=4.0,
+):
+    form_values = _build_remote_update_form_values(
+        target_machine_id,
+        nickname,
+        baseline_item_count_text,
+        round_status,
+        balance_wan_text,
+    )
+    result = {
+        "status": "error",
+        "scope": "remote",
+        "message": "",
+        "field_errors": {},
+        "form_values": form_values,
+    }
+
+    normalized_machine_id = str(target_machine_id or "").strip()
+    normalized_nickname = str(nickname or "").strip()
+    if not normalized_machine_id:
+        result["message"] = "缺少目标机器标识，无法提交远端写回。"
+        return result
+    if not normalized_nickname:
+        result["message"] = "缺少账号昵称，无法提交远端写回。"
+        return result
+
+    writeback_target = _read_remote_machine_writeback_target(normalized_machine_id)
+    if writeback_target is None:
+        result["message"] = "未找到对应远端机器的最近镜像记录，暂时无法路由写回。"
+        return result
+
+    base_url = str(writeback_target.get("base_url") or "").strip().rstrip("/")
+    if not base_url:
+        result["message"] = "远端机器最近镜像缺少可回连地址，暂时无法路由写回。"
+        return result
+
+    runtime_context = get_machine_sync_runtime_context()
+    payload = {
+        "operator_machine_id": runtime_context.get("machine_id") or "local",
+        "operator_machine_display_name": runtime_context.get("machine_display_name") or "本机",
+        "target_machine_id": normalized_machine_id,
+        "nickname": normalized_nickname,
+        "fields": {
+            "baseline_item_count": form_values["baseline_item_count"],
+            "round_status": form_values["round_status"],
+            "current_balance_wan": form_values["current_balance_wan"],
+        },
+    }
+    request = urllib_request.Request(
+        f"{base_url}/remote-sync/writeback",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "User-Agent": "codex-remote-writeback-proxy",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib_request.urlopen(request, timeout=timeout) as response:
+            response_text = response.read().decode("utf-8", errors="ignore")
+            response_payload = json.loads(response_text) if response_text else {}
+            http_status = getattr(response, "status", 200)
+    except urllib_error.HTTPError as exc:
+        error_text = exc.read().decode("utf-8", errors="ignore")
+        try:
+            response_payload = json.loads(error_text) if error_text else {}
+        except json.JSONDecodeError:
+            response_payload = {"message": error_text or exc.reason}
+        http_status = exc.code
+    except Exception as exc:
+        result["message"] = f"远端写回请求失败：{exc}"
+        return result
+
+    remote_status = str(response_payload.get("status") or "").strip()
+    if http_status == 403 or remote_status == "forbidden":
+        result["status"] = "forbidden"
+        result["message"] = str(response_payload.get("message") or "远端机器拒绝写回。")
+        return result
+
+    result["field_errors"] = dict(response_payload.get("field_errors") or {})
+    if remote_status != "success":
+        result["message"] = str(response_payload.get("message") or "远端机器未返回 success。")
+        return result
+
+    snapshot_payload = response_payload.get("snapshot_payload")
+    if not isinstance(snapshot_payload, dict):
+        result["message"] = "远端真源已写入，但未返回可用于刷新镜像的快照载荷。"
+        return result
+
+    try:
+        save_remote_sync_report(
+            snapshot_payload,
+            client_ip=str(writeback_target.get("source_client_ip") or "").strip(),
+        )
+    except Exception as exc:
+        result["message"] = f"远端真源已写入，但刷新本地镜像失败：{exc}"
+        return result
+
+    result["status"] = "success"
+    result["message"] = (
+        f"已写入 {writeback_target.get('machine_display_name') or normalized_machine_id} 的本机真源，"
+        "并刷新当前镜像。"
+    )
+    return result
 
 
 def build_local_snapshot_payload():
@@ -478,13 +818,16 @@ def get_remote_machine_sections(exclude_machine_id=None):
             "source_type": REMOTE_SYNC_SOURCE_TYPE,
             "data_role": "remote_mirror",
             "data_role_label": "远端同步镜像",
-            "is_read_only": True,
+            "is_read_only": False,
             "database_path": REMOTE_SYNC_MIRROR_DB_PATH,
             "generated_at": generated_at,
             "rows": [],
             "message": "尚未收到最近一次局域网同步上报。",
             "status": "empty",
             "last_report_time": "",
+            "source_client_ip": "",
+            "allow_remote_writeback": False,
+            "edit_meta": _build_remote_edit_meta(),
         }
 
     if not os.path.isfile(REMOTE_SYNC_MIRROR_DB_PATH):
@@ -510,7 +853,8 @@ def get_remote_machine_sections(exclude_machine_id=None):
                 last_limit_time,
                 allow_purchase,
                 cooldown_remaining_seconds,
-                report_time
+                report_time,
+                source_client_ip
             FROM {REMOTE_SYNC_TABLE}
             ORDER BY machine_display_name, sort_order, current_execution_slot
             """
@@ -533,19 +877,26 @@ def get_remote_machine_sections(exclude_machine_id=None):
                 "source_type": REMOTE_SYNC_SOURCE_TYPE,
                 "data_role": "remote_mirror",
                 "data_role_label": "远端同步镜像",
-                "is_read_only": True,
+                "is_read_only": False,
                 "database_path": REMOTE_SYNC_MIRROR_DB_PATH,
                 "generated_at": generated_at,
                 "rows": [],
                 "message": "",
                 "status": "ready",
                 "last_report_time": "",
+                "source_client_ip": "",
+                "allow_remote_writeback": False,
+                "edit_meta": _build_remote_edit_meta(),
             },
         )
 
         report_time = _serialize_datetime(row["report_time"]) or ""
         if report_time and report_time > str(section.get("last_report_time") or ""):
             section["last_report_time"] = report_time
+        source_client_ip = str(row["source_client_ip"] or "").strip()
+        if source_client_ip:
+            section["source_client_ip"] = source_client_ip
+            section["allow_remote_writeback"] = True
 
         section["rows"].append(
             {
@@ -565,6 +916,12 @@ def get_remote_machine_sections(exclude_machine_id=None):
                 "report_time": report_time,
             }
         )
+
+    for section in sections.values():
+        if section.get("rows") and section.get("allow_remote_writeback"):
+            section["message"] = "镜像来自远端最近一次上报；提交修改时会转发到远端本机 canonical 真源。"
+        elif section.get("rows"):
+            section["message"] = "当前只拿到远端镜像内容，但缺少可回连地址，暂不可提交最小写回。"
 
     sections_list = list(sections.values())
     sections_list.sort(

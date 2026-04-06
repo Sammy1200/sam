@@ -33,6 +33,7 @@ class MachineSyncConfig:
     aggregator_host: str
     aggregator_url: str
     receive_remote_sync: bool
+    receive_remote_writeback: bool
     web_bind_host: str
     report_interval_seconds: int
     execution_slot_overrides: dict[int, ExecutionSlotOverride]
@@ -138,6 +139,14 @@ def load_machine_sync_config():
         raise ValueError("本机网页同步配置文件格式错误，根节点必须是 JSON 对象")
 
     receive_remote_sync = _normalize_bool(data.get("receive_remote_sync"), "receive_remote_sync")
+    raw_receive_remote_writeback = data.get("receive_remote_writeback")
+    if raw_receive_remote_writeback in (None, ""):
+        receive_remote_writeback = False
+    else:
+        receive_remote_writeback = _normalize_bool(
+            raw_receive_remote_writeback,
+            "receive_remote_writeback",
+        )
     aggregator_host = str(data.get("aggregator_host") or "").strip()
     aggregator_url = str(data.get("aggregator_url") or "").strip().rstrip("/")
     if not aggregator_url and aggregator_host:
@@ -153,8 +162,14 @@ def load_machine_sync_config():
         aggregator_host=aggregator_host,
         aggregator_url=aggregator_url,
         receive_remote_sync=receive_remote_sync,
+        receive_remote_writeback=receive_remote_writeback,
         web_bind_host=str(
-            data.get("web_bind_host") or ("0.0.0.0" if receive_remote_sync else config.WEB_VIEW_HOST)
+            data.get("web_bind_host")
+            or (
+                "0.0.0.0"
+                if (receive_remote_sync or receive_remote_writeback)
+                else config.WEB_VIEW_HOST
+            )
         ).strip(),
         report_interval_seconds=_normalize_positive_int(
             data.get("report_interval_seconds"),
@@ -184,6 +199,7 @@ def get_machine_sync_runtime_context():
             "aggregator_host": "",
             "aggregator_url": "",
             "receive_remote_sync": False,
+            "receive_remote_writeback": False,
             "web_bind_host": config.WEB_VIEW_HOST,
             "report_interval_seconds": DEFAULT_REPORT_INTERVAL_SECONDS,
             "execution_slot_overrides": {},
@@ -200,6 +216,7 @@ def get_machine_sync_runtime_context():
         "aggregator_host": sync_config.aggregator_host,
         "aggregator_url": sync_config.aggregator_url,
         "receive_remote_sync": sync_config.receive_remote_sync,
+        "receive_remote_writeback": sync_config.receive_remote_writeback,
         "web_bind_host": sync_config.web_bind_host or config.WEB_VIEW_HOST,
         "report_interval_seconds": sync_config.report_interval_seconds,
         "execution_slot_overrides": sync_config.execution_slot_overrides,
