@@ -507,7 +507,6 @@ def _build_remote_account_list_rows_with_edit(section, edit_result=None):
         )
         row_items.append(
             (
-                _format_value(row.get("current_execution_slot")),
                 _format_value(row.get("nickname")),
                 inventory_cell,
                 balance_cell,
@@ -540,7 +539,7 @@ def _render_remote_machine_section(section, edit_result=None, refresh_result=Non
   {_render_machine_section_title(section.get("machine_display_name") or section.get("machine_id") or "远端机器", "远端镜像 / 最小写回")}
   {_render_remote_refresh_toolbar(section, refresh_result)}
   {empty_html}
-  {_render_table(("执行位", "昵称", "道具库存", "余额（万）", "可运行时间", "冷却剩余时间", "账号状态", "最后更新时间", "远端提交"), row_items)}
+  {_render_table(("昵称", "道具库存", "余额（万）", "可运行时间", "冷却剩余时间", "账号状态", "最后更新时间", "远端提交"), row_items)}
 </div>
 """
 
