@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 $taskName = "codex-PYjiaoben-Launcher"
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -10,22 +10,23 @@ if (-not (Test-Path -LiteralPath $configDir)) {
 }
 
 Set-Content -LiteralPath $targetFile -Value $projectRoot -Encoding UTF8
-Write-Host "Scheduled task target root saved: $projectRoot"
+Write-Host "已写入本次启动目标目录：$projectRoot"
+Write-Host "本地配置文件：$targetFile"
 
 $taskExists = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if (-not $taskExists) {
-    throw "Scheduled task not found: $taskName. Run scripts/register_scheduled_task.ps1 first."
+    throw "未找到计划任务：$taskName。请先运行 .\scripts\register_scheduled_task.ps1"
 }
 
 $runOutput = & schtasks.exe /Run /TN $taskName 2>&1
 $runText = ($runOutput | Out-String).Trim()
 
 if ($LASTEXITCODE -ne 0) {
-    throw "Scheduled task run failed: $runText"
+    throw "计划任务触发失败：$runText"
 }
 
 if ($runText) {
     Write-Host $runText
 }
 
-Write-Host "Scheduled task triggered: $taskName"
+Write-Host "已触发计划任务：$taskName"

@@ -1,12 +1,31 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 $taskName = "codex-PYjiaoben-Launcher"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $launcherScript = Join-Path $PSScriptRoot "task_launcher.ps1"
 $powershellExe = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
 
+function Test-IsAdministrator {
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+if (-not (Test-IsAdministrator)) {
+    Write-Host "正在申请管理员权限以注册计划任务..."
+    $arguments = @(
+        "-NoProfile"
+        "-ExecutionPolicy"
+        "Bypass"
+        "-File"
+        ('"{0}"' -f $PSCommandPath)
+    )
+    Start-Process -FilePath $powershellExe -ArgumentList $arguments -Verb RunAs | Out-Null
+    exit 0
+}
+
 if (-not (Test-Path -LiteralPath $launcherScript)) {
-    throw "Task launcher script not found: $launcherScript"
+    throw "未找到计划任务启动脚本：$launcherScript"
 }
 
 $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -28,21 +47,17 @@ $settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit (New-TimeSpan -Hours 0) `
     -StartWhenAvailable
 
-$description = "codex-PYjiaoben fixed elevated launcher. Scheduled task reads local target path and starts main.py."
+$description = "codex-PYjiaoben 固定高权限启动器。计划任务从本地配置读取目标目录并启动 main.py。"
 
-try {
-    Register-ScheduledTask `
-        -TaskName $taskName `
-        -Action $action `
-        -Principal $principal `
-        -Settings $settings `
-        -Description $description `
-        -ErrorAction Stop `
-        -Force | Out-Null
-} catch {
-    throw "Scheduled task registration requires an elevated token. Run scripts/register_scheduled_task.ps1 once as administrator."
-}
+Register-ScheduledTask `
+    -TaskName $taskName `
+    -Action $action `
+    -Principal $principal `
+    -Settings $settings `
+    -Description $description `
+    -ErrorAction Stop `
+    -Force | Out-Null
 
-Write-Host "Scheduled task registered or updated: $taskName"
-Write-Host "Launcher script: $launcherScript"
-Write-Host "Default project root: $projectRoot"
+Write-Host "计划任务已创建或更新：$taskName"
+Write-Host "计划任务启动脚本：$launcherScript"
+Write-Host "默认回退目录：$projectRoot"

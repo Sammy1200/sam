@@ -14,6 +14,7 @@ import cv2
 
 
 # ===== 0. 自动提权 =====
+SCHEDULED_TASK_NAME = "codex-PYjiaoben-Launcher"
 SCHEDULED_TASK_FLAG = "FROM_SCHEDULED_TASK"
 SKIP_ELEVATE_FLAG = "CODEX_SKIP_ELEVATE"
 
@@ -29,22 +30,35 @@ def _is_started_from_scheduled_task():
     return os.environ.get(SCHEDULED_TASK_FLAG) == "1"
 
 
+def _relaunch_as_admin():
+    script_path = os.path.abspath(__file__)
+    script_args = [script_path, *sys.argv[1:]]
+    params = subprocess.list2cmdline(script_args)
+    workdir = os.path.dirname(script_path)
+    ctypes.windll.shell32.ShellExecuteW(
+        None,
+        "runas",
+        sys.executable,
+        params,
+        workdir,
+        1,
+    )
+
+
 def ensure_admin_context():
     if is_admin():
         return
 
     if _is_started_from_scheduled_task():
         print("计划任务启动失败：当前不是管理员权限。")
-        print("请重新执行 scripts/register_scheduled_task.ps1，确认任务已设置为“使用最高权限运行”。")
+        print(f"请重新执行 scripts/register_scheduled_task.ps1，确认计划任务 {SCHEDULED_TASK_NAME} 已设置为“使用最高权限运行”。")
         sys.exit(1)
 
     if os.environ.get(SKIP_ELEVATE_FLAG) == "1":
         return
 
     print("正在申请管理员权限...")
-    ctypes.windll.shell32.ShellExecuteW(
-        None, "runas", sys.executable,
-        f'"{os.path.abspath(__file__)}"', None, 1)
+    _relaunch_as_admin()
     sys.exit()
 
 

@@ -8,8 +8,12 @@
 项目入口：
 - `main.py`
 
-唯一允许的运行命令：
-- `.\.venv\Scripts\python.exe main.py`
+首次机器初始化命令：
+- `.\scripts\register_scheduled_task.ps1`
+
+日常启动 / 实机验收 / Codex 验收入口：
+- `.\古墓迷途.cmd`
+- 底层入口：`.\scripts\run_via_task.ps1`
 
 ---
 
@@ -130,7 +134,9 @@
 - `unknown_page_count` 阈值 = 5
 - 自动上架间隔 = **56 分钟**
 - 换号成功后必须重新上架
-- 运行命令只允许：`.\.venv\Scripts\python.exe main.py`
+- 首次机器初始化命令：`.\scripts\register_scheduled_task.ps1`
+- 日常启动 / 实机验收 / Codex 验收入口：`.\古墓迷途.cmd`
+- 底层入口：`.\scripts\run_via_task.ps1`
 
 ---
 
@@ -154,12 +160,17 @@
 # 验证规则
 
 ## 一、运行命令规则
-只允许使用：
-- `.\.venv\Scripts\python.exe main.py`
+首次机器初始化只允许使用：
+- `.\scripts\register_scheduled_task.ps1`
+
+日常启动 / 实机验收 / Codex 验收只允许使用：
+- `.\古墓迷途.cmd`
+- `.\scripts\run_via_task.ps1`
 
 禁止使用：
 - `python main.py`
 - `py main.py`
+- `.\.venv\Scripts\python.exe main.py`
 
 ## 二、分层验证规则
 
