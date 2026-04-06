@@ -15,8 +15,10 @@ from account_view_repo import (
 from machine_sync_config import resolve_web_bind_host
 from remote_sync import (
     get_remote_machine_sections,
+    handle_remote_snapshot_request,
     handle_remote_sync_report_payload,
     handle_remote_writeback_payload,
+    refresh_remote_machine_snapshot,
     submit_remote_account_update,
 )
 from web_view_templates_inventory import (
@@ -61,8 +63,14 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
             if path == "/remote-account/update":
                 self._handle_remote_account_update()
                 return
+            if path == "/remote-sync/refresh":
+                self._handle_remote_sync_refresh()
+                return
             if path == "/remote-sync/report":
                 self._handle_remote_sync_report()
+                return
+            if path == "/remote-sync/snapshot":
+                self._handle_remote_sync_snapshot()
                 return
             if path == "/remote-sync/writeback":
                 self._handle_remote_writeback()
@@ -89,6 +97,7 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
             view_rows_result,
             runtime_result,
             remote_machine_sections=remote_machine_sections,
+            refresh_result=None,
         )
         self._send_html(html)
 
@@ -199,6 +208,7 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
                 runtime_result,
                 remote_machine_sections=remote_machine_sections,
                 edit_result=update_result,
+                refresh_result=None,
             )
             self._send_html(html, status_code=status_code)
             return
@@ -268,6 +278,40 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
             runtime_result,
             remote_machine_sections=remote_machine_sections,
             edit_result=update_result,
+            refresh_result=None,
+        )
+        self._send_html(html, status_code=status_code)
+
+    def _handle_remote_sync_refresh(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = 0
+
+        raw_body = self.rfile.read(content_length) if content_length > 0 else b""
+        form = parse_qs(raw_body.decode("utf-8"), keep_blank_values=True)
+        target_machine_id = ((form.get("target_machine_id") or [""])[0] or "").strip()
+
+        refresh_result = refresh_remote_machine_snapshot(machine_id=target_machine_id)
+        status = str(refresh_result.get("status") or "").strip()
+        if status == "success":
+            status_code = 200
+        elif status == "forbidden":
+            status_code = 403
+        else:
+            status_code = 400
+
+        view_rows_result = get_account_view_rows()
+        runtime_result = get_runtime_snapshot()
+        remote_machine_sections = get_remote_machine_sections(
+            exclude_machine_id=view_rows_result.get("machine_id"),
+        )
+        html = render_index_page(
+            view_rows_result,
+            runtime_result,
+            remote_machine_sections=remote_machine_sections,
+            edit_result=None,
+            refresh_result=refresh_result,
         )
         self._send_html(html, status_code=status_code)
 
@@ -292,6 +336,19 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
 
         result = handle_remote_sync_report_payload(
             payload,
+            client_ip=self.client_address[0] if self.client_address else "",
+        )
+        status = str(result.get("status") or "").strip()
+        if status == "success":
+            status_code = 200
+        elif status == "forbidden":
+            status_code = 403
+        else:
+            status_code = 400
+        self._send_json(result, status_code=status_code)
+
+    def _handle_remote_sync_snapshot(self):
+        result = handle_remote_snapshot_request(
             client_ip=self.client_address[0] if self.client_address else "",
         )
         status = str(result.get("status") or "").strip()

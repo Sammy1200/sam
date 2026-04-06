@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 import json
 import os
 import sqlite3
+import threading
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
@@ -23,6 +24,8 @@ REMOTE_WRITEBACK_ALLOWED_FIELDS = (
     "current_balance_wan",
 )
 REMOTE_WRITEBACK_BALANCE_INPUT_UNIT = "万"
+REMOTE_EVENT_SNAPSHOT_TIMEOUT_SECONDS = 1.5
+REMOTE_MANUAL_REFRESH_TIMEOUT_SECONDS = 3.0
 
 
 def _serialize_datetime(value):
@@ -775,6 +778,203 @@ def report_local_snapshot_once(timeout=2.0):
             f"数量={len(payload.get('accounts') or [])}"
         ),
     }
+
+
+def schedule_local_snapshot_report(event_name, timeout=REMOTE_EVENT_SNAPSHOT_TIMEOUT_SECONDS):
+    runtime_context = get_machine_sync_runtime_context()
+    if runtime_context.get("config_status") != "ready":
+        return {
+            "status": "skipped",
+            "message": f"网页同步配置不可用：{runtime_context.get('config_error')}",
+        }
+    if not runtime_context.get("sync_enabled"):
+        return {
+            "status": "skipped",
+            "message": "当前机器未开启 sync_enabled，跳过事件触发最小快照。",
+        }
+
+    normalized_event_name = str(event_name or "").strip() or "未命名事件"
+
+    def _run_once():
+        result = report_local_snapshot_once(timeout=timeout)
+        status = str(result.get("status") or "").strip()
+        message = str(result.get("message") or "").strip()
+        prefix = f"[网页同步] 事件触发最小快照：{normalized_event_name}"
+        if status == "success":
+            print(f"{prefix}，{message}")
+        elif status == "error":
+            print(f"{prefix}失败：{message}")
+        return result
+
+    def _worker():
+        _run_once()
+
+    thread = threading.Thread(
+        target=_worker,
+        name=f"remote-sync-event-{normalized_event_name[:16]}",
+        daemon=True,
+    )
+    thread.start()
+    return {
+        "status": "scheduled",
+        "message": f"已安排事件触发最小快照：{normalized_event_name}",
+    }
+
+
+def run_local_snapshot_report_for_event(
+    event_name,
+    timeout=REMOTE_EVENT_SNAPSHOT_TIMEOUT_SECONDS,
+):
+    runtime_context = get_machine_sync_runtime_context()
+    if runtime_context.get("config_status") != "ready":
+        return {
+            "status": "skipped",
+            "message": f"网页同步配置不可用：{runtime_context.get('config_error')}",
+        }
+    if not runtime_context.get("sync_enabled"):
+        return {
+            "status": "skipped",
+            "message": "当前机器未开启 sync_enabled，跳过事件触发最小快照。",
+        }
+
+    normalized_event_name = str(event_name or "").strip() or "未命名事件"
+    result = report_local_snapshot_once(timeout=timeout)
+    status = str(result.get("status") or "").strip()
+    message = str(result.get("message") or "").strip()
+    prefix = f"[网页同步] 事件触发最小快照：{normalized_event_name}"
+    if status == "success":
+        print(f"{prefix}，{message}")
+    elif status == "error":
+        print(f"{prefix}失败：{message}")
+    return result
+
+
+def handle_remote_snapshot_request(client_ip=""):
+    runtime_context = get_machine_sync_runtime_context()
+    if runtime_context.get("config_status") != "ready":
+        return {
+            "status": "error",
+            "message": f"本机网页同步配置不可用：{runtime_context.get('config_error')}",
+        }
+    if not runtime_context.get("sync_enabled"):
+        return {
+            "status": "forbidden",
+            "message": "当前机器未开启 sync_enabled，拒绝导出最小快照。",
+        }
+
+    build_result = build_local_snapshot_payload()
+    if build_result.get("status") != "success":
+        return build_result
+
+    payload = build_result.get("payload") or {}
+    return {
+        "status": "success",
+        "message": "已基于本机 canonical 真源生成最新最小快照。",
+        "source_client_ip": str(client_ip or "").strip(),
+        "snapshot_payload": payload,
+    }
+
+
+def refresh_remote_machine_snapshot(
+    machine_id,
+    timeout=REMOTE_MANUAL_REFRESH_TIMEOUT_SECONDS,
+    refresh_reason="manual",
+):
+    normalized_machine_id = str(machine_id or "").strip()
+    result = {
+        "status": "error",
+        "scope": "remote_refresh",
+        "target_machine_id": normalized_machine_id,
+        "message": "",
+        "refresh_reason": str(refresh_reason or "").strip() or "manual",
+    }
+    if not normalized_machine_id:
+        result["message"] = "缺少目标机器标识，无法刷新远端镜像。"
+        return result
+
+    refresh_target = _read_remote_machine_writeback_target(normalized_machine_id)
+    if refresh_target is None:
+        result["message"] = "未找到对应远端机器的最近镜像记录，暂时无法发起刷新。"
+        return result
+
+    base_url = str(refresh_target.get("base_url") or "").strip().rstrip("/")
+    if not base_url:
+        result["message"] = "远端机器最近镜像缺少可回连地址，暂时无法发起刷新。"
+        return result
+
+    request = urllib_request.Request(
+        f"{base_url}/remote-sync/snapshot",
+        data=json.dumps(
+            {
+                "request_type": "manual_refresh",
+                "target_machine_id": normalized_machine_id,
+                "refresh_reason": result["refresh_reason"],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "User-Agent": "codex-remote-mirror-refresh",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib_request.urlopen(request, timeout=timeout) as response:
+            response_text = response.read().decode("utf-8", errors="ignore")
+            response_payload = json.loads(response_text) if response_text else {}
+            http_status = getattr(response, "status", 200)
+    except urllib_error.HTTPError as exc:
+        error_text = exc.read().decode("utf-8", errors="ignore")
+        try:
+            response_payload = json.loads(error_text) if error_text else {}
+        except json.JSONDecodeError:
+            response_payload = {"message": error_text or exc.reason}
+        http_status = exc.code
+    except Exception as exc:
+        result["message"] = f"刷新失败，远端无响应：{exc}"
+        return result
+
+    remote_status = str(response_payload.get("status") or "").strip()
+    if http_status == 403 or remote_status == "forbidden":
+        result["status"] = "forbidden"
+        result["message"] = str(response_payload.get("message") or "远端机器拒绝导出最小快照。")
+        return result
+    if remote_status != "success":
+        result["message"] = str(response_payload.get("message") or "远端机器未返回 success。")
+        return result
+
+    snapshot_payload = response_payload.get("snapshot_payload")
+    if not isinstance(snapshot_payload, dict):
+        result["message"] = "远端机器未返回有效最小快照。"
+        return result
+
+    try:
+        save_remote_sync_report(
+            snapshot_payload,
+            client_ip=str(refresh_target.get("source_client_ip") or "").strip(),
+        )
+    except Exception as exc:
+        result["message"] = f"已拿到远端最新快照，但刷新本地镜像失败：{exc}"
+        return result
+
+    refreshed_sections = get_remote_machine_sections()
+    refreshed_section = next(
+        (
+            section
+            for section in refreshed_sections
+            if str(section.get("machine_id") or "").strip() == normalized_machine_id
+        ),
+        None,
+    )
+    result["status"] = "success"
+    result["message"] = (
+        f"已刷新 {refresh_target.get('machine_display_name') or normalized_machine_id} 的远端镜像显示。"
+    )
+    result["last_refresh_time"] = (
+        str((refreshed_section or {}).get("last_report_time") or "").strip()
+    )
+    return result
 
 
 def run_remote_snapshot_report_loop(stop_event=None):

@@ -320,6 +320,52 @@ def _render_remote_inline_row_result(section, row, edit_result):
     return f'<div class="{css_class} inline-row-result"><strong>回执：</strong>{message}</div>'
 
 
+def _is_active_remote_refresh_section(section, refresh_result):
+    if not refresh_result or str(refresh_result.get("scope") or "").strip() != "remote_refresh":
+        return False
+    active_machine_id = str(refresh_result.get("target_machine_id") or "").strip()
+    section_machine_id = str(section.get("machine_id") or "").strip()
+    return bool(active_machine_id and active_machine_id == section_machine_id)
+
+
+def _render_remote_refresh_result(section, refresh_result):
+    if not _is_active_remote_refresh_section(section, refresh_result):
+        return ""
+    status = str(refresh_result.get("status") or "").strip()
+    css_class = "flash-success" if status == "success" else "flash-error"
+    message = escape(str(refresh_result.get("message") or ""))
+    return f'<div class="{css_class}"><strong>刷新结果：</strong>{message}</div>'
+
+
+def _render_remote_refresh_toolbar(section, refresh_result=None):
+    can_refresh = bool(section.get("allow_remote_writeback"))
+    button_attrs = (
+        ' type="submit"'
+        ' onclick="this.disabled=true;this.textContent=\'刷新中...\';this.form.submit();"'
+    )
+    if not can_refresh:
+        button_attrs += ' disabled'
+
+    hint_text = "点击后只拉取并刷新当前远端镜像，不会写入对端真源。"
+    if not can_refresh:
+        hint_text = "当前还没有可回连地址，需先收到一次远端镜像后才能手动刷新。"
+
+    last_refresh_time = str(section.get("last_report_time") or "").strip() or "暂无"
+    return f"""
+<div class="meta">
+  最后刷新时间：{escape(last_refresh_time)}<br>
+  刷新说明：{escape(hint_text)}
+</div>
+<div class="form-actions">
+  <form method="post" action="/remote-sync/refresh">
+    <input type="hidden" name="target_machine_id" value="{escape(str(section.get('machine_id') or ''), quote=True)}">
+    <button{button_attrs}>刷新</button>
+  </form>
+</div>
+{_render_remote_refresh_result(section, refresh_result)}
+"""
+
+
 def _render_remote_inline_edit_cells(section, row, row_index, edit_result=None):
     nickname = str(row.get("nickname") or "").strip()
     if not nickname:
@@ -434,7 +480,7 @@ def _build_remote_account_list_rows_with_edit(section, edit_result=None):
     return row_items
 
 
-def _render_remote_machine_section(section, edit_result=None):
+def _render_remote_machine_section(section, edit_result=None, refresh_result=None):
     rows = section.get("rows") or []
     row_items = _build_remote_account_list_rows_with_edit(section, edit_result=edit_result)
     empty_html = ""
@@ -451,13 +497,20 @@ def _render_remote_machine_section(section, edit_result=None):
     return f"""
 <div class="section">
   {_render_machine_section_title(section.get("machine_display_name") or section.get("machine_id") or "远端机器", "远端镜像 / 最小写回")}
+  {_render_remote_refresh_toolbar(section, refresh_result)}
   {empty_html}
   {_render_table(("执行位", "昵称", "区服", "道具库存", "余额（万）", "账号状态", "最后更新时间", "最后同步/上报时间", "远端提交"), row_items)}
 </div>
 """
 
 
-def render_index_page(view_rows_result, runtime_result, remote_machine_sections=None, edit_result=None):
+def render_index_page(
+    view_rows_result,
+    runtime_result,
+    remote_machine_sections=None,
+    edit_result=None,
+    refresh_result=None,
+):
     rows = view_rows_result.get("rows") or []
     health = view_rows_result.get("health") or {}
     source_summary = view_rows_result.get("source_summary") or {}
@@ -513,7 +566,7 @@ def render_index_page(view_rows_result, runtime_result, remote_machine_sections=
     local_role_label = view_rows_result.get("data_role_label") or "本机真实数据"
     remote_machine_sections = list(remote_machine_sections or [])
     remote_sections_html = "".join(
-        _render_remote_machine_section(section, edit_result=edit_result)
+        _render_remote_machine_section(section, edit_result=edit_result, refresh_result=refresh_result)
         for section in remote_machine_sections
     )
 

@@ -869,6 +869,8 @@ def _handle_execution_slot_dispatch(camera):
             if state.switch_flow_paused:
                 return "abort"
 
+        _schedule_remote_snapshot_event("账号切换完成并回到稳定页面后")
+
         if not _run_pre_listing_flow(
             camera,
             reset_runtime_before_listing=True,
@@ -1041,9 +1043,28 @@ def _start_remote_snapshot_report_worker():
     return thread
 
 
+def _schedule_remote_snapshot_event(event_name):
+    try:
+        from remote_sync import schedule_local_snapshot_report
+    except Exception as exc:
+        logger.warning("[网页同步] 事件快照模块加载失败：event=%s error=%s", event_name, exc)
+        return
+
+    try:
+        result = schedule_local_snapshot_report(event_name)
+    except Exception as exc:
+        logger.warning("[网页同步] 事件快照触发失败：event=%s error=%s", event_name, exc)
+        return
+
+    status = str(result.get("status") or "").strip()
+    if status == "scheduled":
+        logger.info("[网页同步] 已安排事件触发最小快照：%s", event_name)
+    elif status == "error":
+        logger.warning("[网页同步] 事件触发最小快照失败：event=%s reason=%s", event_name, result.get("message"))
+
+
 def main():
     ensure_web_view_server_ready()
-    _start_remote_snapshot_report_worker()
     mode = _prompt_main_mode()
     start_overlay()
     try:

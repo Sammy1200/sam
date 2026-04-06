@@ -28,6 +28,32 @@ PLACEHOLDER_BALANCE = "\u83b7\u53d6\u4e2d"
 STATUS_NORMAL_SWITCH = "\u5f53\u524d\u8d26\u53f7\u6b63\u5e38\u5b8c\u6210\u5e76\u5207\u5230\u4e0b\u4e00\u4e2a\u8d26\u53f7"
 
 
+def _schedule_remote_snapshot_event(event_name, synchronous=False):
+    try:
+        if synchronous:
+            from remote_sync import run_local_snapshot_report_for_event
+        else:
+            from remote_sync import schedule_local_snapshot_report
+    except Exception as exc:
+        logger.warning("[网页同步] 事件快照模块加载失败：event=%s error=%s", event_name, exc)
+        return
+
+    try:
+        if synchronous:
+            result = run_local_snapshot_report_for_event(event_name)
+        else:
+            result = schedule_local_snapshot_report(event_name)
+    except Exception as exc:
+        logger.warning("[网页同步] 事件快照触发失败：event=%s error=%s", event_name, exc)
+        return
+
+    status = str(result.get("status") or "").strip()
+    if status == "scheduled":
+        logger.info("[网页同步] 已安排事件触发最小快照：%s", event_name)
+    elif status == "error":
+        logger.warning("[网页同步] 事件触发最小快照失败：event=%s reason=%s", event_name, result.get("message"))
+
+
 def reset_round_runtime_state(reason, reset_purchase_runtime=True):
     """Reset per-round runtime stats after mandatory pre-listing."""
     state.success_count = 0
@@ -488,6 +514,7 @@ def persist_pause_snapshot():
         state.updated_at = write_time
         state.round_purchase_running_seconds = float(max(0, int(get_current_elapsed())))
         state.round_status = ROUND_STATUS_MANUAL_PAUSE
+        _schedule_remote_snapshot_event("F12暂停时")
         logger.info(
             "[账号数据] F12 暂停最小写库完成：昵称=%s 状态=%s 道具库存=%s 余额=%s",
             nickname,
@@ -587,6 +614,7 @@ def persist_final_round_snapshot(default_status):
     state.account_round_finalized = True
     state.account_round_writeback_failed = False
     state.account_round_writeback_error = ""
+    _schedule_remote_snapshot_event("脚本正常收尾/退出时", synchronous=True)
     print(
         "[account-data] final write ok: "
         f"nickname={state.current_nickname}, status={record.round_status}, "
