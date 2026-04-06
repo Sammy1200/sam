@@ -10,6 +10,7 @@ import requests
 
 import state
 from config import (
+    ACCOUNT_MAX_PURCHASE_SECONDS,
     ACCOUNT_LIMIT_THRESHOLD,
     BUY_POS,
     CONFIRM_DELAY,
@@ -210,6 +211,14 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                     persist_account_limit_reached_if_needed()
                     last_runtime_state_check = current_time
 
+                if get_current_elapsed() >= ACCOUNT_MAX_PURCHASE_SECONDS:
+                    persist_account_limit_reached_if_needed()
+                    state.overlay_status = "抢购时长已到"
+                    ui_print("已达到 2小时50分 可运行时间阈值，结束当前抢购循环并进入主流程收尾。", save_log=True)
+                    state.account_round_end_status = "抢购时长已到"
+                    state.need_switch_server = not state.temporary_purchase_mode
+                    return
+
                 if (current_time - last_refresh > STUCK_PUSH_INTERVAL and
                         current_time - last_stuck_push_time > STUCK_PUSH_INTERVAL):
                     async_push_msg("【2号电脑】脚本卡顿提醒", "已超过 5 分钟未执行刷新。")
@@ -237,7 +246,10 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                     if price_action == "accept":
                         fast_click(BUY_POS)
                         precise_sleep(CONFIRM_DELAY)
-                        fast_click(CONFIRM_POS)
+                        confirm_click_end_time = time.perf_counter() + 0.05
+                        while time.perf_counter() < confirm_click_end_time:
+                            fast_click(CONFIRM_POS)
+                            precise_sleep(0.005)
                         time.sleep(0.6)
                         purchase_succeeded = False
 

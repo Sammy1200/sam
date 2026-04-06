@@ -10,7 +10,11 @@ import tkinter as tk
 from datetime import datetime
 
 import state
-from round_persistence import persist_pause_snapshot, persist_resume_snapshot
+from round_persistence import (
+    get_runtime_window_remaining_seconds,
+    persist_pause_snapshot,
+    persist_resume_snapshot,
+)
 from utils import (
     OVERLAY_LOG_LABEL_PACK,
     OVERLAY_LOG_LABEL_STYLE,
@@ -21,7 +25,6 @@ from utils import (
     OVERLAY_SCORE_LABEL_STYLE,
     drain_overlay_tasks,
     enqueue_overlay_task,
-    get_current_elapsed,
 )
 
 
@@ -103,11 +106,11 @@ def update_score_text():
     if not state.overlay_root or not state.score_var:
         return
 
-    elapsed_text = _format_duration(get_current_elapsed())
+    remaining_text = _format_duration(get_runtime_window_remaining_seconds())
     slot_text = str(state.current_execution_slot or "--")
     current_inventory = _get_current_inventory()
     msg = (
-        _build_overlay_row("执行位：", slot_text, "抢购运行：", elapsed_text) + "\n"
+        _build_overlay_row("执行位：", slot_text, "可运行时：", remaining_text) + "\n"
         + _build_overlay_row("上架成功：", state.round_listing_success_count, "道具库存：", current_inventory) + "\n"
         + _build_overlay_row("抢购成功：", state.round_purchase_success_count, "抢购失败：", state.round_purchase_fail_count)
     )
@@ -135,12 +138,12 @@ def update_score_text():
     if not state.overlay_root or not state.score_var:
         return
 
-    elapsed_text = _format_duration(get_current_elapsed())
+    remaining_text = _format_duration(get_runtime_window_remaining_seconds())
     slot_text = str(state.current_execution_slot or "--")
     current_inventory = _get_current_inventory()
     balance_text = _get_balance_display_text()
     msg = (
-        _build_overlay_row("执行位：", slot_text, "抢购运行：", elapsed_text) + "\n"
+        _build_overlay_row("执行位：", slot_text, "可运行时：", remaining_text) + "\n"
         + _build_overlay_row("上架成功：", state.round_listing_success_count, "道具库存：", current_inventory) + "\n"
         + _build_overlay_row("抢购成功：", state.round_purchase_success_count, "抢购失败：", state.round_purchase_fail_count) + "\n"
         + _build_overlay_row("当前余额：", balance_text, "当前状态：", _get_overlay_status_text())

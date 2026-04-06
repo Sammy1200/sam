@@ -1033,9 +1033,6 @@ def main():
     mode = _prompt_main_mode()
     start_overlay()
     try:
-        if mode == "launcher":
-            _prepare_canonical_cleanup_once()
-
         if os.name == 'nt':
             try:
                 handle = ctypes.windll.kernel32.GetCurrentProcess()

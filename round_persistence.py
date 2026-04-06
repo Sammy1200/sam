@@ -11,8 +11,10 @@ from account_db import (
     ROUND_STATUS_LIMITED,
     ROUND_STATUS_MANUAL_PAUSE,
     ROUND_STATUS_NORMAL_END,
+    ROUND_STATUS_RUNTIME_REACHED,
     ROUND_STATUS_RUNNING,
     ROUND_STATUS_UNKNOWN,
+    read_canonical_account_stats_record,
     save_canonical_account_stats_record,
     update_canonical_account_status_fields,
     update_canonical_account_runtime_fields,
@@ -55,6 +57,38 @@ def reset_round_runtime_state(reason, reset_purchase_runtime=True):
         state.round_purchase_running_seconds = float(max(0.0, state.total_running_time))
     print(f"[round-settlement] {reason}, round counters reset.")
     logger.info("[round-settlement] %s, round counters reset.", reason)
+
+
+def _reload_current_account_state_from_canonical():
+    """恢复后回灌当前账号关键可回写字段，避免旧内存覆盖网页修改。"""
+    nickname = (state.current_nickname or "").strip()
+    database_path = str(state.account_db_path or "").strip()
+    table_name = state.account_db_table_name or CANONICAL_ACCOUNT_STATS_TABLE
+    if not nickname or not database_path:
+        return AccountWriteResult("skipped", "current account context is incomplete")
+
+    record = read_canonical_account_stats_record(database_path, nickname, table_name)
+    if record is None:
+        return AccountWriteResult("account_not_found", f"sqlite record not found for nickname: {nickname}")
+
+    state.current_nickname = record.nickname
+    state.baseline_item_count = int(record.baseline_item_count)
+    state.last_limit_time = record.last_limit_time
+    state.last_account_end_time = record.last_account_end_time
+    state.updated_at = record.updated_at
+    if record.current_execution_slot is not None:
+        state.current_execution_slot = record.current_execution_slot
+    state.round_purchase_success_count = int(record.round_purchase_success_count)
+    state.round_listing_success_count = int(record.round_listing_success_count)
+    state.round_purchase_fail_count = int(record.round_purchase_fail_count)
+    state.round_current_balance = str(record.current_balance or "").strip()
+    state.current_balance = state.round_current_balance
+    state.last_valid_balance = state.round_current_balance
+    state.total_running_time = float(record.purchase_running_seconds)
+    state.round_purchase_running_seconds = float(record.purchase_running_seconds)
+    state.runtime_window_start_time = record.runtime_window_start_time
+    state.round_status = record.round_status
+    return AccountWriteResult("success", "")
 
 
 def resolve_shutdown_final_status(default_status):
@@ -266,6 +300,8 @@ def _normalize_round_status(raw_status, is_final):
         return ROUND_STATUS_LIMITED
     if normalized == "\u4f59\u989d\u4e0d\u8db3":
         return ROUND_STATUS_BALANCE_LOW
+    if normalized == "\u62a2\u8d2d\u65f6\u957f\u5df2\u5230":
+        return ROUND_STATUS_RUNTIME_REACHED
     if normalized in ("\u624b\u52a8\u7ed3\u675f", "\u4eba\u5de5\u6682\u505c"):
         return ROUND_STATUS_MANUAL_PAUSE
     if normalized == "\u672a\u77e5\u5f02\u5e38":
@@ -486,6 +522,9 @@ def persist_resume_snapshot():
     if result.status == "success":
         state.updated_at = write_time
         state.round_status = ROUND_STATUS_RUNNING
+        reload_result = _reload_current_account_state_from_canonical()
+        if reload_result.status != "success":
+            logger.warning("[账号数据] F12 恢复后回灌当前账号数据失败：昵称=%s 原因=%s", nickname, reload_result.reason)
         logger.info("[账号数据] F12 恢复状态写库完成：昵称=%s 状态=%s", nickname, ROUND_STATUS_RUNNING)
     elif result.status == "skipped":
         logger.info("[账号数据] F12 恢复跳过写库：昵称=%s 原因=%s", nickname, result.reason)
