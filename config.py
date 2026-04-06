@@ -116,12 +116,15 @@ EXECUTION_SLOT_SWITCH_TARGETS = {
 }
 THREAD6_RUNTIME_DB_PATH = os.path.join(SCRIPT_DIR, "thread6_runtime.sqlite3")
 ACCOUNT_STATS_DB_PATH = os.path.join(SCRIPT_DIR, "account_stats.sqlite3")
+REMOTE_SYNC_MIRROR_DB_PATH = os.path.join(SCRIPT_DIR, "remote_sync_mirror.sqlite3")
 WEB_VIEW_HOST = "127.0.0.1"
 WEB_VIEW_PORT = 8091
 WEB_VIEW_SERVER_URL = f"http://{WEB_VIEW_HOST}:{WEB_VIEW_PORT}"
 WEB_VIEW_SERVER_SCRIPT_PATH = os.path.join(SCRIPT_DIR, "web_view_server.py")
 LOCAL_SWITCH_ACCOUNT_CONFIG_PATH = os.path.join(SCRIPT_DIR, "local_switch_account_config.json")
 LOCAL_SWITCH_ACCOUNT_CONFIG_EXAMPLE_PATH = os.path.join(SCRIPT_DIR, "local_switch_account_config.example.json")
+LOCAL_WEB_SYNC_CONFIG_PATH = os.path.join(SCRIPT_DIR, "local_web_sync_config.json")
+LOCAL_WEB_SYNC_CONFIG_EXAMPLE_PATH = os.path.join(SCRIPT_DIR, "local_web_sync_config.example.json")
 SWITCH_STEP_MAX_RETRY = 3
 
 # ========= 换区/换号相关 =========

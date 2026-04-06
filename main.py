@@ -5,6 +5,7 @@ import ctypes
 import sys
 import os
 import time
+import threading
 import subprocess
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -102,8 +103,6 @@ from switch import (
     startup_from_server_list,
     switch_account_after_slot_boundary,
 )
-
-
 # 保留原有的定时配置流程。
 def setup_schedule():
     while True:
@@ -979,8 +978,58 @@ def ensure_web_view_server_ready():
     return _start_web_view_server_in_background()
 
 
+def _start_remote_snapshot_report_worker():
+    try:
+        from machine_sync_config import get_machine_sync_runtime_context
+        from remote_sync import run_remote_snapshot_report_loop
+    except Exception as exc:
+        message = f"[网页同步] 同步模块加载失败，已禁用线程 12 同步功能：{exc}"
+        print(message)
+        logger.error(message)
+        return None
+
+    try:
+        runtime_context = get_machine_sync_runtime_context()
+    except Exception as exc:
+        message = f"[网页同步] 读取同步配置失败，已禁用线程 12 同步功能：{exc}"
+        print(message)
+        logger.error(message)
+        return None
+
+    if runtime_context.get("config_status") != "ready":
+        message = f"[网页同步] 未启动后台上报线程：{runtime_context.get('config_error')}"
+        print(message)
+        logger.warning(message)
+        return None
+
+    if not runtime_context.get("sync_enabled"):
+        message = "[网页同步] 当前机器未开启 sync_enabled，跳过后台最小账号快照上报线程。"
+        print(message)
+        logger.info(message)
+        return None
+
+    try:
+        thread = threading.Thread(
+            target=run_remote_snapshot_report_loop,
+            name="remote-sync-reporter",
+            daemon=True,
+        )
+        thread.start()
+    except Exception as exc:
+        message = f"[网页同步] 启动后台上报线程失败，已禁用线程 12 同步功能：{exc}"
+        print(message)
+        logger.error(message)
+        return None
+
+    message = "[网页同步] 后台最小账号快照上报线程已启动。"
+    print(message)
+    logger.info(message)
+    return thread
+
+
 def main():
     ensure_web_view_server_ready()
+    _start_remote_snapshot_report_worker()
     mode = _prompt_main_mode()
     start_overlay()
     try:

@@ -9,3 +9,5 @@ account_stats.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
 local_switch_account_config.json
+local_web_sync_config.json
+remote_sync_mirror.sqlite3

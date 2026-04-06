@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
 from urllib.parse import parse_qs, urlparse
 
 from config import WEB_VIEW_HOST, WEB_VIEW_PORT
@@ -11,6 +12,8 @@ from account_view_repo import (
     get_runtime_snapshot,
     update_account_view_record,
 )
+from machine_sync_config import resolve_web_bind_host
+from remote_sync import get_remote_machine_sections, handle_remote_sync_report_payload
 from web_view_templates_inventory import (
     render_account_detail_page,
     render_index_page,
@@ -18,7 +21,6 @@ from web_view_templates_inventory import (
 )
 
 
-HOST = WEB_VIEW_HOST
 PORT = WEB_VIEW_PORT
 
 
@@ -51,6 +53,9 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
             if path == "/account/update":
                 self._handle_account_update()
                 return
+            if path == "/remote-sync/report":
+                self._handle_remote_sync_report()
+                return
             self._send_html("<h1>404</h1><p>页面不存在。</p>", status_code=404)
         except Exception as exc:
             print(f"[网页查看页] 提交处理失败：path={path} error={exc}")
@@ -66,7 +71,14 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
     def _handle_index(self):
         view_rows_result = get_account_view_rows()
         runtime_result = get_runtime_snapshot()
-        html = render_index_page(view_rows_result, runtime_result)
+        remote_machine_sections = get_remote_machine_sections(
+            exclude_machine_id=view_rows_result.get("machine_id"),
+        )
+        html = render_index_page(
+            view_rows_result,
+            runtime_result,
+            remote_machine_sections=remote_machine_sections,
+        )
         self._send_html(html)
 
     def _handle_account(self, query):
@@ -167,9 +179,13 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         if return_to == "index":
             view_rows_result = get_account_view_rows()
             runtime_result = get_runtime_snapshot()
+            remote_machine_sections = get_remote_machine_sections(
+                exclude_machine_id=view_rows_result.get("machine_id"),
+            )
             html = render_index_page(
                 view_rows_result,
                 runtime_result,
+                remote_machine_sections=remote_machine_sections,
                 edit_result=update_result,
             )
             self._send_html(html, status_code=status_code)
@@ -199,6 +215,38 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         )
         self._send_html(html, status_code=status_code)
 
+    def _handle_remote_sync_report(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = 0
+
+        raw_body = self.rfile.read(content_length) if content_length > 0 else b""
+        try:
+            payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+        except json.JSONDecodeError as exc:
+            self._send_json(
+                {
+                    "status": "error",
+                    "message": f"同步上报 JSON 解析失败：{exc}",
+                },
+                status_code=400,
+            )
+            return
+
+        result = handle_remote_sync_report_payload(
+            payload,
+            client_ip=self.client_address[0] if self.client_address else "",
+        )
+        status = str(result.get("status") or "").strip()
+        if status == "success":
+            status_code = 200
+        elif status == "forbidden":
+            status_code = 403
+        else:
+            status_code = 400
+        self._send_json(result, status_code=status_code)
+
     def _send_html(self, html, status_code=200):
         body = html.encode("utf-8")
         self.send_response(status_code)
@@ -207,10 +255,19 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_json(self, payload, status_code=200):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
-def run_server(host=HOST, port=PORT):
-    server = ThreadingHTTPServer((host, port), ReadOnlyViewHandler)
-    print(f"[网页查看页] 服务已启动：http://{host}:{port}")
+
+def run_server(host=None, port=PORT):
+    bind_host = host or resolve_web_bind_host() or WEB_VIEW_HOST
+    server = ThreadingHTTPServer((bind_host, port), ReadOnlyViewHandler)
+    print(f"[网页查看页] 服务已启动：bind={bind_host} local=http://127.0.0.1:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

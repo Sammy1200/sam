@@ -7,6 +7,7 @@ import os
 import sqlite3
 import subprocess
 
+from machine_sync_config import get_machine_sync_runtime_context
 from account_db import (
     AccountStatsRecord,
     CANONICAL_ACCOUNT_STATS_COLUMNS,
@@ -716,6 +717,18 @@ def _build_source_diagnostics(resolved_source, real_record_count):
     }
 
 
+def _build_local_machine_meta():
+    runtime_context = get_machine_sync_runtime_context()
+    return {
+        "machine_id": runtime_context.get("machine_id") or "local",
+        "machine_display_name": runtime_context.get("machine_display_name") or "本机",
+        "data_role": "local_truth",
+        "data_role_label": "本机真实数据",
+        "sync_config_status": runtime_context.get("config_status") or "error",
+        "sync_config_error": runtime_context.get("config_error") or "",
+    }
+
+
 def _build_canonical_result(database_path, table_name, rows, generated_at):
     return {
         "source_type": CANONICAL_SOURCE_TYPE,
@@ -724,6 +737,7 @@ def _build_canonical_result(database_path, table_name, rows, generated_at):
         "generated_at": _serialize_datetime(generated_at),
         "rows": rows,
         "edit_meta": _build_edit_meta(),
+        **_build_local_machine_meta(),
     }
 
 

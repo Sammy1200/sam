@@ -1,4 +1,4 @@
-"""库存实时语义覆盖模板。"""
+"""库存语义版网页模板。"""
 from html import escape
 
 import web_view_templates as base_templates
@@ -32,9 +32,8 @@ def _format_runtime_remaining_text(value):
 def _render_read_only_notice():
     return """
 <div class="readonly-notice">
-  <strong>当前页面以查看为主：</strong>
-  首页支持直接编辑“道具库存”，详情页也直接对应底层 <code>baseline_item_count</code>。
-  页面不再展示旧的推算库存口径，也不再提供“基数增减”入口。
+  <strong>当前首页仍以本机查看为主：</strong>
+  本机板块继续支持最小库存/状态/余额编辑；远端板块只展示局域网同步镜像，不允许直接写库。
 </div>
 """
 
@@ -44,7 +43,7 @@ def _render_edit_notice():
 <div class="edit-notice">
   <strong>当前详情页支持最小编辑：</strong>
   仅允许修改 3 个字段：道具库存、账号状态、余额（万）。
-  提交后会直接写入主 SQLite 数据库，并执行回读确认。
+  提交后只写入本机 canonical 主表，并执行回读确认。
 </div>
 """
 
@@ -62,7 +61,7 @@ def _build_demo_account_rows():
             "updated_at_relative": "5小时前",
             "allow_purchase": True,
             "cooldown_remaining_seconds": 0,
-            "runtime_window_remaining_text": "2小时50分0秒",
+            "runtime_window_remaining_text": "2小时50分钟",
         },
         {
             "current_execution_slot": 2,
@@ -75,7 +74,7 @@ def _build_demo_account_rows():
             "updated_at_relative": "6小时前",
             "allow_purchase": False,
             "cooldown_remaining_seconds": 1280,
-            "runtime_window_remaining_text": "1小时26分40秒",
+            "runtime_window_remaining_text": "1小时26分钟",
         },
         {
             "current_execution_slot": 3,
@@ -101,7 +100,7 @@ def _build_demo_account_rows():
             "updated_at_relative": "8小时前",
             "allow_purchase": True,
             "cooldown_remaining_seconds": 0,
-            "runtime_window_remaining_text": "48分32秒",
+            "runtime_window_remaining_text": "48分钟",
         },
     ]
 
@@ -206,7 +205,7 @@ def _render_account_edit_form(record, edit_meta=None, edit_result=None):
     <label>
       <span>道具库存</span>
       <input type="number" name="baseline_item_count" step="1" min="0" required value="{escape(str(form_values.get('baseline_item_count') or ''), quote=True)}">
-      <small>必须为整数；提交时直接写入底层 <code>baseline_item_count</code>，不再按旧公式反推。</small>
+      <small>必须为整数；提交时直接写入底层 <code>baseline_item_count</code>。</small>
       {_render_field_error(field_errors, "baseline_item_count")}
     </label>
     <label>
@@ -223,7 +222,7 @@ def _render_account_edit_form(record, edit_meta=None, edit_result=None):
         <input type="text" name="current_balance_wan" inputmode="decimal" required value="{escape(str(form_values.get('current_balance_wan') or ''), quote=True)}">
         <span class="unit-tag">{escape(balance_input_unit)}</span>
       </div>
-      <small>页面输入和展示都按“万”为单位；提交时会按主库当前存储口径写入。</small>
+      <small>页面输入和展示都按“万”为单位；提交时按主库当前存储口径写入。</small>
       {_render_field_error(field_errors, "current_balance_wan")}
     </label>
     <div class="form-actions">
@@ -275,7 +274,49 @@ def _build_account_list_rows(rows, edit_meta=None, edit_result=None):
     return row_items, using_demo_rows
 
 
-def render_index_page(view_rows_result, runtime_result, edit_result=None):
+def _render_machine_section_title(title, badge_text):
+    return (
+        f'<h2>{escape(str(title))} '
+        f'<span class="unit-tag">{escape(str(badge_text))}</span></h2>'
+    )
+
+
+def _build_remote_account_list_rows(rows):
+    row_items = []
+    for row in rows:
+        row_items.append(
+            (
+                _format_value(row.get("current_execution_slot")),
+                _format_value(row.get("nickname")),
+                _format_value(row.get("region")),
+                _format_value(row.get("baseline_item_count")),
+                _format_balance_wan_display(row.get("current_balance_wan")),
+                _format_value(row.get("round_status")),
+                _format_value(row.get("updated_at")),
+                _format_value(row.get("report_time")),
+            )
+        )
+    return row_items
+
+
+def _render_remote_machine_section(section):
+    rows = section.get("rows") or []
+    row_items = _build_remote_account_list_rows(rows)
+    empty_html = ""
+    if not rows:
+        empty_html = f'<p class="muted-text">{escape(str(section.get("message") or "暂无远端镜像数据。"))}</p>'
+
+    return f"""
+<div class="section">
+  {_render_machine_section_title(section.get("machine_display_name") or section.get("machine_id") or "远端机器", "远端同步镜像，只读")}
+  <p class="muted-text">此板块只显示局域网最小账号快照，不写入本机 canonical 主表，也不支持网页编辑。</p>
+  {empty_html}
+  {_render_table(("执行位", "昵称", "区服", "道具库存", "余额（万）", "账号状态", "最后更新时间", "最后同步/上报时间"), row_items)}
+</div>
+"""
+
+
+def render_index_page(view_rows_result, runtime_result, remote_machine_sections=None, edit_result=None):
     rows = view_rows_result.get("rows") or []
     health = view_rows_result.get("health") or {}
     source_summary = view_rows_result.get("source_summary") or {}
@@ -327,6 +368,13 @@ def render_index_page(view_rows_result, runtime_result, edit_result=None):
         "col-cooldown",
         "col-action",
     )
+    local_machine_display_name = view_rows_result.get("machine_display_name") or "本机"
+    local_role_label = view_rows_result.get("data_role_label") or "本机真实数据"
+    remote_machine_sections = list(remote_machine_sections or [])
+    remote_sections_html = "".join(
+        _render_remote_machine_section(section)
+        for section in remote_machine_sections
+    )
 
     body_html = f"""
 <h1>账号数据查看页</h1>
@@ -340,34 +388,37 @@ def render_index_page(view_rows_result, runtime_result, edit_result=None):
 </div>
 
 <div class="section">
-  <h2>账号列表</h2>
+  {_render_machine_section_title(local_machine_display_name, local_role_label)}
+  <p class="muted-text">此板块对应本机 SQLite canonical 主表，是当前页面唯一可编辑的真实数据区。</p>
   {demo_notice_html}
   {_render_table(("执行位", "昵称", "道具库存", "余额（万）", "可运行时间", "账号状态", "允许抢购", "冷却剩余时间", "详情保存"), row_items, column_classes=account_table_column_classes, table_class="account-table")}
 </div>
 
+{remote_sections_html}
+
 <div class="section">
-  <h2>数据健康摘要</h2>
+  <h2>本机数据健康摘要</h2>
   {_render_health_summary(health)}
 </div>
 
 <div class="section">
-  <h2>执行位覆盖情况</h2>
-  <p>首页明确展示主库视角下已覆盖与缺失的执行位，便于快速判断槽位是否齐全。</p>
+  <h2>本机执行位覆盖情况</h2>
+  <p>这里只统计本机 canonical 主库，不混入远端同步镜像。</p>
   {_render_execution_slot_summary(execution_slot_summary)}
 </div>
 
 <div class="section">
-  <h2>辅助快照摘要</h2>
+  <h2>本机辅助快照摘要</h2>
   {_render_kv_table(runtime_items)}
 </div>
 
 <div class="section">
-  <h2>重复执行位</h2>
+  <h2>本机重复执行位</h2>
   {_render_table(("执行位", "昵称列表"), duplicate_rows)}
 </div>
 
 <div class="section">
-  <h2>关键字段缺失</h2>
+  <h2>本机关键字段缺失</h2>
   {_render_table(("昵称", "执行位", "缺失字段"), missing_rows)}
 </div>
 """
@@ -459,7 +510,7 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None):
 
 <div class="section">
   <h2>当前记录健康摘要</h2>
-  <p>这里只展示当前主库记录本身的完整性和可读性摘要，不写回任何额外数据。</p>
+  <p>这里只展示本机主库记录本身的完整性和可读性摘要，不写回任何额外数据。</p>
   {_render_kv_table(record_health_items)}
 </div>
 
@@ -468,7 +519,7 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None):
   <p>辅助快照仅做辅助对照，以下结果用于观察当前快照与主库详情是否一致。</p>
   {_render_runtime_consistency_summary(runtime_result, runtime_consistency)}
 </div>
-    """
+"""
     return _base_page(f"账号详情 - {record.get('nickname')}", body_html)
 
 
