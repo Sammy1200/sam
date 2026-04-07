@@ -24,6 +24,7 @@ REMOTE_WRITEBACK_ALLOWED_FIELDS = (
     "current_balance_wan",
 )
 REMOTE_WRITEBACK_BALANCE_INPUT_UNIT = "万"
+REMOTE_WRITEBACK_TIMEOUT_SECONDS = 8.0
 REMOTE_EVENT_SNAPSHOT_TIMEOUT_SECONDS = 1.5
 REMOTE_MANUAL_REFRESH_TIMEOUT_SECONDS = 3.0
 
@@ -532,7 +533,7 @@ def submit_remote_account_update(
     baseline_item_count_text,
     round_status,
     balance_wan_text,
-    timeout=4.0,
+    timeout=REMOTE_WRITEBACK_TIMEOUT_SECONDS,
 ):
     form_values = _build_remote_update_form_values(
         target_machine_id,

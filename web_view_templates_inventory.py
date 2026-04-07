@@ -35,54 +35,55 @@ def _format_remote_remaining_text(seconds_value):
 
 
 def _render_remote_countdown_cell(row, field_name):
-    remaining_seconds = max(0, int(row.get(field_name) or 0))
-    report_time = str(row.get("report_time") or "").strip()
-    initial_text = _format_remote_remaining_text(remaining_seconds)
-    if not report_time:
-        return initial_text
+    return _format_remote_remaining_text(row.get(field_name))
 
+
+def _render_local_relative_time(fallback_text, updated_at):
+    normalized_updated_at = str(updated_at or "").strip()
+    display_text = str(fallback_text or "").strip() or "-"
+    if not normalized_updated_at:
+        return escape(display_text)
     return (
-        f'<span class="remote-countdown" '
-        f'data-remaining-seconds="{escape(str(remaining_seconds), quote=True)}" '
-        f'data-report-time="{escape(report_time, quote=True)}">{initial_text}</span>'
+        f'<span class="local-relative-time" '
+        f'data-updated-at="{escape(normalized_updated_at, quote=True)}">{escape(display_text)}</span>'
     )
 
 
-def _render_remote_countdown_script():
+def _render_local_relative_time_script():
     return """
 <script>
 (function () {
-  function parseReportTime(text) {
+  function parseUpdatedAt(text) {
     if (!text) return NaN;
     return Date.parse(String(text).trim().replace(" ", "T"));
   }
 
-  function formatDuration(totalSeconds) {
-    totalSeconds = Math.max(0, Math.floor(Number(totalSeconds) || 0));
-    var hours = Math.floor(totalSeconds / 3600);
-    var minutes = Math.floor((totalSeconds % 3600) / 60);
-    var seconds = totalSeconds % 60;
-    if (hours > 0) return hours + "小时" + minutes + "分" + seconds + "秒";
-    if (minutes > 0) return minutes + "分" + seconds + "秒";
-    return seconds + "秒";
+  function formatRelative(updatedAtMs, nowMs) {
+    if (!Number.isFinite(updatedAtMs)) return "-";
+
+    var deltaSeconds = Math.max(0, Math.floor((nowMs - updatedAtMs) / 1000));
+    if (deltaSeconds < 60) return "刚刚";
+
+    var totalMinutes = Math.max(1, Math.floor(deltaSeconds / 60));
+    if (totalMinutes < 60) return totalMinutes + "分钟前";
+
+    var totalHours = Math.floor(totalMinutes / 60);
+    if (totalHours < 24) return totalHours + "小时" + (totalMinutes % 60) + "分钟前";
+
+    return Math.floor(totalHours / 24) + "天前";
   }
 
-  function updateCountdownNodes() {
-    var now = Date.now();
-    document.querySelectorAll(".remote-countdown").forEach(function (node) {
-      var baseSeconds = Number(node.dataset.remainingSeconds || 0);
-      var reportTimeMs = parseReportTime(node.dataset.reportTime || "");
-      if (!Number.isFinite(reportTimeMs)) {
-        node.textContent = formatDuration(baseSeconds);
-        return;
-      }
-      var remainingSeconds = Math.max(0, Math.floor((reportTimeMs + baseSeconds * 1000 - now) / 1000));
-      node.textContent = formatDuration(remainingSeconds);
+  function updateRelativeNodes() {
+    var nowMs = Date.now();
+    document.querySelectorAll(".local-relative-time").forEach(function (node) {
+      var updatedAtMs = parseUpdatedAt(node.dataset.updatedAt || "");
+      if (!Number.isFinite(updatedAtMs)) return;
+      node.textContent = formatRelative(updatedAtMs, nowMs);
     });
   }
 
-  updateCountdownNodes();
-  window.setInterval(updateCountdownNodes, 1000);
+  updateRelativeNodes();
+  window.setInterval(updateRelativeNodes, 30000);
 })();
 </script>
 """
@@ -199,7 +200,10 @@ def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
         status_options,
         str(form_values.get("round_status") or ""),
     )
-    update_tip = escape(str(row.get("updated_at_relative") or "-"))
+    update_tip = _render_local_relative_time(
+        row.get("updated_at_relative") or "-",
+        row.get("updated_at"),
+    )
 
     inventory_cell = f"""
 <div class="inline-field">
@@ -629,7 +633,7 @@ def render_index_page(
 </div>
 
 {remote_sections_html}
-{_render_remote_countdown_script() if remote_machine_sections else ""}
+{_render_local_relative_time_script() if rows else ""}
 
 <div class="section">
   <h2>本机数据健康摘要</h2>
