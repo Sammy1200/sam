@@ -18,6 +18,7 @@ from account_db import (
     ROUND_STATUS_UNKNOWN,
     increment_machine_daily_summary_event,
     read_canonical_account_stats_record,
+    read_preferred_canonical_account_stats_record_by_execution_slot,
     save_canonical_account_stats_record,
     update_canonical_account_status_fields,
     update_canonical_account_runtime_fields,
@@ -43,6 +44,44 @@ def _clear_round_counters():
     state.round_purchase_success_count = 0
     state.round_listing_success_count = 0
     state.round_purchase_fail_count = 0
+
+
+def _resolve_current_canonical_target():
+    nickname = (state.current_nickname or "").strip()
+    database_path = str(state.account_db_path or "").strip()
+    table_name = state.account_db_table_name or CANONICAL_ACCOUNT_STATS_TABLE
+    slot_value = state.current_execution_slot
+    record = None
+
+    if database_path:
+        try:
+            if slot_value not in (None, ""):
+                record = read_preferred_canonical_account_stats_record_by_execution_slot(
+                    database_path,
+                    slot_value,
+                    table_name,
+                )
+        except Exception:
+            record = None
+        if record is None and nickname:
+            record = read_canonical_account_stats_record(database_path, nickname, table_name)
+
+    resolved_nickname = str((record.nickname if record is not None else nickname) or "").strip()
+    if record is not None and resolved_nickname and nickname and resolved_nickname != nickname:
+        logger.warning(
+            "[账号数据] 当前执行位与内存昵称不一致，已改用执行位对应账号：执行位=%s 内存昵称=%s 解析昵称=%s",
+            slot_value,
+            nickname,
+            resolved_nickname,
+        )
+    if resolved_nickname:
+        state.current_nickname = resolved_nickname
+    return {
+        "nickname": resolved_nickname,
+        "database_path": database_path,
+        "table_name": table_name,
+        "record": record,
+    }
 
 
 def _schedule_remote_snapshot_event(event_name, synchronous=False):
@@ -100,13 +139,14 @@ def reset_round_runtime_state(reason, reset_purchase_runtime=True, reset_round_c
 
 def _reload_current_account_state_from_canonical():
     """恢复后回灌当前账号关键可回写字段，避免旧内存覆盖网页修改。"""
-    nickname = (state.current_nickname or "").strip()
-    database_path = str(state.account_db_path or "").strip()
-    table_name = state.account_db_table_name or CANONICAL_ACCOUNT_STATS_TABLE
+    target = _resolve_current_canonical_target()
+    nickname = str(target.get("nickname") or "").strip()
+    database_path = str(target.get("database_path") or "").strip()
+    table_name = target.get("table_name") or CANONICAL_ACCOUNT_STATS_TABLE
     if not nickname or not database_path:
         return AccountWriteResult("skipped", "current account context is incomplete")
 
-    record = read_canonical_account_stats_record(database_path, nickname, table_name)
+    record = target.get("record") or read_canonical_account_stats_record(database_path, nickname, table_name)
     if record is None:
         return AccountWriteResult("account_not_found", f"sqlite record not found for nickname: {nickname}")
 
@@ -546,7 +586,9 @@ def persist_pause_snapshot():
     if state.temporary_purchase_mode:
         return AccountWriteResult("skipped", "临时模式不写入 canonical SQLite")
 
-    nickname = (state.current_nickname or "").strip()
+    target = _resolve_current_canonical_target()
+    nickname = str(target.get("nickname") or "").strip()
+    database_path = str(target.get("database_path") or "").strip()
     if state.account_read_status == "account_not_found" or not state.account_record_loaded or not nickname:
         return AccountWriteResult("skipped", f"当前账号未加载 SQLite 记录: {nickname}")
 
@@ -556,8 +598,10 @@ def persist_pause_snapshot():
             "invalid_item_quantity",
             f"运行中道具库存为负数: {runtime_item_quantity}",
         )
+    if not database_path:
+        return AccountWriteResult("skipped", "canonical database path is empty")
 
-    table_name = state.account_db_table_name or CANONICAL_ACCOUNT_STATS_TABLE
+    table_name = target.get("table_name") or CANONICAL_ACCOUNT_STATS_TABLE
     sync_runtime_window_state(
         persist_if_changed=False,
         initialize_if_missing=False,
@@ -567,7 +611,7 @@ def persist_pause_snapshot():
     runtime_seconds = max(0, int(get_current_elapsed()))
     write_time = datetime.now()
     result = update_canonical_account_status_fields(
-        state.account_db_path,
+        database_path,
         nickname,
         ROUND_STATUS_MANUAL_PAUSE,
         table_name=table_name,
@@ -606,10 +650,16 @@ def persist_resume_snapshot():
     if state.account_read_status == "account_not_found" or not state.account_record_loaded or not nickname:
         return AccountWriteResult("skipped", f"当前账号未加载 SQLite 记录: {nickname}")
 
-    table_name = state.account_db_table_name or CANONICAL_ACCOUNT_STATS_TABLE
+    target = _resolve_current_canonical_target()
+    nickname = str(target.get("nickname") or "").strip()
+    database_path = str(target.get("database_path") or "").strip()
+    if not database_path:
+        return AccountWriteResult("skipped", "canonical database path is empty")
+
+    table_name = target.get("table_name") or CANONICAL_ACCOUNT_STATS_TABLE
     write_time = datetime.now()
     result = update_canonical_account_status_fields(
-        state.account_db_path,
+        database_path,
         nickname,
         ROUND_STATUS_RUNNING,
         table_name=table_name,

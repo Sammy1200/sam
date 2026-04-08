@@ -308,11 +308,13 @@ def _build_runtime_window_fields(
     round_status,
     purchase_running_seconds,
     runtime_window_start_time,
+    cooldown_remaining_seconds,
     updated_at,
     last_account_end_time,
     now,
 ):
-    if _is_forced_limit_status(round_status):
+    raw_running_seconds = max(0, _parse_int(purchase_running_seconds))
+    if _is_forced_limit_status(round_status) and max(0, _parse_int(cooldown_remaining_seconds)) > 0:
         return {
             "effective_runtime_window_start_time": None,
             "runtime_window_total_seconds": ACCOUNT_MAX_PURCHASE_SECONDS,
@@ -325,7 +327,6 @@ def _build_runtime_window_fields(
             "runtime_window_has_rolled": False,
         }
 
-    raw_running_seconds = max(0, _parse_int(purchase_running_seconds))
     effective_window_start_time = runtime_window_start_time
     source = "stored"
     rolled = False
@@ -579,12 +580,14 @@ def _row_to_view_record(row, now):
     record["inventory_quantity"] = record["baseline_item_count"]
     record["current_balance_wan"] = _format_balance_for_wan_input(record["current_balance"])
     record["updated_at_relative"] = _format_updated_at_relative(updated_at, now)
-    record.update(_build_cooldown_fields(record["round_status"], last_limit_time, updated_at, now))
+    cooldown_fields = _build_cooldown_fields(record["round_status"], last_limit_time, updated_at, now)
+    record.update(cooldown_fields)
     record.update(
         _build_runtime_window_fields(
             record["round_status"],
             record["purchase_running_seconds"],
             runtime_window_start_time,
+            cooldown_fields.get("cooldown_remaining_seconds"),
             updated_at,
             last_account_end_time,
             now,
