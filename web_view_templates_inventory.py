@@ -44,9 +44,15 @@ def _render_local_relative_time(fallback_text, updated_at):
     display_text = str(fallback_text or "").strip() or "-"
     if not normalized_updated_at:
         return escape(display_text)
+    updated_at_ms = ""
+    try:
+        updated_at_ms = str(int(datetime.fromisoformat(normalized_updated_at.replace(" ", "T")).timestamp() * 1000))
+    except ValueError:
+        updated_at_ms = ""
     return (
         f'<span class="local-relative-time" '
-        f'data-updated-at="{escape(normalized_updated_at, quote=True)}">{escape(display_text)}</span>'
+        f'data-updated-at="{escape(normalized_updated_at, quote=True)}" '
+        f'data-updated-at-ms="{escape(updated_at_ms, quote=True)}">{escape(display_text)}</span>'
     )
 
 
@@ -54,9 +60,18 @@ def _render_local_relative_time_script():
     return """
 <script>
 (function () {
-  function parseUpdatedAt(text) {
-    if (!text) return NaN;
-    return Date.parse(String(text).trim().replace(" ", "T"));
+  function parseUpdatedAtNode(node) {
+    if (!node) return NaN;
+
+    var updatedAtMsText = String((node.dataset && node.dataset.updatedAtMs) || "").trim();
+    if (updatedAtMsText) {
+      var updatedAtMs = Number(updatedAtMsText);
+      if (Number.isFinite(updatedAtMs)) return updatedAtMs;
+    }
+
+    var updatedAtText = String((node.dataset && node.dataset.updatedAt) || "").trim();
+    if (!updatedAtText) return NaN;
+    return Date.parse(updatedAtText.replace(" ", "T"));
   }
 
   function formatRelative(updatedAtMs, nowMs) {
@@ -77,14 +92,22 @@ def _render_local_relative_time_script():
   function updateRelativeNodes() {
     var nowMs = Date.now();
     document.querySelectorAll(".local-relative-time").forEach(function (node) {
-      var updatedAtMs = parseUpdatedAt(node.dataset.updatedAt || "");
+      var updatedAtMs = parseUpdatedAtNode(node);
       if (!Number.isFinite(updatedAtMs)) return;
       node.textContent = formatRelative(updatedAtMs, nowMs);
     });
   }
 
   updateRelativeNodes();
-  window.setInterval(updateRelativeNodes, 30000);
+  if (window.__localRelativeTimeTimerId) {
+    window.clearInterval(window.__localRelativeTimeTimerId);
+  }
+  window.__refreshLocalRelativeTimeNodes = updateRelativeNodes;
+  window.__localRelativeTimeTimerId = window.setInterval(updateRelativeNodes, 1000);
+  window.addEventListener("pageshow", updateRelativeNodes);
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) updateRelativeNodes();
+  });
 })();
 </script>
 """
