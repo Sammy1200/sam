@@ -6,6 +6,7 @@ import json
 import os
 
 import config
+from live_paths import log_resolved_live_path, resolve_local_web_sync_config_path
 
 
 DEFAULT_REPORT_INTERVAL_SECONDS = 30
@@ -130,7 +131,9 @@ def _normalize_expected_remote_machines(raw_value):
 
 
 def load_machine_sync_config():
-    source_path = config.LOCAL_WEB_SYNC_CONFIG_PATH
+    resolved_source_path = resolve_local_web_sync_config_path()
+    source_path = resolved_source_path.path
+    log_resolved_live_path("本机网页同步配置", resolved_source_path)
     if not os.path.exists(source_path):
         raise FileNotFoundError("缺少本机网页同步配置文件 local_web_sync_config.json")
 
@@ -187,6 +190,7 @@ def load_machine_sync_config():
 
 
 def get_machine_sync_runtime_context():
+    resolved_source_path = resolve_local_web_sync_config_path()
     try:
         sync_config = load_machine_sync_config()
     except Exception as exc:
@@ -204,7 +208,7 @@ def get_machine_sync_runtime_context():
             "report_interval_seconds": DEFAULT_REPORT_INTERVAL_SECONDS,
             "execution_slot_overrides": {},
             "expected_remote_machines": [],
-            "source_path": config.LOCAL_WEB_SYNC_CONFIG_PATH,
+            "source_path": resolved_source_path.path,
         }
 
     return {

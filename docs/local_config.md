@@ -4,6 +4,28 @@
 
 ---
 
+# 统一 live 根目录
+
+当前主线新增统一规则：
+- 本机 live 根目录固定为 `C:\py666`
+- 以下真实数据 / 真实配置优先从 `C:\py666` 读取：
+  - `C:\py666\account_stats.sqlite3`
+  - `C:\py666\local_switch_account_config.json`
+  - `C:\py666\local_web_sync_config.json`
+  - `C:\py666\nichen`
+- 若 `C:\py666` 中对应文件或目录缺失，才允许回退到项目根目录旧位置
+- 本次规则只收口“读取优先级”，不自动删除项目根目录旧文件
+
+昵称模板目录的当前优先级固定为：
+- 先读 `C:\py666\nichen`
+- 仅当该目录缺失时，才允许回退到 `local_switch_account_config.json` 中的 `nickname_template_dir`
+- 若两者都不可用，再回退项目根目录默认模板目录
+
+这样做的目标是：
+- 更新代码目录时，只覆盖代码
+- 本机 live 数据、本机 JSON 配置、昵称模板继续留在 `C:\py666`
+- 不再需要每次重新把本机数据库和配置手工合并回项目目录
+
 # 本机换号配置外置
 
 当前主线事实：

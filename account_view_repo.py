@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 
 from machine_sync_config import get_machine_sync_runtime_context
+from live_paths import resolve_account_stats_db_path
 from account_db import (
     AccountStatsRecord,
     CANONICAL_ACCOUNT_STATS_COLUMNS,
@@ -27,7 +28,6 @@ from account_db import (
 from config import (
     ACCOUNT_MAX_PURCHASE_SECONDS,
     ACCOUNT_LIMIT_COOLDOWN_SECONDS,
-    ACCOUNT_STATS_DB_PATH,
     EXECUTION_SLOT_COUNT,
     THREAD6_RUNTIME_DB_PATH,
 )
@@ -674,7 +674,7 @@ def _iter_git_worktree_roots():
 
 def _resolve_account_view_canonical_store(table_name=CANONICAL_ACCOUNT_STATS_TABLE):
     database_path, resolved_table_name = find_canonical_account_stats_store(table_name)
-    expected_database_path = os.path.abspath(ACCOUNT_STATS_DB_PATH)
+    expected_database_path = resolve_account_stats_db_path().path
     current_root = os.path.dirname(os.path.abspath(__file__))
 
     if database_path and os.path.isfile(database_path):

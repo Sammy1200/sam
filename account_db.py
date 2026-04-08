@@ -12,6 +12,7 @@ from config import (
     SCRIPT_DIR,
     THREAD6_RUNTIME_DB_PATH,
 )
+from live_paths import log_resolved_live_path, resolve_account_stats_db_path
 
 
 _DB_SUFFIXES = (".db", ".sqlite", ".sqlite3")
@@ -260,6 +261,17 @@ CANONICAL_DB_HINT_PATHS = (
     os.path.join(SCRIPT_DIR, "account_data.sqlite3"),
     os.path.join(SCRIPT_DIR, "account_data.db"),
 )
+
+
+def _iter_canonical_db_hint_paths():
+    resolved_primary = resolve_account_stats_db_path()
+    seen = set()
+    for db_path in (resolved_primary.path, *CANONICAL_DB_HINT_PATHS):
+        normalized = os.path.abspath(str(db_path or "").strip()) if str(db_path or "").strip() else ""
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        yield normalized
 MACHINE_DAILY_SUMMARY_TABLE = "machine_daily_summaries"
 MACHINE_DAILY_SUMMARY_EVENT_PURCHASE_SUCCESS = "purchase_success"
 MACHINE_DAILY_SUMMARY_EVENT_LISTING_SUCCESS = "listing_success"
@@ -1285,7 +1297,8 @@ def ensure_canonical_account_stats_table(
 def find_canonical_account_stats_store(table_name=CANONICAL_ACCOUNT_STATS_TABLE):
     seen = set()
 
-    for db_path in CANONICAL_DB_HINT_PATHS:
+    resolved_primary = resolve_account_stats_db_path()
+    for db_path in _iter_canonical_db_hint_paths():
         if not db_path or not os.path.isfile(db_path) or db_path in seen:
             continue
         seen.add(db_path)
@@ -1295,6 +1308,8 @@ def find_canonical_account_stats_store(table_name=CANONICAL_ACCOUNT_STATS_TABLE)
             continue
         try:
             if _canonical_table_exists(conn, table_name):
+                if os.path.normcase(db_path) == os.path.normcase(resolved_primary.path):
+                    log_resolved_live_path("SQLite真源", resolved_primary)
                 return db_path, table_name
         finally:
             conn.close()
@@ -1320,7 +1335,9 @@ def ensure_local_canonical_account_stats_store(
     table_name=CANONICAL_ACCOUNT_STATS_TABLE,
 ):
     """确保默认本地账号库存在，并补齐 canonical 表与执行位种子记录。"""
-    database_path = ACCOUNT_STATS_DB_PATH
+    resolved_primary = resolve_account_stats_db_path()
+    database_path = resolved_primary.path
+    log_resolved_live_path("SQLite真源", resolved_primary)
     inserted_seed_records = ensure_canonical_execution_slot_seed_records(
         database_path,
         table_name,

@@ -2,6 +2,11 @@ import json
 import os
 
 import config
+from live_paths import (
+    log_resolved_live_path,
+    resolve_local_switch_account_config_path,
+    resolve_nickname_template_dir,
+)
 
 
 def _read_json(path):
@@ -10,7 +15,9 @@ def _read_json(path):
 
 
 def _load_local_switch_account_config():
-    source_path = config.LOCAL_SWITCH_ACCOUNT_CONFIG_PATH
+    resolved_source_path = resolve_local_switch_account_config_path()
+    source_path = resolved_source_path.path
+    log_resolved_live_path("本机换号配置", resolved_source_path)
 
     if not os.path.exists(source_path):
         raise FileNotFoundError("缺少本机真实换号配置文件 local_switch_account_config.json")
@@ -40,15 +47,8 @@ def _normalize_listing_price(value, field_name):
     return raw_value
 
 
-def _normalize_optional_local_dir(value):
-    raw_value = str(value or "").strip()
-    if not raw_value:
-        return os.path.abspath(config.NICKNAME_TEMPLATE_DIR)
-
-    normalized_path = os.path.expandvars(os.path.expanduser(raw_value))
-    if not os.path.isabs(normalized_path):
-        normalized_path = os.path.join(config.SCRIPT_DIR, normalized_path)
-    return os.path.abspath(normalized_path)
+def _normalize_optional_local_dir(value, source_path):
+    return resolve_nickname_template_dir(value, source_path).path
 
 
 def _normalize_optional_region(value, field_name):
@@ -98,8 +98,10 @@ def load_listing_target_price():
 
 def load_local_nickname_match_config():
     data, source_path = _load_local_switch_account_config()
+    resolved_template_dir = resolve_nickname_template_dir(data.get("nickname_template_dir"), source_path)
+    log_resolved_live_path("昵称模板目录", resolved_template_dir)
     nickname_match_config = {
-        "template_dir": _normalize_optional_local_dir(data.get("nickname_template_dir")),
+        "template_dir": _normalize_optional_local_dir(data.get("nickname_template_dir"), source_path),
         "verify_region": _normalize_optional_region(
             data.get("nickname_verify_region"),
             "nickname_verify_region",
