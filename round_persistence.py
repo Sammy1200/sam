@@ -10,7 +10,6 @@ from account_db import (
     ROUND_STATUS_BALANCE_LOW,
     ROUND_STATUS_LIMITED,
     ROUND_STATUS_MANUAL_PAUSE,
-    ROUND_STATUS_NORMAL_END,
     ROUND_STATUS_RUNTIME_REACHED,
     ROUND_STATUS_RUNNING,
     ROUND_STATUS_UNKNOWN,
@@ -26,6 +25,10 @@ from utils import get_current_elapsed, logger
 
 PLACEHOLDER_BALANCE = "\u83b7\u53d6\u4e2d"
 STATUS_NORMAL_SWITCH = "\u5f53\u524d\u8d26\u53f7\u6b63\u5e38\u5b8c\u6210\u5e76\u5207\u5230\u4e0b\u4e00\u4e2a\u8d26\u53f7"
+
+
+def _is_forced_limit_status(round_status):
+    return round_status in (ROUND_STATUS_LIMITED, ROUND_STATUS_RUNTIME_REACHED)
 
 
 def _schedule_remote_snapshot_event(event_name, synchronous=False):
@@ -333,7 +336,7 @@ def _normalize_round_status(raw_status, is_final):
     if normalized == "\u672a\u77e5\u5f02\u5e38":
         return ROUND_STATUS_UNKNOWN
     if normalized == STATUS_NORMAL_SWITCH:
-        return ROUND_STATUS_NORMAL_END
+        return ROUND_STATUS_MANUAL_PAUSE
     return ROUND_STATUS_UNKNOWN if is_final else ROUND_STATUS_RUNNING
 
 
@@ -369,6 +372,13 @@ def _build_record(is_final, round_status):
         last_account_end_time = datetime.now()
 
     updated_at = datetime.now()
+    if _is_forced_limit_status(effective_round_status):
+        if effective_round_status == ROUND_STATUS_RUNTIME_REACHED and state.account_limit_reached_at is not None:
+            last_limit_time = state.account_limit_reached_at
+        else:
+            last_limit_time = updated_at
+        state.round_purchase_running_seconds = 0.0
+        state.runtime_window_start_time = None
     record = AccountStatsRecord(
         nickname=nickname,
         baseline_item_count=new_baseline_item_count,

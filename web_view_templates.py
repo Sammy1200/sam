@@ -172,7 +172,7 @@ def _build_demo_account_rows():
         {
             "current_execution_slot": 4,
             "nickname": "演示账号-D",
-            "round_status": "正常结束",
+            "round_status": "人工暂停",
             "item_quantity": 26,
             "current_balance_wan": "23",
             "updated_at": "2026-04-03 07:55:00",

@@ -12,7 +12,9 @@ from account_db import (
     AccountStatsRecord,
     CANONICAL_ACCOUNT_STATS_COLUMNS,
     CANONICAL_ACCOUNT_STATS_TABLE,
+    ROUND_STATUS_LIMITED,
     ROUND_STATUS_MANUAL_PAUSE,
+    ROUND_STATUS_RUNTIME_REACHED,
     ROUND_STATUS_VALUES,
     find_canonical_account_stats_store,
     normalize_round_status_value,
@@ -272,15 +274,28 @@ def _format_duration_text(total_seconds):
     return f"{seconds}秒"
 
 
-def _build_cooldown_fields(last_limit_time, now):
-    if last_limit_time is None:
+def _is_forced_limit_status(round_status):
+    return round_status in (ROUND_STATUS_LIMITED, ROUND_STATUS_RUNTIME_REACHED)
+
+
+def _resolve_cooldown_anchor_time(round_status, last_limit_time, updated_at):
+    if last_limit_time is not None:
+        return last_limit_time
+    if _is_forced_limit_status(round_status):
+        return updated_at
+    return None
+
+
+def _build_cooldown_fields(round_status, last_limit_time, updated_at, now):
+    effective_limit_time = _resolve_cooldown_anchor_time(round_status, last_limit_time, updated_at)
+    if effective_limit_time is None:
         return {
             "allow_start_time": None,
             "allow_purchase": True,
             "cooldown_remaining_seconds": 0,
         }
 
-    allow_start_time = last_limit_time + timedelta(seconds=ACCOUNT_LIMIT_COOLDOWN_SECONDS)
+    allow_start_time = effective_limit_time + timedelta(seconds=ACCOUNT_LIMIT_COOLDOWN_SECONDS)
     cooldown_remaining_seconds = max(int((allow_start_time - now).total_seconds()), 0)
     return {
         "allow_start_time": _serialize_datetime(allow_start_time),
@@ -290,12 +305,26 @@ def _build_cooldown_fields(last_limit_time, now):
 
 
 def _build_runtime_window_fields(
+    round_status,
     purchase_running_seconds,
     runtime_window_start_time,
     updated_at,
     last_account_end_time,
     now,
 ):
+    if _is_forced_limit_status(round_status):
+        return {
+            "effective_runtime_window_start_time": None,
+            "runtime_window_total_seconds": ACCOUNT_MAX_PURCHASE_SECONDS,
+            "runtime_window_total_text": _format_duration_text(ACCOUNT_MAX_PURCHASE_SECONDS),
+            "runtime_window_used_seconds": ACCOUNT_MAX_PURCHASE_SECONDS,
+            "runtime_window_used_text": _format_duration_text(ACCOUNT_MAX_PURCHASE_SECONDS),
+            "runtime_window_remaining_seconds": 0,
+            "runtime_window_remaining_text": _format_duration_text(0),
+            "runtime_window_source": "forced_by_status",
+            "runtime_window_has_rolled": False,
+        }
+
     raw_running_seconds = max(0, _parse_int(purchase_running_seconds))
     effective_window_start_time = runtime_window_start_time
     source = "stored"
@@ -550,9 +579,10 @@ def _row_to_view_record(row, now):
     record["inventory_quantity"] = record["baseline_item_count"]
     record["current_balance_wan"] = _format_balance_for_wan_input(record["current_balance"])
     record["updated_at_relative"] = _format_updated_at_relative(updated_at, now)
-    record.update(_build_cooldown_fields(last_limit_time, now))
+    record.update(_build_cooldown_fields(record["round_status"], last_limit_time, updated_at, now))
     record.update(
         _build_runtime_window_fields(
+            record["round_status"],
             record["purchase_running_seconds"],
             runtime_window_start_time,
             updated_at,
@@ -973,6 +1003,10 @@ def update_account_view_record(
         runtime_window_start_time=current_record.runtime_window_start_time,
         round_status=normalized_round_status,
     )
+    if _is_forced_limit_status(normalized_round_status):
+        updated_record.last_limit_time = updated_record.updated_at
+        updated_record.purchase_running_seconds = 0
+        updated_record.runtime_window_start_time = None
 
     try:
         save_canonical_account_stats_record(database_path, updated_record, table_name)

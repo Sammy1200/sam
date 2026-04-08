@@ -152,7 +152,7 @@ def _build_demo_account_rows():
         {
             "current_execution_slot": 4,
             "nickname": "演示账号-D",
-            "round_status": "正常结束",
+            "round_status": "人工暂停",
             "baseline_item_count": 26,
             "inventory_quantity": 26,
             "current_balance_wan": "23",
@@ -500,6 +500,13 @@ def _render_machine_section_title(title, badge_text):
     )
 
 
+def _render_remote_updated_at_cell(row):
+    return _render_local_relative_time(
+        row.get("updated_at_relative") or row.get("updated_at") or "-",
+        row.get("updated_at"),
+    )
+
+
 def _build_remote_account_list_rows_with_edit(section, edit_result=None):
     row_items = []
     for row_index, row in enumerate(section.get("rows") or [], start=1):
@@ -517,7 +524,7 @@ def _build_remote_account_list_rows_with_edit(section, edit_result=None):
                 _render_remote_countdown_cell(row, "runtime_window_remaining_seconds"),
                 _render_remote_countdown_cell(row, "cooldown_remaining_seconds"),
                 status_cell,
-                _format_value(row.get("updated_at")),
+                _render_remote_updated_at_cell(row),
                 action_cell,
             )
         )
@@ -633,7 +640,7 @@ def render_index_page(
 </div>
 
 {remote_sections_html}
-{_render_local_relative_time_script() if rows else ""}
+{_render_local_relative_time_script() if (rows or remote_machine_sections) else ""}
 
 <div class="section">
   <h2>本机数据健康摘要</h2>
