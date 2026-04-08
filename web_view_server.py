@@ -24,6 +24,7 @@ from web_view_templates_inventory import (
     render_index_page,
     render_message_page,
     render_more_info_page,
+    render_public_snapshot_page,
 )
 
 
@@ -57,6 +58,9 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
             if path == "/":
                 self._handle_index()
                 return
+            if path == "/public-snapshot":
+                self._handle_public_snapshot()
+                return
             if path == "/more-info":
                 self._handle_more_info()
                 return
@@ -78,6 +82,9 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         try:
             if path == "/account/update":
                 self._handle_account_update()
+                return
+            if path == "/public-snapshot/refresh":
+                self._handle_public_snapshot_refresh()
                 return
             if path == "/remote-account/update":
                 self._send_read_only_html("当前阶段仍不开放远端写回。")
@@ -137,6 +144,18 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
             edit_result=edit_result,
             refresh_result=None,
             read_only_mode=False,
+        )
+        self._send_html(html)
+
+    def _handle_public_snapshot(self, refresh_result=None):
+        view_rows_result = get_account_view_rows()
+        remote_machine_sections = get_remote_machine_sections(
+            exclude_machine_id=view_rows_result.get("machine_id"),
+        )
+        html = render_public_snapshot_page(
+            view_rows_result,
+            remote_machine_sections=remote_machine_sections,
+            refresh_result=refresh_result,
         )
         self._send_html(html)
 
@@ -308,6 +327,48 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
             read_only_mode=False,
         )
         self._send_html(html, status_code=status_code)
+
+    def _handle_public_snapshot_refresh(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = 0
+
+        raw_body = self.rfile.read(content_length) if content_length > 0 else b""
+        form = parse_qs(raw_body.decode("utf-8"), keep_blank_values=True)
+        target_scope = ((form.get("target_scope") or [""])[0] or "").strip().lower()
+        target_machine_id = ((form.get("target_machine_id") or [""])[0] or "").strip()
+
+        if target_scope == "local":
+            refresh_result = {
+                "status": "success",
+                "scope": "public_local_refresh",
+                "message": "已刷新 1号快照显示。",
+            }
+            self._handle_public_snapshot(refresh_result=refresh_result)
+            return
+
+        if target_scope == "remote":
+            refresh_result = refresh_remote_machine_snapshot(machine_id=target_machine_id)
+            refresh_result["scope"] = "remote_refresh"
+            refresh_result["target_machine_id"] = target_machine_id
+            status = str(refresh_result.get("status") or "").strip()
+            if status == "success":
+                self._handle_public_snapshot(refresh_result=refresh_result)
+                return
+            view_rows_result = get_account_view_rows()
+            remote_machine_sections = get_remote_machine_sections(
+                exclude_machine_id=view_rows_result.get("machine_id"),
+            )
+            html = render_public_snapshot_page(
+                view_rows_result,
+                remote_machine_sections=remote_machine_sections,
+                refresh_result=refresh_result,
+            )
+            self._send_html(html, status_code=403 if status == "forbidden" else 400)
+            return
+
+        self._send_read_only_html("公网快照页刷新请求缺少合法目标。", status_code=400)
 
     def _handle_remote_sync_report(self):
         try:

@@ -444,6 +444,122 @@ def _render_remote_machine_section(section, refresh_result=None):
 """
 
 
+def _build_public_local_snapshot_rows(rows):
+    row_items = []
+    for row in rows or []:
+        row_items.append(
+            (
+                _format_value(row.get("current_execution_slot")),
+                _format_value(row.get("nickname")),
+                _format_value(row.get("baseline_item_count") or row.get("inventory_quantity")),
+                _format_balance_wan_display(row.get("current_balance_wan")),
+                _format_runtime_remaining_text(row.get("runtime_window_remaining_text")),
+                _format_cooldown_remaining_time(row.get("cooldown_remaining_seconds")),
+                _format_value(row.get("round_status")),
+                _render_local_relative_time(
+                    row.get("updated_at_relative") or "-",
+                    row.get("updated_at"),
+                ),
+            )
+        )
+    return row_items
+
+
+def _render_public_local_refresh_result(refresh_result):
+    if not refresh_result or str(refresh_result.get("scope") or "").strip() != "public_local_refresh":
+        return ""
+    status = str(refresh_result.get("status") or "").strip()
+    css_class = "flash-success" if status == "success" else "flash-error"
+    message = escape(str(refresh_result.get("message") or ""))
+    return f'<div class="{css_class}"><strong>刷新结果：</strong>{message}</div>'
+
+
+def _render_public_local_refresh_toolbar(machine_display_name, refresh_result=None):
+    label = str(machine_display_name or "1号电脑").strip() or "1号电脑"
+    return f"""
+<div class="meta">
+  <form method="post" action="/public-snapshot/refresh" style="display:inline-block; margin-right:12px;">
+    <input type="hidden" name="target_scope" value="local">
+    <button type="submit" onclick="this.disabled=true;this.textContent='刷新中...';this.form.submit();">刷新 1号快照</button>
+  </form>
+  当前卡片展示 {escape(label)} 的只读快照视图。
+</div>
+{_render_public_local_refresh_result(refresh_result)}
+"""
+
+
+def _render_public_remote_refresh_toolbar(section, refresh_result=None):
+    machine_id = str(section.get("machine_id") or "").strip()
+    machine_label = str(section.get("machine_display_name") or machine_id or "2号电脑").strip() or "2号电脑"
+    button_attrs = (
+        ' type="submit"'
+        ' onclick="this.disabled=true;this.textContent=\'刷新中...\';this.form.submit();"'
+    )
+    if not machine_id:
+        button_attrs += " disabled"
+    return f"""
+<div class="meta">
+  <form method="post" action="/public-snapshot/refresh" style="display:inline-block; margin-right:12px;">
+    <input type="hidden" name="target_scope" value="remote">
+    <input type="hidden" name="target_machine_id" value="{escape(machine_id, quote=True)}">
+    <button{button_attrs}>刷新 2号快照</button>
+  </form>
+  当前卡片展示 {escape(machine_label)} 的只读快照视图。
+</div>
+{_render_remote_refresh_result(section, refresh_result)}
+"""
+
+
+def render_public_snapshot_page(view_rows_result, remote_machine_sections=None, refresh_result=None):
+    rows = list(view_rows_result.get("rows") or [])
+    local_machine_display_name = view_rows_result.get("machine_display_name") or "1号电脑"
+    local_summary_html = _render_machine_daily_summary(view_rows_result.get("machine_daily_summaries"))
+    local_row_items = _build_public_local_snapshot_rows(rows)
+
+    remote_machine_sections = list(remote_machine_sections or [])
+    remote_section = remote_machine_sections[0] if remote_machine_sections else {
+        "machine_id": "",
+        "machine_display_name": "2号电脑",
+        "rows": [],
+        "machine_daily_summaries": [],
+        "message": "暂无 2号快照数据。",
+        "last_report_time": "",
+    }
+    remote_row_items = _build_remote_account_list_rows(remote_section)
+    remote_summary_html = _render_machine_daily_summary(remote_section.get("machine_daily_summaries"))
+    remote_empty_html = (
+        f'<p class="muted-text">{escape(str(remote_section.get("message") or "暂无 2号快照数据。"))}</p>'
+        if not (remote_section.get("rows") or [])
+        else '<p class="muted-text">该卡片只读展示 2号最新快照，不开放修改或远端写回。</p>'
+    )
+
+    body_html = f"""
+<h1>公网快照页</h1>
+<div class="readonly-notice">
+  <strong>当前页面仅允许查看与刷新快照：</strong>
+  不显示任何修改控件，不显示编辑表单，不开放本机修改、远端修改或远端写回。
+</div>
+
+<div class="section">
+  {_render_machine_section_title(local_machine_display_name, "1号快照 / 只读")}
+  {_render_public_local_refresh_toolbar(local_machine_display_name, refresh_result)}
+  {local_summary_html}
+  {_render_table(("执行位", "昵称", "道具库存", "余额（万）", "可运行时间", "冷却剩余时间", "账号状态", "更新时间"), local_row_items)}
+</div>
+
+<div class="section">
+  {_render_machine_section_title(remote_section.get("machine_display_name") or "2号电脑", "2号快照 / 只读")}
+  {_render_public_remote_refresh_toolbar(remote_section, refresh_result)}
+  {remote_summary_html}
+  {remote_empty_html}
+  {_render_table(("昵称", "道具库存", "余额（万）", "可运行时间", "冷却剩余时间", "账号状态", "更新时间"), remote_row_items)}
+</div>
+
+{_render_local_relative_time_script() if (rows or remote_section.get("rows")) else ""}
+"""
+    return _base_page("公网快照页", body_html)
+
+
 def render_index_page(
     view_rows_result,
     runtime_result,
