@@ -281,8 +281,6 @@ def _is_forced_limit_status(round_status):
 def _resolve_cooldown_anchor_time(round_status, last_limit_time, updated_at):
     if last_limit_time is not None:
         return last_limit_time
-    if _is_forced_limit_status(round_status):
-        return updated_at
     return None
 
 
@@ -1004,7 +1002,6 @@ def update_account_view_record(
         round_status=normalized_round_status,
     )
     if _is_forced_limit_status(normalized_round_status):
-        updated_record.last_limit_time = updated_record.updated_at
         updated_record.purchase_running_seconds = 0
         updated_record.runtime_window_start_time = None
 
