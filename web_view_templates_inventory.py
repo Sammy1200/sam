@@ -1,4 +1,5 @@
 """库存语义版网页模板。"""
+from datetime import datetime, timedelta
 from html import escape
 
 import web_view_templates as base_templates
@@ -87,6 +88,42 @@ def _render_local_relative_time_script():
 })();
 </script>
 """
+
+
+def _build_machine_daily_summary_rows(machine_daily_summaries):
+    summary_by_date = {
+        str(item.get("stat_date") or "").strip(): item
+        for item in (machine_daily_summaries or [])
+        if str(item.get("stat_date") or "").strip()
+    }
+    now = datetime.now()
+    target_dates = (
+        ("今日", now.strftime("%Y-%m-%d")),
+        ("昨日", (now - timedelta(days=1)).strftime("%Y-%m-%d")),
+    )
+    rows = []
+    for label, stat_date in target_dates:
+        item = summary_by_date.get(stat_date) or {}
+        purchase_success = int(item.get("total_purchase_success_count") or 0)
+        listing_success = int(item.get("total_listing_success_count") or 0)
+        purchase_fail = int(item.get("total_purchase_fail_count") or 0)
+        rows.append(
+            (
+                label,
+                _format_value(purchase_success - listing_success),
+                _format_value(purchase_success),
+                _format_value(listing_success),
+                _format_value(purchase_fail),
+            )
+        )
+    return rows
+
+
+def _render_machine_daily_summary(machine_daily_summaries):
+    return _render_table(
+        ("汇总周期", "总道具变化", "总抢购成功", "总上架成功", "总抢购失败"),
+        _build_machine_daily_summary_rows(machine_daily_summaries),
+    )
 
 
 def _render_read_only_notice():
@@ -534,6 +571,7 @@ def _build_remote_account_list_rows_with_edit(section, edit_result=None):
 def _render_remote_machine_section(section, edit_result=None, refresh_result=None):
     rows = section.get("rows") or []
     row_items = _build_remote_account_list_rows_with_edit(section, edit_result=edit_result)
+    summary_html = _render_machine_daily_summary(section.get("machine_daily_summaries"))
     empty_html = ""
     if not rows:
         empty_html = f'<p class="muted-text">{escape(str(section.get("message") or "暂无远端镜像数据。"))}</p>'
@@ -549,6 +587,7 @@ def _render_remote_machine_section(section, edit_result=None, refresh_result=Non
 <div class="section">
   {_render_machine_section_title(section.get("machine_display_name") or section.get("machine_id") or "远端机器", "远端镜像 / 最小写回")}
   {_render_remote_refresh_toolbar(section, refresh_result)}
+  {summary_html}
   {empty_html}
   {_render_table(("昵称", "道具库存", "余额（万）", "可运行时间", "冷却剩余时间", "账号状态", "最后更新时间", "远端提交"), row_items)}
 </div>
@@ -615,6 +654,7 @@ def render_index_page(
     )
     local_machine_display_name = view_rows_result.get("machine_display_name") or "本机"
     local_role_label = view_rows_result.get("data_role_label") or "本机真实数据"
+    local_summary_html = _render_machine_daily_summary(view_rows_result.get("machine_daily_summaries"))
     remote_machine_sections = list(remote_machine_sections or [])
     remote_sections_html = "".join(
         _render_remote_machine_section(section, edit_result=edit_result, refresh_result=refresh_result)
@@ -635,6 +675,7 @@ def render_index_page(
 <div class="section">
   {_render_machine_section_title(local_machine_display_name, local_role_label)}
   <p class="muted-text">此板块对应本机 SQLite canonical 主表，是当前页面唯一可编辑的真实数据区。</p>
+  {local_summary_html}
   {demo_notice_html}
   {_render_table(("执行位", "昵称", "道具库存", "余额（万）", "可运行时间", "账号状态", "允许抢购", "冷却剩余时间", "详情保存"), row_items, column_classes=account_table_column_classes, table_class="account-table")}
 </div>

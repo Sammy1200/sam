@@ -38,6 +38,8 @@ from round_persistence import (
     ensure_active_runtime_window_state,
     persist_account_limit_reached_if_needed,
     persist_minimal_item_balance_sync,
+    record_daily_purchase_fail,
+    record_daily_purchase_success,
 )
 from switch import is_at_gumu, navigate_to_trade
 from utils import (
@@ -258,6 +260,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                             state.success_count += 1
                             state.round_purchase_success_count += 1
                             state.baseline_item_count += 1
+                            record_daily_purchase_success()
                             purchase_succeeded = True
                             last_success_time = last_idle_push_time = time.time()
                             if state.overlay_root:
@@ -270,6 +273,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                         else:
                             state.fail_count += 1
                             state.round_purchase_fail_count += 1
+                            record_daily_purchase_fail()
                             if state.overlay_root:
                                 state.overlay_root.after(0, update_score_text)
                             ui_print(f"抢购失败，识别价格：{price}", save_log=True, show_console=False)

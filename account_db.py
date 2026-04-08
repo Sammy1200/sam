@@ -260,6 +260,15 @@ CANONICAL_DB_HINT_PATHS = (
     os.path.join(SCRIPT_DIR, "account_data.sqlite3"),
     os.path.join(SCRIPT_DIR, "account_data.db"),
 )
+MACHINE_DAILY_SUMMARY_TABLE = "machine_daily_summaries"
+MACHINE_DAILY_SUMMARY_EVENT_PURCHASE_SUCCESS = "purchase_success"
+MACHINE_DAILY_SUMMARY_EVENT_LISTING_SUCCESS = "listing_success"
+MACHINE_DAILY_SUMMARY_EVENT_PURCHASE_FAIL = "purchase_fail"
+MACHINE_DAILY_SUMMARY_EVENT_VALUES = (
+    MACHINE_DAILY_SUMMARY_EVENT_PURCHASE_SUCCESS,
+    MACHINE_DAILY_SUMMARY_EVENT_LISTING_SUCCESS,
+    MACHINE_DAILY_SUMMARY_EVENT_PURCHASE_FAIL,
+)
 
 
 @dataclass
@@ -365,6 +374,21 @@ def build_canonical_account_stats_table_sql(table_name=CANONICAL_ACCOUNT_STATS_T
             runtime_window_start_time TEXT,
             round_status TEXT NOT NULL DEFAULT '{ROUND_STATUS_MANUAL_PAUSE}'
                 CHECK (round_status IN ({escaped_status_values}))
+        )
+    """
+
+
+def build_machine_daily_summary_table_sql(table_name=MACHINE_DAILY_SUMMARY_TABLE):
+    return f"""
+        CREATE TABLE IF NOT EXISTS {_quote_identifier(table_name)} (
+            machine_id TEXT NOT NULL,
+            machine_display_name TEXT NOT NULL DEFAULT '',
+            stat_date TEXT NOT NULL,
+            total_purchase_success_count INTEGER NOT NULL DEFAULT 0,
+            total_listing_success_count INTEGER NOT NULL DEFAULT 0,
+            total_purchase_fail_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT,
+            PRIMARY KEY (machine_id, stat_date)
         )
     """
 
@@ -1304,6 +1328,177 @@ def ensure_local_canonical_account_stats_store(
     return database_path, table_name, inserted_seed_records
 
 
+def _normalize_machine_daily_summary_date(value):
+    if value is None:
+        return datetime.now().strftime("%Y-%m-%d")
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d")
+
+    parsed = _parse_datetime(value)
+    if parsed is not None:
+        return parsed.strftime("%Y-%m-%d")
+
+    text = str(value or "").strip()
+    if len(text) >= 10:
+        return text[:10]
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def ensure_machine_daily_summary_table(
+    database_path,
+    table_name=MACHINE_DAILY_SUMMARY_TABLE,
+):
+    if not database_path:
+        raise ValueError("database_path is empty")
+
+    directory = os.path.dirname(database_path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    conn = sqlite3.connect(database_path)
+    try:
+        conn.execute(build_machine_daily_summary_table_sql(table_name))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def increment_machine_daily_summary_event(
+    database_path,
+    machine_id,
+    machine_display_name,
+    event_name,
+    occurred_at=None,
+    table_name=MACHINE_DAILY_SUMMARY_TABLE,
+):
+    normalized_machine_id = str(machine_id or "").strip()
+    if not normalized_machine_id:
+        return AccountWriteResult("machine_id_missing", "machine_id is empty")
+    if event_name not in MACHINE_DAILY_SUMMARY_EVENT_VALUES:
+        return AccountWriteResult("invalid_event_name", f"unsupported event name: {event_name}")
+
+    normalized_machine_display_name = str(machine_display_name or "").strip() or normalized_machine_id
+    occurred_at_value = _parse_datetime(occurred_at) or datetime.now()
+    stat_date = _normalize_machine_daily_summary_date(occurred_at_value)
+    updated_at = _serialize_datetime(occurred_at_value)
+    purchase_success_count = 1 if event_name == MACHINE_DAILY_SUMMARY_EVENT_PURCHASE_SUCCESS else 0
+    listing_success_count = 1 if event_name == MACHINE_DAILY_SUMMARY_EVENT_LISTING_SUCCESS else 0
+    purchase_fail_count = 1 if event_name == MACHINE_DAILY_SUMMARY_EVENT_PURCHASE_FAIL else 0
+
+    try:
+        conn = sqlite3.connect(database_path)
+    except sqlite3.Error as exc:
+        return AccountWriteResult("db_unavailable", str(exc))
+
+    try:
+        conn.execute(build_machine_daily_summary_table_sql(table_name))
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            f"""
+            INSERT INTO {_quote_identifier(table_name)} (
+                machine_id,
+                machine_display_name,
+                stat_date,
+                total_purchase_success_count,
+                total_listing_success_count,
+                total_purchase_fail_count,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(machine_id, stat_date) DO UPDATE SET
+                machine_display_name = excluded.machine_display_name,
+                total_purchase_success_count = total_purchase_success_count + excluded.total_purchase_success_count,
+                total_listing_success_count = total_listing_success_count + excluded.total_listing_success_count,
+                total_purchase_fail_count = total_purchase_fail_count + excluded.total_purchase_fail_count,
+                updated_at = excluded.updated_at
+            """,
+            (
+                normalized_machine_id,
+                normalized_machine_display_name,
+                stat_date,
+                purchase_success_count,
+                listing_success_count,
+                purchase_fail_count,
+                updated_at,
+            ),
+        )
+        conn.commit()
+        return AccountWriteResult("success", "")
+    except sqlite3.Error as exc:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return AccountWriteResult("write_failed", str(exc))
+    finally:
+        conn.close()
+
+
+def read_machine_daily_summary_records(
+    database_path,
+    machine_id,
+    stat_dates=None,
+    table_name=MACHINE_DAILY_SUMMARY_TABLE,
+):
+    normalized_machine_id = str(machine_id or "").strip()
+    if not normalized_machine_id or not database_path or not os.path.isfile(database_path):
+        return []
+
+    normalized_dates = [
+        _normalize_machine_daily_summary_date(item)
+        for item in (stat_dates or [])
+        if str(item or "").strip()
+    ]
+    if not normalized_dates:
+        now = datetime.now()
+        normalized_dates = [
+            _normalize_machine_daily_summary_date(now),
+            _normalize_machine_daily_summary_date(now.timestamp() - 86400),
+        ]
+    normalized_dates = list(dict.fromkeys(normalized_dates))
+
+    try:
+        conn = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return []
+
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _canonical_table_exists(conn, table_name):
+            return []
+        placeholders = ", ".join("?" for _ in normalized_dates)
+        rows = conn.execute(
+            f"""
+            SELECT
+                machine_id,
+                machine_display_name,
+                stat_date,
+                total_purchase_success_count,
+                total_listing_success_count,
+                total_purchase_fail_count,
+                updated_at
+            FROM {_quote_identifier(table_name)}
+            WHERE machine_id = ?
+              AND stat_date IN ({placeholders})
+            ORDER BY stat_date DESC
+            """,
+            tuple([normalized_machine_id] + normalized_dates),
+        ).fetchall()
+        return [
+            {
+                "machine_id": str(row["machine_id"] or "").strip(),
+                "machine_display_name": str(row["machine_display_name"] or "").strip(),
+                "stat_date": str(row["stat_date"] or "").strip(),
+                "total_purchase_success_count": _parse_int(row["total_purchase_success_count"]),
+                "total_listing_success_count": _parse_int(row["total_listing_success_count"]),
+                "total_purchase_fail_count": _parse_int(row["total_purchase_fail_count"]),
+                "updated_at": _serialize_datetime(_parse_datetime(row["updated_at"])),
+            }
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
 def read_canonical_account_stats_record(
     database_path,
     nickname,
@@ -1717,6 +1912,9 @@ def update_canonical_account_status_fields(
     current_balance=None,
     purchase_running_seconds=None,
     runtime_window_start_time=None,
+    round_purchase_success_count=None,
+    round_listing_success_count=None,
+    round_purchase_fail_count=None,
 ):
     """按昵称最小更新状态相关字段，可选带当前状态前置条件。"""
     normalized_nickname = str(nickname or "").strip()
@@ -1757,6 +1955,36 @@ def update_canonical_account_status_fields(
     normalized_window_start_time = None
     if runtime_window_start_time is not None:
         normalized_window_start_time = _serialize_datetime(runtime_window_start_time)
+
+    normalized_round_purchase_success_count = None
+    if round_purchase_success_count is not None:
+        try:
+            normalized_round_purchase_success_count = max(0, int(round_purchase_success_count))
+        except (TypeError, ValueError):
+            return AccountWriteResult(
+                "invalid_round_purchase_success_count",
+                f"invalid round_purchase_success_count: {round_purchase_success_count}",
+            )
+
+    normalized_round_listing_success_count = None
+    if round_listing_success_count is not None:
+        try:
+            normalized_round_listing_success_count = max(0, int(round_listing_success_count))
+        except (TypeError, ValueError):
+            return AccountWriteResult(
+                "invalid_round_listing_success_count",
+                f"invalid round_listing_success_count: {round_listing_success_count}",
+            )
+
+    normalized_round_purchase_fail_count = None
+    if round_purchase_fail_count is not None:
+        try:
+            normalized_round_purchase_fail_count = max(0, int(round_purchase_fail_count))
+        except (TypeError, ValueError):
+            return AccountWriteResult(
+                "invalid_round_purchase_fail_count",
+                f"invalid round_purchase_fail_count: {round_purchase_fail_count}",
+            )
 
     try:
         conn = sqlite3.connect(database_path)
@@ -1805,6 +2033,15 @@ def update_canonical_account_status_fields(
         if runtime_window_start_time is not None:
             set_clauses.append(f"{_quote_identifier('runtime_window_start_time')} = ?")
             params.append(normalized_window_start_time)
+        if normalized_round_purchase_success_count is not None:
+            set_clauses.append(f"{_quote_identifier('round_purchase_success_count')} = ?")
+            params.append(normalized_round_purchase_success_count)
+        if normalized_round_listing_success_count is not None:
+            set_clauses.append(f"{_quote_identifier('round_listing_success_count')} = ?")
+            params.append(normalized_round_listing_success_count)
+        if normalized_round_purchase_fail_count is not None:
+            set_clauses.append(f"{_quote_identifier('round_purchase_fail_count')} = ?")
+            params.append(normalized_round_purchase_fail_count)
         params.append(normalized_nickname)
 
         conn.execute("BEGIN IMMEDIATE")

@@ -657,6 +657,9 @@ def _load_current_account_context():
     state.updated_at = record.updated_at
     if record.current_execution_slot is not None:
         state.current_execution_slot = record.current_execution_slot
+    state.success_count = record.round_purchase_success_count
+    state.total_listed_count = record.round_listing_success_count
+    state.fail_count = record.round_purchase_fail_count
     state.round_purchase_success_count = record.round_purchase_success_count
     state.round_listing_success_count = record.round_listing_success_count
     state.round_purchase_fail_count = record.round_purchase_fail_count
@@ -765,7 +768,7 @@ def _run_pre_listing_flow(
     if not _load_current_account_context():
         return False
     if reset_runtime_before_listing:
-        reset_round_runtime_state(reset_reason, reset_purchase_runtime=False)
+        reset_round_runtime_state(reset_reason, reset_purchase_runtime=False, reset_round_counters=False)
         reset_purchase_counters(purchase_reset_reason)
     ui_print("开始执行预上架流程...")
     execute_listing_routine(camera)
@@ -783,7 +786,7 @@ def _run_direct_account_flow(camera):
             reset_reason="冷却等待前预上架清空当前账号运行态",
             purchase_reset_reason="冷却等待前开始当前账号流程",
         )
-    reset_round_runtime_state("已加载当前账号", reset_purchase_runtime=False)
+    reset_round_runtime_state("已加载当前账号", reset_purchase_runtime=False, reset_round_counters=False)
     return _wait_until_account_ready()
 
 

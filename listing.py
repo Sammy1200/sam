@@ -27,6 +27,7 @@ from config import (
 from overlay import move_overlay, ui_print, update_score_text
 from round_persistence import (
     persist_minimal_item_balance_sync,
+    record_daily_listing_success,
     refresh_account_limit_reached_at,
 )
 from utils import (
@@ -145,6 +146,7 @@ def execute_listing_routine(camera_obj, is_periodic=False):
             except Exception:
                 pass
 
+        record_daily_listing_success()
         sync_result = persist_minimal_item_balance_sync()
         if sync_result.status not in ("success", "skipped"):
             ui_print(f"实时库存同步失败：{sync_result.reason}", save_log=True)

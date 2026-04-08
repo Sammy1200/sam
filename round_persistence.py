@@ -7,12 +7,16 @@ from account_db import (
     AccountStatsRecord,
     AccountWriteResult,
     CANONICAL_ACCOUNT_STATS_TABLE,
+    MACHINE_DAILY_SUMMARY_EVENT_LISTING_SUCCESS,
+    MACHINE_DAILY_SUMMARY_EVENT_PURCHASE_FAIL,
+    MACHINE_DAILY_SUMMARY_EVENT_PURCHASE_SUCCESS,
     ROUND_STATUS_BALANCE_LOW,
     ROUND_STATUS_LIMITED,
     ROUND_STATUS_MANUAL_PAUSE,
     ROUND_STATUS_RUNTIME_REACHED,
     ROUND_STATUS_RUNNING,
     ROUND_STATUS_UNKNOWN,
+    increment_machine_daily_summary_event,
     read_canonical_account_stats_record,
     save_canonical_account_stats_record,
     update_canonical_account_status_fields,
@@ -20,6 +24,7 @@ from account_db import (
     update_canonical_account_item_balance_fields,
 )
 from config import ACCOUNT_LIMIT_COOLDOWN_SECONDS, ACCOUNT_MAX_PURCHASE_SECONDS
+from machine_sync_config import get_machine_sync_runtime_context
 from utils import get_current_elapsed, logger
 
 
@@ -29,6 +34,15 @@ STATUS_NORMAL_SWITCH = "\u5f53\u524d\u8d26\u53f7\u6b63\u5e38\u5b8c\u6210\u5e76\u
 
 def _is_forced_limit_status(round_status):
     return round_status in (ROUND_STATUS_LIMITED, ROUND_STATUS_RUNTIME_REACHED)
+
+
+def _clear_round_counters():
+    state.success_count = 0
+    state.fail_count = 0
+    state.total_listed_count = 0
+    state.round_purchase_success_count = 0
+    state.round_listing_success_count = 0
+    state.round_purchase_fail_count = 0
 
 
 def _schedule_remote_snapshot_event(event_name, synchronous=False):
@@ -57,15 +71,11 @@ def _schedule_remote_snapshot_event(event_name, synchronous=False):
         logger.warning("[网页同步] 事件触发最小快照失败：event=%s reason=%s", event_name, result.get("message"))
 
 
-def reset_round_runtime_state(reason, reset_purchase_runtime=True):
+def reset_round_runtime_state(reason, reset_purchase_runtime=True, reset_round_counters=True):
     """Reset per-round runtime stats after mandatory pre-listing."""
-    state.success_count = 0
-    state.fail_count = 0
-    state.total_listed_count = 0
-    state.round_purchase_success_count = 0
-    state.round_listing_success_count = 0
-    state.round_purchase_fail_count = 0
-    state.round_current_balance = ""
+    if reset_round_counters:
+        _clear_round_counters()
+        state.round_current_balance = ""
     state.listing_scan_miss_count = 0
     state.listing_periodic_disabled = False
     state.listing_periodic_disabled_reason = ""
@@ -107,6 +117,9 @@ def _reload_current_account_state_from_canonical():
     state.updated_at = record.updated_at
     if record.current_execution_slot is not None:
         state.current_execution_slot = record.current_execution_slot
+    state.success_count = int(record.round_purchase_success_count)
+    state.total_listed_count = int(record.round_listing_success_count)
+    state.fail_count = int(record.round_purchase_fail_count)
     state.round_purchase_success_count = int(record.round_purchase_success_count)
     state.round_listing_success_count = int(record.round_listing_success_count)
     state.round_purchase_fail_count = int(record.round_purchase_fail_count)
@@ -136,6 +149,46 @@ def _build_runtime_window_result(changed, actions, persist_result=None):
         "actions": actions,
         "persist_result": persist_result,
     }
+
+
+def _record_machine_daily_summary_event(event_name, occurred_at=None):
+    if state.temporary_purchase_mode:
+        return AccountWriteResult("skipped", "temporary mode does not write machine daily summary")
+    if state.account_read_status == "account_not_found" or not state.account_record_loaded:
+        return AccountWriteResult("skipped", "current account record is unavailable")
+    if not state.account_db_path:
+        return AccountWriteResult("skipped", "canonical database path is empty")
+
+    runtime_context = get_machine_sync_runtime_context()
+    machine_id = str(runtime_context.get("machine_id") or "local").strip() or "local"
+    machine_display_name = str(runtime_context.get("machine_display_name") or "本机").strip() or machine_id
+    result = increment_machine_daily_summary_event(
+        state.account_db_path,
+        machine_id,
+        machine_display_name,
+        event_name,
+        occurred_at=occurred_at,
+    )
+    if result.status not in ("success", "skipped"):
+        logger.warning(
+            "[日报汇总] 事件入账失败：event=%s nickname=%s reason=%s",
+            event_name,
+            state.current_nickname,
+            result.reason,
+        )
+    return result
+
+
+def record_daily_purchase_success():
+    return _record_machine_daily_summary_event(MACHINE_DAILY_SUMMARY_EVENT_PURCHASE_SUCCESS)
+
+
+def record_daily_listing_success():
+    return _record_machine_daily_summary_event(MACHINE_DAILY_SUMMARY_EVENT_LISTING_SUCCESS)
+
+
+def record_daily_purchase_fail():
+    return _record_machine_daily_summary_event(MACHINE_DAILY_SUMMARY_EVENT_PURCHASE_FAIL)
 
 
 def _persist_runtime_window_fields(reason, update_last_limit_time=False, last_limit_time=None):
@@ -372,6 +425,7 @@ def _build_record(is_final, round_status):
         last_account_end_time = datetime.now()
 
     updated_at = datetime.now()
+    reset_round_counters_after_finalize = is_final and _is_forced_limit_status(effective_round_status)
     if _is_forced_limit_status(effective_round_status):
         if effective_round_status == ROUND_STATUS_RUNTIME_REACHED and state.account_limit_reached_at is not None:
             last_limit_time = state.account_limit_reached_at
@@ -386,9 +440,9 @@ def _build_record(is_final, round_status):
         last_account_end_time=last_account_end_time,
         updated_at=updated_at,
         current_execution_slot=state.current_execution_slot,
-        round_purchase_success_count=int(state.round_purchase_success_count),
-        round_listing_success_count=int(state.round_listing_success_count),
-        round_purchase_fail_count=int(state.round_purchase_fail_count),
+        round_purchase_success_count=0 if reset_round_counters_after_finalize else int(state.round_purchase_success_count),
+        round_listing_success_count=0 if reset_round_counters_after_finalize else int(state.round_listing_success_count),
+        round_purchase_fail_count=0 if reset_round_counters_after_finalize else int(state.round_purchase_fail_count),
         current_balance=_get_effective_balance(),
         purchase_running_seconds=int(state.round_purchase_running_seconds),
         runtime_window_start_time=state.runtime_window_start_time,
@@ -510,6 +564,7 @@ def persist_pause_snapshot():
         allow_legacy_fallback=False,
     )
     effective_balance = _get_effective_balance()
+    runtime_seconds = max(0, int(get_current_elapsed()))
     write_time = datetime.now()
     result = update_canonical_account_status_fields(
         state.account_db_path,
@@ -519,10 +574,15 @@ def persist_pause_snapshot():
         updated_at=write_time,
         item_quantity=runtime_item_quantity,
         current_balance=effective_balance or None,
+        purchase_running_seconds=runtime_seconds,
+        runtime_window_start_time=state.runtime_window_start_time,
+        round_purchase_success_count=state.round_purchase_success_count,
+        round_listing_success_count=state.round_listing_success_count,
+        round_purchase_fail_count=state.round_purchase_fail_count,
     )
     if result.status == "success":
         state.updated_at = write_time
-        state.round_purchase_running_seconds = float(max(0, int(get_current_elapsed())))
+        state.round_purchase_running_seconds = float(runtime_seconds)
         state.round_status = ROUND_STATUS_MANUAL_PAUSE
         _schedule_remote_snapshot_event("F12暂停时")
         logger.info(
@@ -624,6 +684,9 @@ def persist_final_round_snapshot(default_status):
     state.account_round_finalized = True
     state.account_round_writeback_failed = False
     state.account_round_writeback_error = ""
+    if _is_forced_limit_status(record.round_status):
+        _clear_round_counters()
+        state.round_purchase_running_seconds = 0.0
     _schedule_remote_snapshot_event("脚本正常收尾/退出时", synchronous=True)
     print(
         "[account-data] final write ok: "

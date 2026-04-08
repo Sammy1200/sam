@@ -18,6 +18,7 @@ from machine_sync_config import get_machine_sync_runtime_context
 
 REMOTE_SYNC_SOURCE_TYPE = "remote_sync_mirror"
 REMOTE_SYNC_TABLE = "remote_account_snapshots"
+REMOTE_SYNC_DAILY_SUMMARY_TABLE = "remote_machine_daily_summaries"
 REMOTE_WRITEBACK_ALLOWED_FIELDS = (
     "baseline_item_count",
     "round_status",
@@ -150,6 +151,33 @@ def _ensure_remote_sync_table(conn):
         )
 
 
+def _remote_table_exists(conn, table_name):
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _ensure_remote_daily_summary_table(conn):
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {REMOTE_SYNC_DAILY_SUMMARY_TABLE} (
+            machine_id TEXT NOT NULL,
+            machine_display_name TEXT NOT NULL DEFAULT '',
+            stat_date TEXT NOT NULL,
+            total_purchase_success_count INTEGER NOT NULL DEFAULT 0,
+            total_listing_success_count INTEGER NOT NULL DEFAULT 0,
+            total_purchase_fail_count INTEGER NOT NULL DEFAULT 0,
+            report_time TEXT,
+            source_client_ip TEXT NOT NULL DEFAULT '',
+            received_at TEXT,
+            PRIMARY KEY (machine_id, stat_date)
+        )
+        """
+    )
+
+
 def _normalize_snapshot_entry(item, report_time):
     if not isinstance(item, dict):
         raise ValueError("accounts 中存在非对象项")
@@ -186,6 +214,31 @@ def _normalize_snapshot_entry(item, report_time):
     }
 
 
+def _normalize_machine_daily_summary_entry(item):
+    if not isinstance(item, dict):
+        raise ValueError("machine_daily_summaries 中存在非对象项")
+
+    stat_date = str(item.get("stat_date") or "").strip()
+    if len(stat_date) != 10:
+        raise ValueError("machine_daily_summaries.stat_date 格式无效")
+
+    return {
+        "stat_date": stat_date,
+        "total_purchase_success_count": max(
+            0,
+            _parse_int(item.get("total_purchase_success_count"), default=0),
+        ),
+        "total_listing_success_count": max(
+            0,
+            _parse_int(item.get("total_listing_success_count"), default=0),
+        ),
+        "total_purchase_fail_count": max(
+            0,
+            _parse_int(item.get("total_purchase_fail_count"), default=0),
+        ),
+    }
+
+
 def save_remote_sync_report(payload, client_ip=""):
     if not isinstance(payload, dict):
         raise ValueError("同步上报载荷必须是 JSON 对象")
@@ -194,6 +247,7 @@ def save_remote_sync_report(payload, client_ip=""):
     machine_display_name = str(payload.get("machine_display_name") or "").strip()
     report_time = _serialize_datetime(payload.get("report_time")) or _serialize_datetime(datetime.now())
     raw_accounts = payload.get("accounts")
+    raw_machine_daily_summaries = payload.get("machine_daily_summaries")
 
     if not machine_id:
         raise ValueError("machine_id 不能为空")
@@ -206,14 +260,27 @@ def save_remote_sync_report(payload, client_ip=""):
         _normalize_snapshot_entry(item, report_time)
         for item in raw_accounts
     ]
+    if raw_machine_daily_summaries is None:
+        raw_machine_daily_summaries = []
+    elif not isinstance(raw_machine_daily_summaries, list):
+        raise ValueError("machine_daily_summaries 必须是数组")
+    normalized_machine_daily_summaries = [
+        _normalize_machine_daily_summary_entry(item)
+        for item in raw_machine_daily_summaries
+    ]
 
     os.makedirs(os.path.dirname(REMOTE_SYNC_MIRROR_DB_PATH), exist_ok=True)
     conn = sqlite3.connect(REMOTE_SYNC_MIRROR_DB_PATH)
     try:
         _ensure_remote_sync_table(conn)
+        _ensure_remote_daily_summary_table(conn)
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             f"DELETE FROM {REMOTE_SYNC_TABLE} WHERE machine_id = ?",
+            (machine_id,),
+        )
+        conn.execute(
+            f"DELETE FROM {REMOTE_SYNC_DAILY_SUMMARY_TABLE} WHERE machine_id = ?",
             (machine_id,),
         )
         for account in normalized_accounts:
@@ -257,6 +324,33 @@ def save_remote_sync_report(payload, client_ip=""):
                     account["runtime_window_remaining_seconds"],
                     account["cooldown_remaining_seconds"],
                     account["report_time"],
+                    str(client_ip or "").strip(),
+                    _serialize_datetime(datetime.now()),
+                ),
+            )
+        for summary in normalized_machine_daily_summaries:
+            conn.execute(
+                f"""
+                INSERT INTO {REMOTE_SYNC_DAILY_SUMMARY_TABLE} (
+                    machine_id,
+                    machine_display_name,
+                    stat_date,
+                    total_purchase_success_count,
+                    total_listing_success_count,
+                    total_purchase_fail_count,
+                    report_time,
+                    source_client_ip,
+                    received_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    machine_id,
+                    machine_display_name,
+                    summary["stat_date"],
+                    summary["total_purchase_success_count"],
+                    summary["total_listing_success_count"],
+                    summary["total_purchase_fail_count"],
+                    report_time,
                     str(client_ip or "").strip(),
                     _serialize_datetime(datetime.now()),
                 ),
@@ -722,6 +816,7 @@ def build_local_snapshot_payload():
             "machine_id": runtime_context.get("machine_id"),
             "machine_display_name": runtime_context.get("machine_display_name"),
             "report_time": report_time,
+            "machine_daily_summaries": list(view_rows_result.get("machine_daily_summaries") or []),
             "accounts": account_snapshots,
         },
     }
@@ -1044,6 +1139,7 @@ def get_remote_machine_sections(exclude_machine_id=None):
             "database_path": REMOTE_SYNC_MIRROR_DB_PATH,
             "generated_at": generated_at,
             "rows": [],
+            "machine_daily_summaries": [],
             "message": "尚未收到最近一次局域网同步上报。",
             "status": "empty",
             "last_report_time": "",
@@ -1082,6 +1178,21 @@ def get_remote_machine_sections(exclude_machine_id=None):
             ORDER BY machine_display_name, sort_order, current_execution_slot
             """
         ).fetchall()
+        summary_rows = []
+        if _remote_table_exists(conn, REMOTE_SYNC_DAILY_SUMMARY_TABLE):
+            summary_rows = conn.execute(
+                f"""
+                SELECT
+                    machine_id,
+                    machine_display_name,
+                    stat_date,
+                    total_purchase_success_count,
+                    total_listing_success_count,
+                    total_purchase_fail_count
+                FROM {REMOTE_SYNC_DAILY_SUMMARY_TABLE}
+                ORDER BY machine_display_name, stat_date DESC
+                """
+            ).fetchall()
     except sqlite3.Error:
         return list(sections.values())
     finally:
@@ -1104,6 +1215,7 @@ def get_remote_machine_sections(exclude_machine_id=None):
                 "database_path": REMOTE_SYNC_MIRROR_DB_PATH,
                 "generated_at": generated_at,
                 "rows": [],
+                "machine_daily_summaries": [],
                 "message": "",
                 "status": "ready",
                 "last_report_time": "",
@@ -1144,7 +1256,46 @@ def get_remote_machine_sections(exclude_machine_id=None):
             }
         )
 
+    for summary_row in summary_rows:
+        machine_id = str(summary_row["machine_id"] or "").strip()
+        if not machine_id or machine_id == exclude_machine_id:
+            continue
+        section = sections.setdefault(
+            machine_id,
+            {
+                "machine_id": machine_id,
+                "machine_display_name": str(summary_row["machine_display_name"] or machine_id).strip(),
+                "source_type": REMOTE_SYNC_SOURCE_TYPE,
+                "data_role": "remote_mirror",
+                "data_role_label": "远端同步镜像",
+                "is_read_only": False,
+                "database_path": REMOTE_SYNC_MIRROR_DB_PATH,
+                "generated_at": generated_at,
+                "rows": [],
+                "machine_daily_summaries": [],
+                "message": "",
+                "status": "ready",
+                "last_report_time": "",
+                "source_client_ip": "",
+                "allow_remote_writeback": False,
+                "edit_meta": _build_remote_edit_meta(),
+            },
+        )
+        section["machine_daily_summaries"].append(
+            {
+                "stat_date": str(summary_row["stat_date"] or "").strip(),
+                "total_purchase_success_count": max(0, _parse_int(summary_row["total_purchase_success_count"])),
+                "total_listing_success_count": max(0, _parse_int(summary_row["total_listing_success_count"])),
+                "total_purchase_fail_count": max(0, _parse_int(summary_row["total_purchase_fail_count"])),
+            }
+        )
+
     for section in sections.values():
+        section["machine_daily_summaries"] = sorted(
+            list(section.get("machine_daily_summaries") or []),
+            key=lambda item: str(item.get("stat_date") or ""),
+            reverse=True,
+        )
         if section.get("rows") and section.get("allow_remote_writeback"):
             section["message"] = "镜像来自远端最近一次上报；提交修改时会转发到远端本机 canonical 真源。"
         elif section.get("rows"):

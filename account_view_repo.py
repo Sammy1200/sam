@@ -12,6 +12,7 @@ from account_db import (
     AccountStatsRecord,
     CANONICAL_ACCOUNT_STATS_COLUMNS,
     CANONICAL_ACCOUNT_STATS_TABLE,
+    MACHINE_DAILY_SUMMARY_TABLE,
     ROUND_STATUS_LIMITED,
     ROUND_STATUS_MANUAL_PAUSE,
     ROUND_STATUS_RUNTIME_REACHED,
@@ -19,6 +20,7 @@ from account_db import (
     find_canonical_account_stats_store,
     normalize_round_status_value,
     read_canonical_account_stats_record,
+    read_machine_daily_summary_records,
     read_runtime_execution_state,
     save_canonical_account_stats_record,
 )
@@ -757,7 +759,21 @@ def _build_local_machine_meta():
     }
 
 
+def _read_local_machine_daily_summaries(database_path, machine_id):
+    now = datetime.now()
+    return read_machine_daily_summary_records(
+        database_path,
+        machine_id,
+        stat_dates=(
+            now.strftime("%Y-%m-%d"),
+            (now - timedelta(days=1)).strftime("%Y-%m-%d"),
+        ),
+        table_name=MACHINE_DAILY_SUMMARY_TABLE,
+    )
+
+
 def _build_canonical_result(database_path, table_name, rows, generated_at):
+    machine_meta = _build_local_machine_meta()
     return {
         "source_type": CANONICAL_SOURCE_TYPE,
         "database_path": database_path,
@@ -765,7 +781,11 @@ def _build_canonical_result(database_path, table_name, rows, generated_at):
         "generated_at": _serialize_datetime(generated_at),
         "rows": rows,
         "edit_meta": _build_edit_meta(),
-        **_build_local_machine_meta(),
+        "machine_daily_summaries": _read_local_machine_daily_summaries(
+            database_path,
+            machine_meta.get("machine_id"),
+        ),
+        **machine_meta,
     }
 
 
