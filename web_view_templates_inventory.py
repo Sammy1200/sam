@@ -274,7 +274,7 @@ def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
     inventory_cell = f"""
 <div class="inline-field">
   <input form="{escape(form_id, quote=True)}" type="number" name="baseline_item_count" step="1" min="0" required value="{escape(str(form_values.get('baseline_item_count') or ''), quote=True)}">
-  <div class="muted-text">最后入库/更新：{update_tip}</div>
+  <div class="muted-text">更新：{update_tip}</div>
   {_render_field_error(field_errors, "baseline_item_count")}
 </div>
 """
@@ -381,7 +381,7 @@ def _build_account_list_rows(rows, edit_meta=None, edit_result=None):
             inventory_text = _format_value(row.get("inventory_quantity") or row.get("baseline_item_count"))
             inventory_cell = (
                 f'<div class="inline-field"><div class="readonly-value">{inventory_text}</div>'
-                f'<div class="muted-text">最后入库/更新：{escape(str(row.get("updated_at_relative") or "-"))}</div></div>'
+                f'<div class="muted-text">更新：{escape(str(row.get("updated_at_relative") or "-"))}</div></div>'
             )
             balance_cell = _format_balance_wan_display(row.get("current_balance_wan"))
             runtime_cell = _format_runtime_remaining_text(row.get("runtime_window_remaining_text"))
