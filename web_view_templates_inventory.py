@@ -1,6 +1,7 @@
 """库存语义版网页模板。"""
 from datetime import datetime, timedelta
 from html import escape
+import re
 
 import web_view_templates as base_templates
 
@@ -27,7 +28,12 @@ _render_table = base_templates._render_table
 
 def _format_runtime_remaining_text(value):
     text = str(value or "").strip()
-    return escape(text) if text else "-"
+    if not text:
+        return "-"
+    normalized_text = re.sub(r"\d+\s*秒$", "", text).strip()
+    if not normalized_text:
+        normalized_text = "0分钟"
+    return escape(normalized_text)
 
 
 def _format_remote_remaining_text(seconds_value):
@@ -103,7 +109,7 @@ def _render_local_relative_time_script():
     window.clearInterval(window.__localRelativeTimeTimerId);
   }
   window.__refreshLocalRelativeTimeNodes = updateRelativeNodes;
-  window.__localRelativeTimeTimerId = window.setInterval(updateRelativeNodes, 1000);
+  window.__localRelativeTimeTimerId = window.setInterval(updateRelativeNodes, 60000);
   window.addEventListener("pageshow", updateRelativeNodes);
   document.addEventListener("visibilitychange", function () {
     if (!document.hidden) updateRelativeNodes();

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from config import WEB_VIEW_HOST, WEB_VIEW_PORT
 from account_view_repo import (
@@ -32,6 +32,23 @@ PORT = WEB_VIEW_PORT
 
 
 class ReadOnlyViewHandler(BaseHTTPRequestHandler):
+    @staticmethod
+    def _build_local_flash_edit_result(query):
+        status = str(((query.get("flash_status") or [""])[0] or "")).strip().lower()
+        scope = str(((query.get("flash_scope") or [""])[0] or "")).strip().lower()
+        nickname = str(((query.get("flash_nickname") or [""])[0] or "")).strip()
+        if status != "success" or scope != "local" or not nickname:
+            return None
+        return {
+            "status": "success",
+            "message": "保存成功，已完成写库并回读确认。",
+            "scope": "local",
+            "form_values": {
+                "nickname": nickname,
+            },
+            "field_errors": {},
+        }
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -93,10 +110,12 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         remote_machine_sections = get_remote_machine_sections(
             exclude_machine_id=view_rows_result.get("machine_id"),
         )
+        edit_result = self._build_local_flash_edit_result(parse_qs(urlparse(self.path).query))
         html = render_index_page(
             view_rows_result,
             runtime_result,
             remote_machine_sections=remote_machine_sections,
+            edit_result=edit_result,
             refresh_result=None,
         )
         self._send_html(html)
@@ -167,7 +186,8 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
             self._send_html(html, status_code=404)
             return
 
-        html = render_account_detail_page(detail_result, runtime_result)
+        edit_result = self._build_local_flash_edit_result(query)
+        html = render_account_detail_page(detail_result, runtime_result, edit_result=edit_result)
         self._send_html(html)
 
     def _handle_account_update(self):
@@ -196,6 +216,28 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         )
         update_result["scope"] = "local"
         status_code = 200 if update_result.get("status") == "success" else 400
+
+        if update_result.get("status") == "success":
+            redirect_query = urlencode(
+                {
+                    "flash_status": "success",
+                    "flash_scope": "local",
+                    "flash_nickname": nickname,
+                }
+            )
+            if return_to == "index":
+                self._send_redirect(f"/?{redirect_query}")
+                return
+            detail_query = urlencode(
+                {
+                    "nickname": nickname,
+                    "flash_status": "success",
+                    "flash_scope": "local",
+                    "flash_nickname": nickname,
+                }
+            )
+            self._send_redirect(f"/account?{detail_query}")
+            return
 
         if return_to == "index":
             view_rows_result = get_account_view_rows()
@@ -407,6 +449,12 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_redirect(self, location, status_code=303):
+        self.send_response(status_code)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
 
 def run_server(host=None, port=PORT):
