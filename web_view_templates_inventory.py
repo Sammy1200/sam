@@ -9,11 +9,16 @@ import web_view_templates as base_templates
 
 
 _base_page = base_templates._base_page
+_build_status_options_html = base_templates._build_status_options_html
 _format_balance_wan_display = base_templates._format_balance_wan_display
 _format_cooldown_remaining_time = base_templates._format_cooldown_remaining_time
 _format_value = base_templates._format_value
+_is_active_edit_row = base_templates._is_active_edit_row
+_render_edit_result = base_templates._render_edit_result
 _render_execution_slot_summary = base_templates._render_execution_slot_summary
+_render_field_error = base_templates._render_field_error
 _render_health_summary = base_templates._render_health_summary
+_render_inline_row_result = base_templates._render_inline_row_result
 _render_kv_table = base_templates._render_kv_table
 _render_runtime_consistency_summary = base_templates._render_runtime_consistency_summary
 _render_source_diagnostics = base_templates._render_source_diagnostics
@@ -154,11 +159,11 @@ def _render_machine_daily_summary(machine_daily_summaries):
     )
 
 
-def _render_read_only_notice():
+def _render_page_notice():
     return """
 <div class="readonly-notice">
-  <strong>当前网页阶段只开放查看：</strong>
-  首页、本机详情页和“更多信息”页面均不开放网页修改，也不开放远端写回入口。
+  <strong>当前页面收口规则：</strong>
+  首页保留本机真实数据修改和远端镜像手动刷新；远端写回和公网写回继续关闭。
 </div>
 """
 
@@ -218,6 +223,25 @@ def _render_machine_section_title(title, badge_text):
     )
 
 
+def _build_list_form_values(row, edit_result):
+    form_values = {
+        "nickname": str(row.get("nickname") or "").strip(),
+        "baseline_item_count": str(row.get("baseline_item_count") or row.get("inventory_quantity") or 0),
+        "round_status": str(row.get("round_status") or "").strip(),
+        "current_balance_wan": str(row.get("current_balance_wan") or "").strip(),
+    }
+    if _is_active_edit_row(row, edit_result):
+        form_values.update(edit_result.get("form_values") or {})
+    return form_values
+
+
+def _get_local_edit_result(edit_result):
+    if not edit_result:
+        return None
+    scope = str(edit_result.get("scope") or "local").strip()
+    return edit_result if scope == "local" else None
+
+
 def _render_local_read_only_cells(row):
     inventory_text = _format_value(row.get("inventory_quantity") or row.get("baseline_item_count"))
     update_tip = _render_local_relative_time(
@@ -238,21 +262,89 @@ def _render_local_read_only_cells(row):
     return inventory_cell, balance_cell, status_cell, action_cell
 
 
-def _build_account_list_rows(rows):
+def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
+    nickname = str(row.get("nickname") or "").strip()
+    if not nickname:
+        muted_html = '<span class="muted-text">缺少昵称，暂不可编辑</span>'
+        return muted_html, muted_html, muted_html, muted_html
+
+    edit_meta = edit_meta or {}
+    form_id = f"inline-edit-form-{row_index}"
+    field_errors = (edit_result or {}).get("field_errors") if _is_active_edit_row(row, edit_result) else {}
+    form_values = _build_list_form_values(row, edit_result)
+    status_options = list(edit_meta.get("status_options") or [])
+    balance_input_unit = str(edit_meta.get("balance_input_unit") or "万")
+    status_options_html = _build_status_options_html(
+        status_options,
+        str(form_values.get("round_status") or ""),
+    )
+    update_tip = _render_local_relative_time(
+        row.get("updated_at_relative") or "-",
+        row.get("updated_at"),
+    )
+
+    inventory_cell = f"""
+<div class="inline-field">
+  <input form="{escape(form_id, quote=True)}" type="number" name="baseline_item_count" step="1" min="0" required value="{escape(str(form_values.get('baseline_item_count') or ''), quote=True)}">
+  <div class="muted-text">更新：{update_tip}</div>
+  {_render_field_error(field_errors, "baseline_item_count")}
+</div>
+"""
+    balance_cell = f"""
+<div class="inline-field">
+  <div class="input-with-unit inline-balance">
+    <input form="{escape(form_id, quote=True)}" type="text" name="current_balance_wan" inputmode="decimal" required value="{escape(str(form_values.get('current_balance_wan') or ''), quote=True)}">
+    <span class="unit-tag">{escape(balance_input_unit)}</span>
+  </div>
+  {_render_field_error(field_errors, "current_balance_wan")}
+</div>
+"""
+    status_cell = f"""
+<div class="inline-field">
+  <select form="{escape(form_id, quote=True)}" name="round_status" required>
+    {status_options_html}
+  </select>
+  {_render_field_error(field_errors, "round_status")}
+</div>
+"""
+    action_cell = f"""
+<div class="inline-save">
+  <form id="{escape(form_id, quote=True)}" method="post" action="/account/update">
+    <input type="hidden" name="nickname" value="{escape(nickname, quote=True)}">
+    <input type="hidden" name="return_to" value="index">
+  </form>
+  <a href="{escape(f'/account?nickname={nickname}', quote=True)}">查看详情</a>
+  <button type="submit" form="{escape(form_id, quote=True)}">保存</button>
+  {_render_inline_row_result(row, edit_result)}
+</div>
+"""
+    return inventory_cell, balance_cell, status_cell, action_cell
+
+
+def _build_account_list_rows(rows, edit_meta=None, edit_result=None, read_only_mode=False):
+    edit_result = _get_local_edit_result(edit_result)
     using_demo_rows = not bool(rows)
     effective_rows = rows if rows else _build_demo_account_rows()
 
     row_items = []
-    for row in effective_rows:
-        inventory_cell, balance_cell, status_cell, action_cell = _render_local_read_only_cells(row)
-        runtime_cell = _format_runtime_remaining_text(row.get("runtime_window_remaining_text"))
+    for row_index, row in enumerate(effective_rows, start=1):
+        if using_demo_rows or read_only_mode:
+            inventory_cell, balance_cell, status_cell, action_cell = _render_local_read_only_cells(row)
+        else:
+            inventory_cell, balance_cell, status_cell, action_cell = _render_inline_edit_cells(
+                row,
+                row_index,
+                edit_meta=edit_meta,
+                edit_result=edit_result,
+            )
+
         row_items.append(
             (
                 _format_value(row.get("current_execution_slot")),
                 _format_value(row.get("nickname")),
                 inventory_cell,
                 balance_cell,
-                runtime_cell,
+                _format_runtime_remaining_text(row.get("runtime_window_remaining_text")),
                 status_cell,
                 _format_value(row.get("allow_purchase")),
                 _format_cooldown_remaining_time(row.get("cooldown_remaining_seconds")),
@@ -267,6 +359,52 @@ def _render_remote_updated_at_cell(row):
         row.get("updated_at_relative") or row.get("updated_at") or "-",
         row.get("updated_at"),
     )
+
+
+def _is_active_remote_refresh_section(section, refresh_result):
+    if not refresh_result or str(refresh_result.get("scope") or "").strip() != "remote_refresh":
+        return False
+    active_machine_id = str(refresh_result.get("target_machine_id") or "").strip()
+    section_machine_id = str(section.get("machine_id") or "").strip()
+    return bool(active_machine_id and active_machine_id == section_machine_id)
+
+
+def _render_remote_refresh_result(section, refresh_result):
+    if not _is_active_remote_refresh_section(section, refresh_result):
+        return ""
+    status = str(refresh_result.get("status") or "").strip()
+    css_class = "flash-success" if status == "success" else "flash-error"
+    message = escape(str(refresh_result.get("message") or ""))
+    return f'<div class="{css_class}"><strong>刷新结果：</strong>{message}</div>'
+
+
+def _render_remote_refresh_toolbar(section, refresh_result=None):
+    can_refresh = bool(str(section.get("machine_id") or "").strip())
+    button_attrs = (
+        ' type="submit"'
+        ' onclick="this.disabled=true;this.textContent=\'刷新中...\';this.form.submit();"'
+    )
+    if not can_refresh:
+        button_attrs += ' disabled'
+
+    hint_text = "点击后只拉取并刷新当前远端镜像，不会写入对端真源。"
+    if not can_refresh:
+        hint_text = "当前缺少远端机器标识，暂时无法手动刷新。"
+
+    last_refresh_time = str(section.get("last_report_time") or "").strip() or "暂无"
+    machine_label = str(section.get("machine_display_name") or section.get("machine_id") or "远端").strip()
+    machine_label = machine_label.replace("电脑", "").strip() or "远端"
+    return f"""
+<div class="meta">
+  <form method="post" action="/remote-sync/refresh" style="display:inline-block; margin-right:12px;">
+    <input type="hidden" name="target_machine_id" value="{escape(str(section.get('machine_id') or ''), quote=True)}">
+    <button{button_attrs}>刷新</button>
+  </form>
+  {escape(machine_label)}最后快照时间：{escape(last_refresh_time)}<br>
+  刷新说明：{escape(hint_text)}
+</div>
+{_render_remote_refresh_result(section, refresh_result)}
+"""
 
 
 def _build_remote_account_list_rows(section):
@@ -286,18 +424,19 @@ def _build_remote_account_list_rows(section):
     return row_items
 
 
-def _render_remote_machine_section(section):
+def _render_remote_machine_section(section, refresh_result=None):
     rows = section.get("rows") or []
     row_items = _build_remote_account_list_rows(section)
     summary_html = _render_machine_daily_summary(section.get("machine_daily_summaries"))
     if not rows:
         empty_html = f'<p class="muted-text">{escape(str(section.get("message") or "暂无远端镜像数据。"))}</p>'
     else:
-        empty_html = '<p class="muted-text">当前阶段只展示远端镜像内容，不开放刷新、修改或远端写回。</p>'
+        empty_html = '<p class="muted-text">当前阶段保留远端镜像手动刷新，但不开放远端写回。</p>'
 
     return f"""
 <div class="section">
-  {_render_machine_section_title(section.get("machine_display_name") or section.get("machine_id") or "远端机器", "远端镜像 / 只读查看")}
+  {_render_machine_section_title(section.get("machine_display_name") or section.get("machine_id") or "远端机器", "远端镜像 / 手动刷新")}
+  {_render_remote_refresh_toolbar(section, refresh_result)}
   {summary_html}
   {empty_html}
   {_render_table(("昵称", "道具库存", "余额（万）", "可运行时间", "冷却剩余时间", "账号状态", "更新时间"), row_items)}
@@ -311,11 +450,16 @@ def render_index_page(
     remote_machine_sections=None,
     edit_result=None,
     refresh_result=None,
-    read_only_mode=True,
+    read_only_mode=False,
 ):
-    del edit_result, refresh_result, read_only_mode
     rows = view_rows_result.get("rows") or []
-    row_items, using_demo_rows = _build_account_list_rows(rows)
+    edit_meta = view_rows_result.get("edit_meta") or {}
+    row_items, using_demo_rows = _build_account_list_rows(
+        rows,
+        edit_meta=edit_meta,
+        edit_result=edit_result,
+        read_only_mode=read_only_mode,
+    )
     demo_notice_html = _render_demo_list_notice() if using_demo_rows else ""
     account_table_column_classes = (
         "col-slot",
@@ -332,20 +476,21 @@ def render_index_page(
     local_summary_html = _render_machine_daily_summary(view_rows_result.get("machine_daily_summaries"))
     remote_machine_sections = list(remote_machine_sections or [])
     remote_sections_html = "".join(
-        _render_remote_machine_section(section)
+        _render_remote_machine_section(section, refresh_result=refresh_result)
         for section in remote_machine_sections
     )
 
     body_html = f"""
 <h1>账号数据查看页</h1>
-{_render_read_only_notice()}
+{_render_page_notice()}
+{_render_edit_result(edit_result)}
 
 <div class="section">
-  {_render_machine_section_title(local_machine_display_name, "本机真实数据 / 只读查看")}
-  <p class="muted-text">此卡片展示 1号电脑本机真实数据，当前阶段仅开放查看。</p>
+  {_render_machine_section_title(local_machine_display_name, "本机真实数据")}
+  <p class="muted-text">此卡片展示 1号电脑本机真实数据，保留本机行内保存能力。</p>
   {local_summary_html}
   {demo_notice_html}
-  {_render_table(("执行位", "昵称", "道具库存", "余额（万）", "可运行时间", "账号状态", "允许抢购", "冷却剩余时间", "详情"), row_items, column_classes=account_table_column_classes, table_class="account-table")}
+  {_render_table(("执行位", "昵称", "道具库存", "余额（万）", "可运行时间", "账号状态", "允许抢购", "冷却剩余时间", "详情 / 保存"), row_items, column_classes=account_table_column_classes, table_class="account-table")}
 </div>
 
 {remote_sections_html}
@@ -388,7 +533,7 @@ def render_more_info_page(view_rows_result, runtime_result):
 
     body_html = f"""
 <h1>更多信息</h1>
-{_render_read_only_notice()}
+{_render_page_notice()}
 <div class="section">
   <p><a href="/">返回首页</a></p>
 </div>
@@ -438,7 +583,7 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None, 
     if record is None:
         body_html = f"""
 <h1>账号详情</h1>
-{_render_read_only_notice()}
+{_render_page_notice()}
 {_render_source_notice(source_summary)}
 <div class="meta">
   查询条件：昵称 {_format_value(lookup.get("nickname"))}，
@@ -482,7 +627,7 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None, 
 
     body_html = f"""
 <h1>账号详情</h1>
-{_render_read_only_notice()}
+{_render_page_notice()}
 {_render_source_notice(source_summary)}
 <div class="meta">
   主库路径：<code>{escape(str(detail_result.get("database_path") or ""))}</code><br>
@@ -531,7 +676,7 @@ def render_message_page(title, message, detail_items=None, back_href="/", back_l
 
     body_html = f"""
 <h1>{escape(title)}</h1>
-{_render_read_only_notice()}
+{_render_page_notice()}
 {_render_source_notice()}
 <div class="section">
   <p>{escape(message)}</p>

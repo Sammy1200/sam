@@ -3,12 +3,13 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from account_view_repo import (
     get_account_view_detail,
     get_account_view_rows,
     get_runtime_snapshot,
+    update_account_view_record,
 )
 from config import WEB_VIEW_HOST, WEB_VIEW_PORT
 from machine_sync_config import resolve_web_bind_host
@@ -16,6 +17,7 @@ from remote_sync import (
     get_remote_machine_sections,
     handle_remote_snapshot_request,
     handle_remote_sync_report_payload,
+    refresh_remote_machine_snapshot,
 )
 from web_view_templates_inventory import (
     render_account_detail_page,
@@ -29,6 +31,23 @@ PORT = WEB_VIEW_PORT
 
 
 class ReadOnlyViewHandler(BaseHTTPRequestHandler):
+    @staticmethod
+    def _build_local_flash_edit_result(query):
+        status = str(((query.get("flash_status") or [""])[0] or "")).strip().lower()
+        scope = str(((query.get("flash_scope") or [""])[0] or "")).strip().lower()
+        nickname = str(((query.get("flash_nickname") or [""])[0] or "")).strip()
+        if status != "success" or scope != "local" or not nickname:
+            return None
+        return {
+            "status": "success",
+            "message": "保存成功，已完成写库并回读确认。",
+            "scope": "local",
+            "form_values": {
+                "nickname": nickname,
+            },
+            "field_errors": {},
+        }
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -58,13 +77,13 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
 
         try:
             if path == "/account/update":
-                self._send_read_only_html("当前阶段网页只开放查看，不开放本机网页保存。")
+                self._handle_account_update()
                 return
             if path == "/remote-account/update":
-                self._send_read_only_html("当前阶段网页只开放查看，不开放远端写回。")
+                self._send_read_only_html("当前阶段仍不开放远端写回。")
                 return
             if path == "/remote-sync/refresh":
-                self._send_read_only_html("当前阶段网页只开放查看，不开放网页手动刷新远端镜像。")
+                self._handle_remote_sync_refresh()
                 return
             if path == "/remote-sync/report":
                 self._handle_remote_sync_report()
@@ -76,7 +95,7 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     {
                         "status": "forbidden",
-                        "message": "当前阶段只开放查看，不开放远端写回。",
+                        "message": "当前阶段仍不开放公网写回。",
                     },
                     status_code=403,
                 )
@@ -99,7 +118,7 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
             message=message,
             detail_items=[
                 ("当前阶段", "公网只查看"),
-                ("处理结果", "本次请求未执行任何写入"),
+                ("处理结果", "本次请求未执行被关闭的写入能力"),
             ],
         )
         self._send_html(html, status_code=status_code)
@@ -110,13 +129,14 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         remote_machine_sections = get_remote_machine_sections(
             exclude_machine_id=view_rows_result.get("machine_id"),
         )
+        edit_result = self._build_local_flash_edit_result(parse_qs(urlparse(self.path).query))
         html = render_index_page(
             view_rows_result,
             runtime_result,
             remote_machine_sections=remote_machine_sections,
-            edit_result=None,
+            edit_result=edit_result,
             refresh_result=None,
-            read_only_mode=True,
+            read_only_mode=False,
         )
         self._send_html(html)
 
@@ -200,6 +220,95 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         )
         self._send_html(html)
 
+    def _handle_account_update(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = 0
+
+        raw_body = self.rfile.read(content_length) if content_length > 0 else b""
+        form = parse_qs(raw_body.decode("utf-8"), keep_blank_values=True)
+
+        nickname = ((form.get("nickname") or [""])[0] or "").strip()
+        baseline_item_delta = ((form.get("baseline_item_delta") or [""])[0] or "").strip()
+        baseline_item_count = ((form.get("baseline_item_count") or [""])[0] or "").strip()
+        round_status = ((form.get("round_status") or [""])[0] or "").strip()
+        current_balance_wan = ((form.get("current_balance_wan") or [""])[0] or "").strip()
+        return_to = ((form.get("return_to") or ["detail"])[0] or "detail").strip().lower()
+
+        update_result = update_account_view_record(
+            nickname=nickname,
+            baseline_item_delta_text=baseline_item_delta,
+            baseline_item_count_text=baseline_item_count,
+            round_status=round_status,
+            balance_wan_text=current_balance_wan,
+            baseline_update_mode=return_to,
+        )
+        update_result["scope"] = "local"
+        status_code = 200 if update_result.get("status") == "success" else 400
+
+        if update_result.get("status") == "success":
+            redirect_query = urlencode(
+                {
+                    "flash_status": "success",
+                    "flash_scope": "local",
+                    "flash_nickname": nickname,
+                }
+            )
+            self._send_redirect(f"/?{redirect_query}")
+            return
+
+        view_rows_result = get_account_view_rows()
+        runtime_result = get_runtime_snapshot()
+        remote_machine_sections = get_remote_machine_sections(
+            exclude_machine_id=view_rows_result.get("machine_id"),
+        )
+        html = render_index_page(
+            view_rows_result,
+            runtime_result,
+            remote_machine_sections=remote_machine_sections,
+            edit_result=update_result,
+            refresh_result=None,
+            read_only_mode=False,
+        )
+        self._send_html(html, status_code=status_code)
+
+    def _handle_remote_sync_refresh(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = 0
+
+        raw_body = self.rfile.read(content_length) if content_length > 0 else b""
+        form = parse_qs(raw_body.decode("utf-8"), keep_blank_values=True)
+        target_machine_id = ((form.get("target_machine_id") or [""])[0] or "").strip()
+
+        refresh_result = refresh_remote_machine_snapshot(machine_id=target_machine_id)
+        refresh_result["scope"] = "remote_refresh"
+        refresh_result["target_machine_id"] = target_machine_id
+        status = str(refresh_result.get("status") or "").strip()
+        if status == "success":
+            status_code = 200
+        elif status == "forbidden":
+            status_code = 403
+        else:
+            status_code = 400
+
+        view_rows_result = get_account_view_rows()
+        runtime_result = get_runtime_snapshot()
+        remote_machine_sections = get_remote_machine_sections(
+            exclude_machine_id=view_rows_result.get("machine_id"),
+        )
+        html = render_index_page(
+            view_rows_result,
+            runtime_result,
+            remote_machine_sections=remote_machine_sections,
+            edit_result=None,
+            refresh_result=refresh_result,
+            read_only_mode=False,
+        )
+        self._send_html(html, status_code=status_code)
+
     def _handle_remote_sync_report(self):
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
@@ -260,6 +369,12 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_redirect(self, location, status_code=303):
+        self.send_response(status_code)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
 
 def run_server(host=None, port=PORT):
