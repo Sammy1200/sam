@@ -30,7 +30,41 @@ from utils import (
 
 DEFAULT_OVERLAY_STATUS_TEXT = "状态待更新"
 F12_VK = 0x7B
-OVERLAY_LEFT_COLUMN_WIDTH = 18
+OVERLAY_SCORE_PANEL_BG = OVERLAY_NORMAL_BG
+OVERLAY_SCORE_MAIN_BG = "#11100f"
+OVERLAY_SCORE_MAIN_BORDER = "#1c1916"
+OVERLAY_SCORE_ITEM_BG = "#151311"
+OVERLAY_SCORE_ITEM_BORDER = "#1f1b17"
+OVERLAY_SCORE_LABEL_FG = "#9f9688"
+OVERLAY_SCORE_SLOT_LABEL_FG = "#8d816c"
+OVERLAY_SCORE_VALUE_FG = "#f3e7cc"
+OVERLAY_SCORE_SLOT_FG = "#fff1c8"
+OVERLAY_SCORE_TIME_FG = "#f7e7b6"
+OVERLAY_SCORE_FAIL_FG = "#e7d5ad"
+OVERLAY_SCORE_LABEL_FONT = ("Microsoft YaHei", 11, "bold")
+OVERLAY_SCORE_VALUE_FONT = ("NSimSun", 13, "bold")
+OVERLAY_SCORE_TIME_FONT = ("NSimSun", 14, "bold")
+OVERLAY_SCORE_SLOT_FONT = ("NSimSun", 15, "bold")
+OVERLAY_SCORE_PANEL_PAD_X = 8
+OVERLAY_SCORE_PANEL_PAD_Y = (8, 0)
+OVERLAY_SCORE_MAIN_PAD_X = 10
+OVERLAY_SCORE_MAIN_PAD_Y = 9
+OVERLAY_SCORE_COLUMN_GAP = 6
+OVERLAY_SCORE_ROW_GAP = 7
+OVERLAY_SCORE_ITEM_PAD_X = 11
+OVERLAY_SCORE_ITEM_PAD_Y = 8
+OVERLAY_SCORE_ITEM_PAD_Y_FIRST_ROW = 9
+OVERLAY_SCORE_TEXT_PAD_Y = 2
+OVERLAY_SCORE_TITLE_PAD_X = (4, 0)
+OVERLAY_SCORE_VALUE_GAP = (8, 4)
+OVERLAY_SCORE_VALUE_GAP_FIRST_ROW = (10, 4)
+OVERLAY_LOG_PANEL_BG = "#100f0e"
+OVERLAY_LOG_PANEL_BORDER = "#1b1815"
+OVERLAY_LOG_TEXT_FG = "#9ab284"
+OVERLAY_LOG_PANEL_PAD_X = 8
+OVERLAY_LOG_PANEL_PAD_Y = (8, 10)
+OVERLAY_LOG_TEXT_PAD_X = 10
+OVERLAY_LOG_TEXT_PAD_Y = 7
 _pause_hotkey_listener_started = False
 _overlay_shutdown_requested = False
 _overlay_closed_event = threading.Event()
@@ -96,60 +130,196 @@ def _format_overlay_value(value, fallback="--"):
     return text or fallback
 
 
-def _build_overlay_row(left_label, left_value, right_label, right_value):
-    left_text = f"{left_label}{_format_overlay_value(left_value)}"
-    right_text = f"{right_label}{_format_overlay_value(right_value)}"
-    return f"{left_text:<{OVERLAY_LEFT_COLUMN_WIDTH}}｜ {right_text}"
+def _build_score_item(
+    parent,
+    *,
+    title,
+    value_key,
+    value_width,
+    value_font,
+    value_fg,
+    score_vars,
+    title_fg=None,
+    value_padx=(10, 0),
+):
+    item = tk.Frame(
+        parent,
+        bg=OVERLAY_SCORE_ITEM_BG,
+        bd=0,
+        highlightthickness=1,
+        highlightbackground=OVERLAY_SCORE_ITEM_BORDER,
+    )
+    item.grid_columnconfigure(0, weight=1)
+    item.grid_rowconfigure(0, weight=1)
+
+    title_label = tk.Label(
+        item,
+        text=title,
+        font=OVERLAY_SCORE_LABEL_FONT,
+        fg=title_fg or OVERLAY_SCORE_LABEL_FG,
+        bg=OVERLAY_SCORE_ITEM_BG,
+        anchor="w",
+    )
+    title_label.grid(
+        row=0,
+        column=0,
+        sticky="w",
+        padx=OVERLAY_SCORE_TITLE_PAD_X,
+        pady=OVERLAY_SCORE_TEXT_PAD_Y,
+    )
+
+    value_var = tk.StringVar(master=parent, value="--")
+    value_label = tk.Label(
+        item,
+        textvariable=value_var,
+        font=value_font,
+        fg=value_fg,
+        bg=OVERLAY_SCORE_ITEM_BG,
+        anchor="e",
+        width=value_width,
+    )
+    value_label.grid(row=0, column=1, sticky="e", padx=value_padx, pady=OVERLAY_SCORE_TEXT_PAD_Y)
+
+    score_vars[value_key] = value_var
+    return item
 
 
-def update_score_text():
-    if not state.overlay_root or not state.score_var:
+def _create_score_panel(root):
+    panel = tk.Frame(root, bg=OVERLAY_SCORE_PANEL_BG, bd=0, highlightthickness=0)
+    panel._overlay_score_value_vars = {}
+
+    main_shell = tk.Frame(
+        panel,
+        bg=OVERLAY_SCORE_MAIN_BORDER,
+        bd=0,
+        highlightthickness=0,
+    )
+    main_shell.pack(fill="x")
+
+    body = tk.Frame(
+        main_shell,
+        bg=OVERLAY_SCORE_MAIN_BG,
+        bd=0,
+        highlightthickness=0,
+    )
+    body.pack(fill="x", padx=1, pady=1)
+
+    row_specs = [
+        (
+            {"title": "执行位", "value_key": "slot", "value_width": 3, "value_font": OVERLAY_SCORE_SLOT_FONT, "value_fg": OVERLAY_SCORE_SLOT_FG, "title_fg": OVERLAY_SCORE_SLOT_LABEL_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP_FIRST_ROW},
+            {"title": "时间剩余", "value_key": "remaining", "value_width": 8, "value_font": OVERLAY_SCORE_TIME_FONT, "value_fg": OVERLAY_SCORE_TIME_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP_FIRST_ROW},
+        ),
+        (
+            {"title": "上架成功", "value_key": "listing_success", "value_width": 4, "value_font": OVERLAY_SCORE_VALUE_FONT, "value_fg": OVERLAY_SCORE_VALUE_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP},
+            {"title": "道具库存", "value_key": "inventory", "value_width": 4, "value_font": OVERLAY_SCORE_VALUE_FONT, "value_fg": OVERLAY_SCORE_VALUE_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP},
+        ),
+        (
+            {"title": "抢购成功", "value_key": "purchase_success", "value_width": 4, "value_font": OVERLAY_SCORE_VALUE_FONT, "value_fg": OVERLAY_SCORE_VALUE_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP},
+            {"title": "抢购失败", "value_key": "purchase_fail", "value_width": 4, "value_font": OVERLAY_SCORE_VALUE_FONT, "value_fg": OVERLAY_SCORE_FAIL_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP},
+        ),
+    ]
+
+    for row_index, row_spec in enumerate(row_specs):
+        row = tk.Frame(body, bg=OVERLAY_SCORE_MAIN_BG, bd=0, highlightthickness=0)
+        row.grid(
+            row=row_index,
+            column=0,
+            sticky="ew",
+            padx=OVERLAY_SCORE_MAIN_PAD_X,
+            pady=(OVERLAY_SCORE_MAIN_PAD_Y, OVERLAY_SCORE_ROW_GAP)
+            if row_index == 0
+            else (0, OVERLAY_SCORE_ROW_GAP)
+            if row_index < len(row_specs) - 1
+            else (0, OVERLAY_SCORE_MAIN_PAD_Y),
+        )
+        row.grid_columnconfigure(0, weight=1, uniform="overlay_score")
+        row.grid_columnconfigure(1, weight=1, uniform="overlay_score")
+
+        left_item = _build_score_item(row, score_vars=panel._overlay_score_value_vars, **row_spec[0])
+        right_item = _build_score_item(row, score_vars=panel._overlay_score_value_vars, **row_spec[1])
+        left_item.grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=(0, OVERLAY_SCORE_COLUMN_GAP),
+            ipadx=OVERLAY_SCORE_ITEM_PAD_X,
+            ipady=OVERLAY_SCORE_ITEM_PAD_Y_FIRST_ROW if row_index == 0 else OVERLAY_SCORE_ITEM_PAD_Y,
+        )
+        right_item.grid(
+            row=0,
+            column=1,
+            sticky="ew",
+            padx=(OVERLAY_SCORE_COLUMN_GAP, 0),
+            ipadx=OVERLAY_SCORE_ITEM_PAD_X,
+            ipady=OVERLAY_SCORE_ITEM_PAD_Y_FIRST_ROW if row_index == 0 else OVERLAY_SCORE_ITEM_PAD_Y,
+        )
+
+    root._overlay_score_value_vars = panel._overlay_score_value_vars
+    return panel
+
+
+def _set_score_panel_values(root, values):
+    value_vars = getattr(root, "_overlay_score_value_vars", None)
+    if not value_vars:
+        return
+    for key, value in values.items():
+        value_var = value_vars.get(key)
+        if value_var is not None:
+            value_var.set(_format_overlay_value(value))
+
+
+def _apply_log_panel_style(root):
+    log_label = getattr(root, "_overlay_log_label", None)
+    if log_label is None:
         return
 
-    remaining_text = _format_duration(get_runtime_window_remaining_seconds())
-    slot_text = str(state.current_execution_slot or "--")
-    current_inventory = _get_current_inventory()
-    msg = (
-        _build_overlay_row("执行位：", slot_text, "可运行时：", remaining_text) + "\n"
-        + _build_overlay_row("上架成功：", state.round_listing_success_count, "道具库存：", current_inventory) + "\n"
-        + _build_overlay_row("抢购成功：", state.round_purchase_success_count, "抢购失败：", state.round_purchase_fail_count)
-    )
     try:
-        state.score_var.set(msg)
-        fit_overlay_to_content()
+        log_label.configure(
+            bg=OVERLAY_LOG_PANEL_BG,
+            fg=OVERLAY_LOG_TEXT_FG,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=OVERLAY_LOG_PANEL_BORDER,
+            highlightcolor=OVERLAY_LOG_PANEL_BORDER,
+            justify="left",
+            anchor="w",
+            padx=OVERLAY_LOG_TEXT_PAD_X,
+            pady=OVERLAY_LOG_TEXT_PAD_Y,
+        )
+        if log_label.winfo_manager() == "pack":
+            log_label.pack_configure(padx=OVERLAY_LOG_PANEL_PAD_X, pady=OVERLAY_LOG_PANEL_PAD_Y, fill="x")
     except Exception:
         pass
 
 
-def _get_balance_display_text():
-    live_balance_text = str(state.current_balance or "").strip()
-    if live_balance_text and not live_balance_text.startswith("获取中"):
-        return live_balance_text
-    last_valid_balance_text = str(state.last_valid_balance or "").strip()
-    if last_valid_balance_text:
-        return last_valid_balance_text
-    round_balance_text = str(state.round_current_balance or "").strip()
-    if round_balance_text:
-        return round_balance_text
-    return "获取中..."
-
-
 def update_score_text():
-    if not state.overlay_root or not state.score_var:
+    if not state.overlay_root:
         return
 
     remaining_text = _format_duration(get_runtime_window_remaining_seconds())
     slot_text = str(state.current_execution_slot or "--")
     current_inventory = _get_current_inventory()
-    balance_text = _get_balance_display_text()
-    msg = (
-        _build_overlay_row("执行位：", slot_text, "可运行时：", remaining_text) + "\n"
-        + _build_overlay_row("上架成功：", state.round_listing_success_count, "道具库存：", current_inventory) + "\n"
-        + _build_overlay_row("抢购成功：", state.round_purchase_success_count, "抢购失败：", state.round_purchase_fail_count) + "\n"
-        + _build_overlay_row("当前余额：", balance_text, "当前状态：", _get_overlay_status_text())
-    )
+    values = {
+        "slot": slot_text,
+        "remaining": remaining_text,
+        "listing_success": state.round_listing_success_count,
+        "inventory": current_inventory,
+        "purchase_success": state.round_purchase_success_count,
+        "purchase_fail": state.round_purchase_fail_count,
+    }
     try:
-        state.score_var.set(msg)
+        if state.score_var is not None:
+            state.score_var.set(
+                "\n".join(
+                    [
+                        f"执行位 {slot_text}  时间剩余 {remaining_text}",
+                        f"上架成功 {state.round_listing_success_count}  道具库存 {current_inventory}",
+                        f"抢购成功 {state.round_purchase_success_count}  抢购失败 {state.round_purchase_fail_count}",
+                    ]
+                )
+            )
+        _set_score_panel_values(root, values)
+        _apply_log_panel_style(state.overlay_root)
         fit_overlay_to_content()
     except Exception:
         pass
@@ -179,12 +349,11 @@ def create_overlay():
     state.overlay_last_log_replaceable = False
 
     state.score_var = tk.StringVar()
-    root._overlay_score_label = tk.Label(
-        root,
-        textvariable=state.score_var,
-        **OVERLAY_SCORE_LABEL_STYLE,
+    root._overlay_score_label = _create_score_panel(root)
+    root._overlay_score_label.pack(
+        **{**OVERLAY_SCORE_LABEL_PACK, "padx": OVERLAY_SCORE_PANEL_PAD_X, "pady": OVERLAY_SCORE_PANEL_PAD_Y},
+        fill="x",
     )
-    root._overlay_score_label.pack(**OVERLAY_SCORE_LABEL_PACK)
 
     state.log_text_var = tk.StringVar()
     state.log_text_var.set("悬浮窗已就绪。")
@@ -193,7 +362,8 @@ def create_overlay():
         textvariable=state.log_text_var,
         **OVERLAY_LOG_LABEL_STYLE,
     )
-    root._overlay_log_label.pack(**OVERLAY_LOG_LABEL_PACK)
+    root._overlay_log_label.pack(**{**OVERLAY_LOG_LABEL_PACK, "padx": OVERLAY_LOG_PANEL_PAD_X, "pady": OVERLAY_LOG_PANEL_PAD_Y}, fill="x")
+    _apply_log_panel_style(root)
 
     if os.name == "nt":
         try:
@@ -244,8 +414,12 @@ def ui_print(msg, is_replace=False, save_log=False, show_console=True):
         return
 
     gui_msg = f"[{now}] {msg}"
-    if is_replace and state.log_lines and state.overlay_last_log_replaceable:
-        state.log_lines[-1] = gui_msg
+    if state.log_lines and state.overlay_last_log_replaceable:
+        if is_replace:
+            state.log_lines[-1] = gui_msg
+        else:
+            # 正式日志到来时，收掉尾部临时 replace 行，避免结果日志和旧临时日志同时残留。
+            state.log_lines[-1] = gui_msg
     else:
         state.log_lines.append(gui_msg)
     state.overlay_last_log_replaceable = bool(is_replace)
@@ -270,12 +444,12 @@ def toggle_pause():
         if state.last_resume_time is not None:
             state.total_running_time += (time.time() - state.last_resume_time)
             state.last_resume_time = None
-        ui_print("脚本已暂停（按 F12 恢复）")
+        ui_print("脚本暂停（F12 恢复）")
         pause_persist_result = persist_pause_snapshot()
         if pause_persist_result.status == "success":
             ui_print("暂停后已写入当前账号最小必要字段，账号状态已更新为人工暂停。", save_log=True)
         elif pause_persist_result.status != "skipped":
-            ui_print(f"暂停后最小写库失败：{pause_persist_result.reason}", save_log=True)
+            ui_print(f"暂停写库失败：{pause_persist_result.reason}", save_log=True)
         if state.overlay_root:
             try:
                 enqueue_overlay_task(state.overlay_root.withdraw)
@@ -290,11 +464,11 @@ def toggle_pause():
                 pass
         resume_persist_result = persist_resume_snapshot()
         if resume_persist_result.status == "success":
-            ui_print("脚本已恢复（按 F12 暂停），当前账号状态已从人工暂停恢复为运行中。")
+            ui_print("脚本恢复（F12 暂停）")
         elif resume_persist_result.status == "skipped":
-            ui_print("脚本已恢复（按 F12 暂停）")
+            ui_print("脚本恢复（F12 暂停）")
         else:
-            ui_print(f"脚本已恢复（按 F12 暂停），但状态回写失败：{resume_persist_result.reason}", save_log=True)
+            ui_print(f"脚本恢复，回写失败：{resume_persist_result.reason}", save_log=True)
 
 
 def _pause_hotkey_loop():

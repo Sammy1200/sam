@@ -20,7 +20,7 @@ from config import SCROLL_POS, PRE_EXIT_CLICK_DELAY, SCRIPT_DIR
 
 OVERLAY_NORMAL_GEOMETRY = "+20+20"
 OVERLAY_NORMAL_BG = "black"
-OVERLAY_NORMAL_ALPHA = 0.75
+OVERLAY_NORMAL_ALPHA = 0.9
 OVERLAY_SCORE_LABEL_STYLE = {
     "font": ("NSimSun", 12, "bold"),
     "fg": "gold",
@@ -304,8 +304,15 @@ def restore_overlay():
         _forget_packed_widget(log_label)
 
         if score_label is not None:
-            score_label.configure(**OVERLAY_SCORE_LABEL_STYLE)
-            score_label.pack(**OVERLAY_SCORE_LABEL_PACK)
+            if isinstance(score_label, tk.Label):
+                score_label.configure(**OVERLAY_SCORE_LABEL_STYLE)
+                score_label.pack(**OVERLAY_SCORE_LABEL_PACK)
+            else:
+                try:
+                    score_label.configure(bg=OVERLAY_NORMAL_BG)
+                except Exception:
+                    pass
+                score_label.pack(**OVERLAY_SCORE_LABEL_PACK, fill="x")
         if log_label is not None:
             log_label.configure(**OVERLAY_LOG_LABEL_STYLE)
             log_label.pack(**OVERLAY_LOG_LABEL_PACK)

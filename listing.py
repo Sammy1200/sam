@@ -68,7 +68,7 @@ def check_and_click_tishi(camera_obj):
         th, tw = state.TEMP_TISHI.shape[:2]
         abs_x = MONITOR_TISHI["left"] + max_loc[0] + tw // 2
         abs_y = MONITOR_TISHI["top"] + max_loc[1] + th // 2
-        ui_print("检测到首次上架提示弹窗，执行消除。", save_log=True)
+        ui_print("检测到提示弹窗，执行消除。", save_log=True)
         safe_sleep(0.08)
         fast_click((abs_x, abs_y))
         safe_sleep(0.5)
@@ -102,7 +102,7 @@ def input_price_with_verify():
 def _reset_listing_scan_miss_count():
     if state.listing_scan_miss_count > 0:
         ui_print(
-            f"[扫描] 已重新找到上架道具，连续未找到计数清零（此前 {state.listing_scan_miss_count} 次）。"
+            f"找到上架道具，未找到计数清零（此前 {state.listing_scan_miss_count} 次）。"
         )
     state.listing_scan_miss_count = 0
 
@@ -127,7 +127,7 @@ def execute_listing_routine(camera_obj, is_periodic=False):
     state.last_resume_time = None
     state.purchase_timer_active = False
     state.overlay_status = "上架中"
-    ui_print("系统已冻结抢购计时，开始执行自动上架。")
+    ui_print("已冻结抢购计时，执行自动上架。")
     move_overlay("+600+0")
 
     first_popup_checked = False
@@ -138,7 +138,7 @@ def execute_listing_routine(camera_obj, is_periodic=False):
             state.baseline_item_count -= 1
         else:
             state.baseline_item_count = 0
-            ui_print("上架成功后库存已为 0，已阻止写入负库存，请核对真实库存。", save_log=True)
+            ui_print("上架成功后库存已为 0，核对真实库存。", save_log=True)
 
         if state.overlay_root:
             try:
@@ -189,7 +189,7 @@ def execute_listing_routine(camera_obj, is_periodic=False):
             return
 
         remaining = original_total - original_current
-        ui_print(f"容量充足：已上架 {original_current}，还可继续上架 {remaining} 个。")
+        ui_print(f"已上架 {original_current}，还可继续上架 {remaining} 个。")
 
         listed = 0
         fail_strike = 0
@@ -284,7 +284,7 @@ def execute_listing_routine(camera_obj, is_periodic=False):
                         if before_frame is not None and after_frame is not None:
                             similarity = compare_region_similarity(before_frame, after_frame, SCAN_REGION)
                             if similarity >= SIMILARITY_THRESHOLD:
-                                _disable_periodic_listing("[上架限制] 已判断翻页到底，本轮后续停止 10 分钟自动上架。")
+                                _disable_periodic_listing("[上架限制] 翻页到底，本轮停止上架。")
                                 ui_print("[翻页] 相似度过高，确认已经到底，结束上架。")
                                 break
                         fail_strike = 0
@@ -305,11 +305,11 @@ def execute_listing_routine(camera_obj, is_periodic=False):
                         )
                         if state.listing_scan_miss_count >= LISTING_SCAN_MISS_THRESHOLD:
                             _disable_periodic_listing(
-                                f"[上架限制] 连续翻页 {LISTING_SCAN_MISS_THRESHOLD} 次未找到上架道具，本轮后续停止 10 分钟自动上架。"
+                                f"[上架限制]{LISTING_SCAN_MISS_THRESHOLD} 次未找到道具，本轮停止上架。"
                             )
                             break
                         continue
-                    _disable_periodic_listing("[上架限制] 已判断翻页到底，本轮后续停止 10 分钟自动上架。")
+                    _disable_periodic_listing("[上架限制] 翻页到底，本轮停止上架。")
                     ui_print("[翻页] 相似度过高，确认已经到底，结束上架。")
                     break
 
@@ -319,7 +319,7 @@ def execute_listing_routine(camera_obj, is_periodic=False):
         ui_print(f"上架过程出现意外报错：{exc}")
     finally:
         time.sleep(0.5)
-        ui_print("退出背包，按退出键返回交易行并继续抢购。")
+        ui_print("返回交易行继续抢购。")
         press_key(0x1B)
         time.sleep(0.5)
         state._last_balance_hash = None

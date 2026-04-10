@@ -334,7 +334,7 @@ def _prepare_launcher_start_context_from_nickname():
 
     state.current_server_index = server_index
     ui_print(
-        f"启动信息已自动解析：昵称 {state.current_nickname}，"
+        f"自动解析：昵称 {state.current_nickname}，"
         f"执行位 {state.current_execution_slot}，大区 {server_index + 1}"
     )
     logger.info(
@@ -455,7 +455,7 @@ def _prepare_temporary_purchase_context(item_count):
     state.overlay_status = "临时抢购中"
     reset_round_runtime_state("进入临时抢购模式")
     reset_purchase_counters("进入临时抢购模式")
-    ui_print(f"临时抢购模式已启动，当前道具库存：{item_count}", save_log=True)
+    ui_print(f"临时抢购模式，当前道具库存：{item_count}", save_log=True)
     print(f"[临时模式] 已启动，当前道具库存={item_count}")
     logger.info("[临时模式] 已启动，当前道具库存=%s", item_count)
 
@@ -779,7 +779,7 @@ def _run_direct_account_flow(camera):
     if not _load_current_account_context():
         return False
     if not state.account_allow_purchase:
-        ui_print("当前账号未到允许抢购时间，先执行预上架流程...")
+        ui_print("账号未到抢购时间，执行预上架流程...")
         return _run_pre_listing_flow(
             camera,
             reset_runtime_before_listing=True,
@@ -796,7 +796,7 @@ def _prepare_launcher_start(camera):
 
 def _pause_after_launcher_start_failure():
     """启动器链路失败时，保留现场并等待人工确认。"""
-    message = "从启动器进入游戏流程失败，脚本暂停等待人工处理。"
+    message = "启动器进入游戏流程失败，脚本暂停"
     ui_print(message, save_log=True)
     print(f"[启动器] {message}")
     logger.error("[启动器] %s", message)
@@ -828,7 +828,7 @@ def _handle_execution_slot_dispatch(camera):
             return "abort"
 
         ui_print(
-            f"线程6调度：执行位 {transition['current_slot']} 本轮结束，下一目标执行位 {transition['next_slot']}。",
+            f"线程6调度：执行位 {transition['current_slot']} 本轮结束，下一执行位 {transition['next_slot']}。",
             save_log=True,
         )
         print(
@@ -843,7 +843,7 @@ def _handle_execution_slot_dispatch(camera):
 
         if transition["requires_account_switch"]:
             ui_print(
-                f"线程6调度：命中 {transition['current_slot']}->{transition['next_slot']} 自动衔接边界，继续沿用原链路。",
+                f"线程6调度：命中 {transition['current_slot']}->{transition['next_slot']} 衔接边界，沿用原链路。",
                 save_log=True,
             )
             logger.info(
@@ -858,7 +858,7 @@ def _handle_execution_slot_dispatch(camera):
                 return "abort"
         else:
             ui_print(
-                f"线程6调度：命中 {transition['current_slot']}->{transition['next_slot']} 同账号跨区切换，进入真实页面自动切换。",
+                f"线程6调度：命中 {transition['current_slot']}->{transition['next_slot']} 同账号跨区切换，自动切换。",
                 save_log=True,
             )
             logger.info(
@@ -1160,7 +1160,7 @@ def main():
                     return
             else:
                 item_count = _prompt_temporary_item_count()
-                ui_print("临时抢购模式将在 1 秒后启动...")
+                ui_print("临时抢购模式在 1 秒后启动...")
                 safe_sleep(1.0)
                 _prepare_temporary_purchase_context(item_count)
                 ui_print("开始执行预上架流程...")

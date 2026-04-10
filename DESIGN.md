@@ -365,39 +365,3 @@ The color system is almost entirely achromatic — dark backgrounds with white/g
 5. Brand indigo (`#5e6ad2` / `#7170ff`) is the only chromatic color — everything else is grayscale
 6. Borders are always semi-transparent white, never solid dark colors on dark backgrounds
 7. Berkeley Mono for any code or technical content, Inter Variable for everything else
-
-## Overlay / 悬浮窗设计语言补充
-
-项目中的悬浮窗（overlay）显示层，优先遵循以下设计方向：
-
-- 风格关键词：
-  - deep glass
-  - glassmorphism
-  - frosted card
-  - blue-gray
-  - soft highlight
-  - readable tool overlay
-
-- 总体原则：
-  1. 优先采用“深色冷蓝灰玻璃卡片风”
-  2. 强调轻量、稳定、可读，不追求炫技
-  3. 工具型信息面板优先，设计感服务于可读性
-  4. 不依赖真实背景模糊，不依赖连续动画，不依赖重阴影
-  5. 数字、状态、关键运行信息必须比装饰更醒目
-
-- 视觉基调：
-  1. 整体偏深色、冷色、低饱和
-  2. 使用半透明深蓝灰底色，而非纯黑或高饱和蓝
-  3. 使用细亮边、高光层、轻微漂浮感来模拟玻璃质感
-  4. 子模块应像卡片分组，而不是简单文本堆叠
-
-- 工程约束：
-  1. 悬浮窗样式优化不能以牺牲脚本稳定性为代价
-  2. 悬浮窗样式优化不能显著增加 CPU / GPU 占用
-  3. 显示层设计不能反向推动主流程、状态机、刷新机制的重构
-  4. 当前阶段优先保留现有技术栈与运行方式，在此基础上做轻量视觉升级
-
-悬浮窗的具体风格细节、配色、结构和验收标准，统一以下列文档为准：
-
-- `docs/overlay_glass_style.md`
-- `docs/overlay_acceptance.md`
