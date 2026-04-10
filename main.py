@@ -95,6 +95,7 @@ from account_db import (
     read_preferred_canonical_account_stats_record_by_execution_slot,
     read_canonical_account_stats_record,
     read_canonical_account_stats_record_by_execution_slot,
+    restore_ready_account_status_if_needed,
 )
 from round_persistence import (
     persist_final_round_snapshot,
@@ -401,6 +402,53 @@ def _format_timer_state():
     )
 
 
+def _restore_current_account_ready_status(reason):
+    if state.temporary_purchase_mode:
+        return None
+    if not state.account_record_loaded or not state.account_db_path:
+        return None
+
+    restored_record, restore_result = restore_ready_account_status_if_needed(
+        state.account_db_path,
+        state.current_nickname,
+        table_name=state.account_db_table_name or CANONICAL_ACCOUNT_STATS_TABLE,
+        now=datetime.now(),
+    )
+    if restore_result.status != "success" or restored_record is None:
+        if restore_result.status not in ("skipped", "account_not_found"):
+            print(f"[账号数据] {reason}自动恢复“已准备”失败：{restore_result.reason}")
+            logger.warning("[账号数据] %s自动恢复“已准备”失败：%s", reason, restore_result.reason)
+        return restore_result
+
+    state.current_nickname = restored_record.nickname
+    state.baseline_item_count = restored_record.baseline_item_count
+    state.last_limit_time = restored_record.last_limit_time
+    state.last_account_end_time = restored_record.last_account_end_time
+    state.updated_at = restored_record.updated_at
+    if restored_record.current_execution_slot is not None:
+        state.current_execution_slot = restored_record.current_execution_slot
+    state.success_count = restored_record.round_purchase_success_count
+    state.total_listed_count = restored_record.round_listing_success_count
+    state.fail_count = restored_record.round_purchase_fail_count
+    state.round_purchase_success_count = restored_record.round_purchase_success_count
+    state.round_listing_success_count = restored_record.round_listing_success_count
+    state.round_purchase_fail_count = restored_record.round_purchase_fail_count
+    state.round_current_balance = restored_record.current_balance
+    state.total_running_time = float(restored_record.purchase_running_seconds)
+    state.round_purchase_running_seconds = float(restored_record.purchase_running_seconds)
+    state.runtime_window_start_time = restored_record.runtime_window_start_time
+    state.round_status = restored_record.round_status
+    state.account_allow_purchase = True
+    state.account_allow_start_time = datetime.now()
+    state.account_read_status = "ready"
+    state.account_is_waiting = False
+    state.account_read_error = ""
+    state.overlay_status = "抢购中"
+    print(f"[账号数据] {reason}，账号状态已自动恢复为“已准备”。")
+    logger.info("[账号数据] %s，账号状态已自动恢复为“已准备”。", reason)
+    return restore_result
+
+
 def _set_account_state_defaults():
     state.success_count = 0
     state.fail_count = 0
@@ -650,6 +698,20 @@ def _load_current_account_context():
         logger.error(f"[账号数据] 读取失败：{state.account_read_error}")
         return False
 
+    restored_record, restore_result = restore_ready_account_status_if_needed(
+        database_path,
+        record.nickname,
+        table_name,
+        now=datetime.now(),
+    )
+    if restore_result.status == "success" and restored_record is not None:
+        record = restored_record
+        print(f"[账号数据] 读取账号后检测到冷却已结束，已自动恢复为“已准备”：{record.nickname}")
+        logger.info("[账号数据] 读取账号后检测到冷却已结束，已自动恢复为“已准备”：%s", record.nickname)
+    elif restore_result.status not in ("skipped", "account_not_found"):
+        print(f"[账号数据] 读取账号后自动恢复“已准备”失败：{restore_result.reason}")
+        logger.warning("[账号数据] 读取账号后自动恢复“已准备”失败：%s", restore_result.reason)
+
     state.current_nickname = record.nickname
     state.baseline_item_count = record.baseline_item_count
     state.last_limit_time = record.last_limit_time
@@ -750,6 +812,7 @@ def _wait_until_account_ready():
     state.account_read_status = "ready"
     state.account_is_waiting = False
     state.overlay_status = "抢购中"
+    _restore_current_account_ready_status("冷却等待结束")
     _resume_purchase_timer(resume_timer_after_wait)
 
     print(f"[账号数据] 解除等待，恢复后计时器状态：{_format_timer_state()}")

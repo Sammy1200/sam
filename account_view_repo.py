@@ -16,6 +16,7 @@ from account_db import (
     MACHINE_DAILY_SUMMARY_TABLE,
     ROUND_STATUS_LIMITED,
     ROUND_STATUS_MANUAL_PAUSE,
+    ROUND_STATUS_READY,
     ROUND_STATUS_RUNTIME_REACHED,
     ROUND_STATUS_VALUES,
     find_canonical_account_stats_store,
@@ -23,6 +24,7 @@ from account_db import (
     read_canonical_account_stats_record,
     read_machine_daily_summary_records,
     read_runtime_execution_state,
+    restore_ready_account_status_if_needed,
     save_canonical_account_stats_record,
 )
 from config import (
@@ -368,6 +370,111 @@ def _build_runtime_window_fields(
     }
 
 
+def _row_to_canonical_account_record(row):
+    if row is None:
+        return None
+
+    return AccountStatsRecord(
+        nickname=str(_row_value(row, "nickname") or "").strip(),
+        baseline_item_count=_parse_int(_row_value(row, "baseline_item_count")),
+        last_limit_time=_parse_datetime(_row_value(row, "last_limit_time")),
+        last_account_end_time=_parse_datetime(_row_value(row, "last_account_end_time")),
+        updated_at=_parse_datetime(_row_value(row, "updated_at")),
+        current_execution_slot=(
+            _parse_int(_row_value(row, "current_execution_slot"))
+            if _row_value(row, "current_execution_slot") not in (None, "")
+            else None
+        ),
+        round_purchase_success_count=_parse_int(_row_value(row, "round_purchase_success_count")),
+        round_listing_success_count=_parse_int(_row_value(row, "round_listing_success_count")),
+        round_purchase_fail_count=_parse_int(_row_value(row, "round_purchase_fail_count")),
+        current_balance=str(_row_value(row, "current_balance") or "").strip(),
+        purchase_running_seconds=_parse_int(_row_value(row, "purchase_running_seconds")),
+        runtime_window_start_time=_parse_datetime(_row_value(row, "runtime_window_start_time")),
+        round_status=_normalize_view_round_status(_row_value(row, "round_status")),
+    )
+
+
+def _maybe_restore_ready_record(database_path, table_name, record, now):
+    if record is None:
+        return None
+
+    normalized_status = _normalize_view_round_status(record.round_status)
+    if normalized_status not in (ROUND_STATUS_LIMITED, ROUND_STATUS_RUNTIME_REACHED):
+        return record
+
+    cooldown_fields = _build_cooldown_fields(
+        normalized_status,
+        record.last_limit_time,
+        record.updated_at,
+        now,
+    )
+    if _parse_int(cooldown_fields.get("cooldown_remaining_seconds")) > 0:
+        return record
+
+    restored_record, restore_result = restore_ready_account_status_if_needed(
+        database_path,
+        record.nickname,
+        table_name=table_name,
+        now=now,
+    )
+    if restore_result.status == "success" and restored_record is not None:
+        return restored_record
+    return record
+
+
+def _account_stats_record_to_view_record(record, now):
+    if record is None:
+        return None
+
+    last_limit_time = _parse_datetime(record.last_limit_time)
+    last_account_end_time = _parse_datetime(record.last_account_end_time)
+    updated_at = _parse_datetime(record.updated_at)
+    runtime_window_start_time = _parse_datetime(record.runtime_window_start_time)
+    current_execution_slot = record.current_execution_slot
+
+    view_record = {
+        "nickname": str(record.nickname or "").strip(),
+        "baseline_item_count": _parse_int(record.baseline_item_count),
+        "last_limit_time": _serialize_datetime(last_limit_time),
+        "last_account_end_time": _serialize_datetime(last_account_end_time),
+        "updated_at": _serialize_datetime(updated_at),
+        "current_execution_slot": (
+            _parse_int(current_execution_slot)
+            if current_execution_slot not in (None, "")
+            else None
+        ),
+        "round_purchase_success_count": _parse_int(record.round_purchase_success_count),
+        "round_listing_success_count": _parse_int(record.round_listing_success_count),
+        "round_purchase_fail_count": _parse_int(record.round_purchase_fail_count),
+        "current_balance": str(record.current_balance or "").strip(),
+        "purchase_running_seconds": _parse_int(record.purchase_running_seconds),
+        "runtime_window_start_time": _serialize_datetime(runtime_window_start_time),
+        "round_status": _normalize_view_round_status(record.round_status),
+    }
+    view_record["item_quantity"] = view_record["baseline_item_count"]
+    view_record["inventory_quantity"] = view_record["baseline_item_count"]
+    view_record["current_balance_wan"] = _format_balance_for_wan_input(view_record["current_balance"])
+    view_record["updated_at_relative"] = _format_updated_at_relative(updated_at, now)
+    cooldown_fields = _build_cooldown_fields(view_record["round_status"], last_limit_time, updated_at, now)
+    view_record.update(cooldown_fields)
+    view_record.update(
+        _build_runtime_window_fields(
+            view_record["round_status"],
+            view_record["purchase_running_seconds"],
+            runtime_window_start_time,
+            cooldown_fields.get("cooldown_remaining_seconds"),
+            updated_at,
+            last_account_end_time,
+            now,
+        )
+    )
+    view_record.setdefault("inventory_quantity", 0)
+    view_record.setdefault("updated_at_relative", "")
+    view_record.setdefault("runtime_window_remaining_text", _format_duration_text(0))
+    return view_record
+
+
 def _is_missing_value(value):
     if value is None:
         return True
@@ -551,52 +658,7 @@ def _build_runtime_snapshot_health(rows, runtime_snapshot):
 
 
 def _row_to_view_record(row, now):
-    last_limit_time = _parse_datetime(_row_value(row, "last_limit_time"))
-    last_account_end_time = _parse_datetime(_row_value(row, "last_account_end_time"))
-    updated_at = _parse_datetime(_row_value(row, "updated_at"))
-    runtime_window_start_time = _parse_datetime(_row_value(row, "runtime_window_start_time"))
-    current_execution_slot = _row_value(row, "current_execution_slot")
-
-    record = {
-        "nickname": str(_row_value(row, "nickname") or "").strip(),
-        "baseline_item_count": _parse_int(_row_value(row, "baseline_item_count")),
-        "last_limit_time": _serialize_datetime(last_limit_time),
-        "last_account_end_time": _serialize_datetime(last_account_end_time),
-        "updated_at": _serialize_datetime(updated_at),
-        "current_execution_slot": (
-            _parse_int(current_execution_slot)
-            if current_execution_slot not in (None, "")
-            else None
-        ),
-        "round_purchase_success_count": _parse_int(_row_value(row, "round_purchase_success_count")),
-        "round_listing_success_count": _parse_int(_row_value(row, "round_listing_success_count")),
-        "round_purchase_fail_count": _parse_int(_row_value(row, "round_purchase_fail_count")),
-        "current_balance": str(_row_value(row, "current_balance") or "").strip(),
-        "purchase_running_seconds": _parse_int(_row_value(row, "purchase_running_seconds")),
-        "runtime_window_start_time": _serialize_datetime(runtime_window_start_time),
-        "round_status": _normalize_view_round_status(_row_value(row, "round_status")),
-    }
-    record["item_quantity"] = record["baseline_item_count"]
-    record["inventory_quantity"] = record["baseline_item_count"]
-    record["current_balance_wan"] = _format_balance_for_wan_input(record["current_balance"])
-    record["updated_at_relative"] = _format_updated_at_relative(updated_at, now)
-    cooldown_fields = _build_cooldown_fields(record["round_status"], last_limit_time, updated_at, now)
-    record.update(cooldown_fields)
-    record.update(
-        _build_runtime_window_fields(
-            record["round_status"],
-            record["purchase_running_seconds"],
-            runtime_window_start_time,
-            cooldown_fields.get("cooldown_remaining_seconds"),
-            updated_at,
-            last_account_end_time,
-            now,
-        )
-    )
-    record.setdefault("inventory_quantity", 0)
-    record.setdefault("updated_at_relative", "")
-    record.setdefault("runtime_window_remaining_text", _format_duration_text(0))
-    return record
+    return _account_stats_record_to_view_record(_row_to_canonical_account_record(row), now)
 
 
 def _build_edit_meta(record=None):
@@ -827,7 +889,16 @@ def get_account_view_rows():
             f"FROM {_quote_identifier(table_name or CANONICAL_ACCOUNT_STATS_TABLE)} "
             f"ORDER BY {order_by_sql}"
         ).fetchall()
-        view_rows = [_row_to_view_record(row, generated_at) for row in rows]
+        view_rows = []
+        for row in rows:
+            canonical_record = _row_to_canonical_account_record(row)
+            canonical_record = _maybe_restore_ready_record(
+                database_path,
+                table_name,
+                canonical_record,
+                generated_at,
+            )
+            view_rows.append(_account_stats_record_to_view_record(canonical_record, generated_at))
         result = _build_canonical_result(database_path, table_name, view_rows, generated_at)
         result["health"] = {
             **_build_duplicate_slot_health(view_rows),
@@ -905,7 +976,14 @@ def get_account_view_detail(nickname=None, execution_slot=None):
                 (slot_value,),
             ).fetchone()
         if row is not None:
-            record = _row_to_view_record(row, generated_at)
+            canonical_record = _row_to_canonical_account_record(row)
+            canonical_record = _maybe_restore_ready_record(
+                database_path,
+                table_name,
+                canonical_record,
+                generated_at,
+            )
+            record = _account_stats_record_to_view_record(canonical_record, generated_at)
             result["record"] = record
             result["edit_meta"] = _build_edit_meta(record)
             result["health"] = {
@@ -1024,7 +1102,11 @@ def update_account_view_record(
         runtime_window_start_time=current_record.runtime_window_start_time,
         round_status=normalized_round_status,
     )
-    if _is_forced_limit_status(normalized_round_status):
+    if normalized_round_status == ROUND_STATUS_READY:
+        updated_record.last_limit_time = None
+        updated_record.purchase_running_seconds = 0
+        updated_record.runtime_window_start_time = None
+    elif _is_forced_limit_status(normalized_round_status):
         updated_record.purchase_running_seconds = 0
         updated_record.runtime_window_start_time = None
 

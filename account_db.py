@@ -1,11 +1,12 @@
 """SQLite account lookup and round write-back helpers."""
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 import json
 import os
 import sqlite3
 
 from config import (
+    ACCOUNT_LIMIT_COOLDOWN_SECONDS,
     ACCOUNT_STATS_DB_PATH,
     EXECUTION_SLOT_COUNT,
     EXECUTION_SLOT_NICKNAMES,
@@ -156,6 +157,7 @@ ROUND_STATUS_RUNNING = "\u8fd0\u884c\u4e2d"
 ROUND_STATUS_LIMITED = "\u8d26\u53f7\u9650\u5236"
 ROUND_STATUS_BALANCE_LOW = "\u4f59\u989d\u4e0d\u8db3"
 ROUND_STATUS_RUNTIME_REACHED = "\u62a2\u8d2d\u65f6\u957f\u5df2\u5230"
+ROUND_STATUS_READY = "\u5df2\u51c6\u5907"
 ROUND_STATUS_NORMAL_END = "\u6b63\u5e38\u7ed3\u675f"
 ROUND_STATUS_UNKNOWN = "\u672a\u77e5\u5f02\u5e38"
 ROUND_STATUS_MANUAL_PAUSE = "\u4eba\u5de5\u6682\u505c"
@@ -166,6 +168,7 @@ ROUND_STATUS_VALUES = (
     ROUND_STATUS_LIMITED,
     ROUND_STATUS_BALANCE_LOW,
     ROUND_STATUS_RUNTIME_REACHED,
+    ROUND_STATUS_READY,
     ROUND_STATUS_UNKNOWN,
     ROUND_STATUS_MANUAL_PAUSE,
 )
@@ -174,6 +177,7 @@ ROUND_STATUS_VALUE_ALIASES = {
     ROUND_STATUS_LIMITED: ROUND_STATUS_LIMITED,
     ROUND_STATUS_BALANCE_LOW: ROUND_STATUS_BALANCE_LOW,
     ROUND_STATUS_RUNTIME_REACHED: ROUND_STATUS_RUNTIME_REACHED,
+    ROUND_STATUS_READY: ROUND_STATUS_READY,
     ROUND_STATUS_NORMAL_END: ROUND_STATUS_MANUAL_PAUSE,
     ROUND_STATUS_UNKNOWN: ROUND_STATUS_UNKNOWN,
     ROUND_STATUS_MANUAL_PAUSE: ROUND_STATUS_MANUAL_PAUSE,
@@ -185,6 +189,7 @@ ROUND_STATUS_VALUE_ALIASES = {
     "balance_low": ROUND_STATUS_BALANCE_LOW,
     "insufficient_balance": ROUND_STATUS_BALANCE_LOW,
     "runtime_reached": ROUND_STATUS_RUNTIME_REACHED,
+    "ready": ROUND_STATUS_READY,
     "normal_end": ROUND_STATUS_MANUAL_PAUSE,
     "unknown": ROUND_STATUS_UNKNOWN,
     "unknown_error": ROUND_STATUS_UNKNOWN,
@@ -825,6 +830,72 @@ def _normalize_round_status_for_storage(round_status):
     return normalized
 
 
+def _get_round_status_cooldown_remaining_seconds(last_limit_time, now=None):
+    if last_limit_time is None:
+        return 0
+
+    now_dt = now or datetime.now()
+    allow_start_time = last_limit_time + timedelta(seconds=ACCOUNT_LIMIT_COOLDOWN_SECONDS)
+    return int((allow_start_time - now_dt).total_seconds())
+
+
+def restore_ready_account_status_if_needed(
+    database_path,
+    nickname,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+    now=None,
+):
+    normalized_nickname = str(nickname or "").strip()
+    if not normalized_nickname:
+        return None, AccountWriteResult("nickname_missing", "current nickname is empty")
+    if not database_path or not os.path.isfile(database_path):
+        return None, AccountWriteResult("db_unavailable", f"database file not found: {database_path}")
+
+    record = read_canonical_account_stats_record(database_path, normalized_nickname, table_name)
+    if record is None:
+        return None, AccountWriteResult(
+            "account_not_found",
+            f"account record not found for nickname: {normalized_nickname}",
+        )
+
+    normalized_status = _normalize_round_status_for_storage(record.round_status)
+    if normalized_status not in (ROUND_STATUS_LIMITED, ROUND_STATUS_RUNTIME_REACHED):
+        return record, AccountWriteResult("skipped", f"current status does not require recovery: {normalized_status}")
+
+    now_dt = now or datetime.now()
+    cooldown_remaining_seconds = _get_round_status_cooldown_remaining_seconds(
+        record.last_limit_time,
+        now=now_dt,
+    )
+    if cooldown_remaining_seconds > 0:
+        return record, AccountWriteResult(
+            "skipped",
+            f"cooldown_remaining_seconds={cooldown_remaining_seconds}",
+        )
+
+    updated_record = replace(
+        record,
+        purchase_running_seconds=0,
+        runtime_window_start_time=None,
+        round_status=ROUND_STATUS_READY,
+        updated_at=now_dt,
+    )
+    try:
+        save_result = save_canonical_account_stats_record(database_path, updated_record, table_name)
+    except Exception as exc:
+        return record, AccountWriteResult("write_failed", f"restore ready status failed: {exc}")
+    if save_result.status != "success":
+        return record, save_result
+
+    reloaded_record = read_canonical_account_stats_record(database_path, normalized_nickname, table_name)
+    if reloaded_record is None:
+        return updated_record, AccountWriteResult(
+            "readback_failed",
+            f"readback failed after restoring ready status for nickname: {normalized_nickname}",
+        )
+    return reloaded_record, save_result
+
+
 def _row_to_account_stats_record(row):
     if row is None:
         return None
@@ -913,6 +984,7 @@ def _canonical_status_schema_requires_rebuild(conn, table_name):
         or ROUND_STATUS_NORMAL_END in create_sql
         or ROUND_STATUS_MANUAL_PAUSE not in create_sql
         or ROUND_STATUS_RUNTIME_REACHED not in create_sql
+        or ROUND_STATUS_READY not in create_sql
     )
 
 
