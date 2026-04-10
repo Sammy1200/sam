@@ -149,35 +149,14 @@ def get_price_decision(frame, templates):
                 state.price_decision_cache_text,
             )
 
-        # 先判断能直接买/直接跳过的价格前缀，只有 3xx 和 14xx 继续完整识别。
-        first_hits = _match_digit_hits(gray, templates, range(1, 10))
-        # 先判定能直接买/直接跳过的价格前缀，只有 3xx 和 14xx 继续完整识别。
-        first_hits = _match_digit_hits(gray, templates, range(1, 10))
+        # 先判断能直接买的价格前缀，2xx/3xx 继续完整识别。
         first_hits = _match_digit_hits(gray, templates, range(1, 10))
         if first_hits:
-            first_x, first_digit, _, first_width = first_hits[0]
+            _, first_digit, _, _ = first_hits[0]
 
-            if first_digit in FAST_ACCEPT_FIRST_DIGITS:
+            if first_digit in FAST_ACCEPT_FIRST_DIGITS or first_digit == "1":
                 _cache_price_decision(roi_bytes, "accept", None, first_digit)
                 return "accept", None, first_digit
-
-            if first_digit == "2":
-                _cache_price_decision(roi_bytes, "reject", None, first_digit)
-                return "reject", None, first_digit
-
-            if first_digit == "1":
-                second_start = first_x + max(first_width - 1, 1)
-                if second_start < gray.shape[1]:
-                    second_hits = _match_digit_hits(gray[:, second_start:], templates, range(10))
-                    if second_hits:
-                        second_digit = second_hits[0][1]
-                        prefix = f"1{second_digit}"
-                        if second_digit in FAST_ACCEPT_SECOND_DIGITS:
-                            _cache_price_decision(roi_bytes, "accept", None, prefix)
-                            return "accept", None, prefix
-                        if second_digit in FAST_REJECT_SECOND_DIGITS:
-                            _cache_price_decision(roi_bytes, "reject", None, prefix)
-                            return "reject", None, prefix
 
         price_value = get_number(frame, templates)
         if price_value is None:

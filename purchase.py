@@ -11,6 +11,7 @@ import requests
 import state
 from config import (
     ACCOUNT_MAX_PURCHASE_SECONDS,
+    ACCOUNT_RUNTIME_CONTINUE_BALANCE_THRESHOLD,
     ACCOUNT_LIMIT_THRESHOLD,
     BUY_POS,
     CONFIRM_DELAY,
@@ -116,18 +117,9 @@ def check_balance_limit(frame):
         state.overlay_root.after(0, update_score_text)
 
     try:
-        match = re.search(r"[\d\.]+", bal_str)
-        if not match:
+        real_val = parse_balance_text_to_value(bal_str)
+        if real_val is None:
             return True
-
-        num_val = float(match.group())
-        if "亿" in bal_str:
-            real_val = int(round(num_val * 100000000))
-        elif "万" in bal_str:
-            real_val = int(round(num_val * 10000))
-        else:
-            real_val = int(num_val)
-
         if real_val < MAX_PRICE:
             state.account_round_end_status = "余额不足"
             state.overlay_status = "余额不足"
@@ -140,6 +132,33 @@ def check_balance_limit(frame):
         pass
 
     return True
+
+
+def get_latest_runtime_balance_text():
+    for balance_text in (state.current_balance, state.last_valid_balance, state.round_current_balance):
+        text = str(balance_text or "").strip()
+        if text and not text.startswith("获取中"):
+            return text
+    return ""
+
+
+def parse_balance_text_to_value(balance_text):
+    try:
+        text = str(balance_text or "").strip()
+        if not text:
+            return None
+        match = re.search(r"[\d\.]+", text)
+        if not match:
+            return None
+
+        num_val = float(match.group())
+        if "亿" in text:
+            return int(round(num_val * 100000000))
+        if "万" in text:
+            return int(round(num_val * 10000))
+        return int(num_val)
+    except:
+        return None
 
 
 def wait_and_recognize_balance(wait_time, camera):
@@ -187,6 +206,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
     last_idle_push_time = time.time()
     last_success_time = time.time()
     last_runtime_state_check = 0.0
+    runtime_reached_continue_mode = False
 
     gc.disable()
 
@@ -213,13 +233,26 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                     persist_account_limit_reached_if_needed()
                     last_runtime_state_check = current_time
 
-                if get_current_elapsed() >= ACCOUNT_MAX_PURCHASE_SECONDS:
+                if not runtime_reached_continue_mode and get_current_elapsed() >= ACCOUNT_MAX_PURCHASE_SECONDS:
                     persist_account_limit_reached_if_needed()
-                    state.overlay_status = "抢购时长已到"
-                    ui_print("已达到 2小时50分 可运行时间阈值，结束当前抢购循环并进入主流程收尾。", save_log=True)
-                    state.account_round_end_status = "抢购时长已到"
-                    state.need_switch_server = not state.temporary_purchase_mode
-                    return
+                    latest_balance_text = get_latest_runtime_balance_text()
+                    latest_balance_value = parse_balance_text_to_value(latest_balance_text)
+                    if (
+                        latest_balance_value is not None
+                        and latest_balance_value >= ACCOUNT_RUNTIME_CONTINUE_BALANCE_THRESHOLD
+                    ):
+                        runtime_reached_continue_mode = True
+                        state.overlay_status = "抢购中"
+                        ui_print(
+                            f"已达到 2小时50分 可运行时间阈值，但当前余额 {latest_balance_text} 达到继续阈值，保持抢购直到自然触发账号限制。",
+                            save_log=True,
+                        )
+                    else:
+                        state.overlay_status = "抢购时长已到"
+                        ui_print("已达到 2小时50分 可运行时间阈值，结束当前抢购循环并进入主流程收尾。", save_log=True)
+                        state.account_round_end_status = "抢购时长已到"
+                        state.need_switch_server = not state.temporary_purchase_mode
+                        return
 
                 if (current_time - last_refresh > STUCK_PUSH_INTERVAL and
                         current_time - last_stuck_push_time > STUCK_PUSH_INTERVAL):
