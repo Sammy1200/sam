@@ -123,6 +123,33 @@ def _render_local_relative_time_script():
 """
 
 
+def _render_strip_year_display_script():
+    return """
+<script>
+(function () {
+  function stripYearText(text) {
+    return String(text || "")
+      .replace(/\\b\\d{4}[-/年]/g, "")
+      .replace(/^(\\d{4})年/, "")
+      .trim();
+  }
+
+  document.querySelectorAll(".summary-card-date").forEach(function (node) {
+    node.textContent = stripYearText(node.textContent);
+  });
+
+  document.querySelectorAll(".page-shell-home .meta, .page-shell-public .meta").forEach(function (node) {
+    node.childNodes.forEach(function (child) {
+      if (child.nodeType === 3) {
+        child.textContent = stripYearText(child.textContent);
+      }
+    });
+  });
+})();
+</script>
+"""
+
+
 def _build_machine_daily_summary_rows(machine_daily_summaries):
     summary_by_date = {
         str(item.get("stat_date") or "").strip(): item
@@ -217,10 +244,170 @@ def _build_demo_account_rows():
 
 
 def _render_machine_section_title(title, badge_text):
-    return (
-        f'<h2>{escape(str(title))} '
-        f'<span class="unit-tag">{escape(str(badge_text))}</span></h2>'
-    )
+    return f"""
+<div class="section-head">
+  <div class="section-head-main">
+    <div class="section-title-wrap">
+      <div class="section-eyebrow">Zone</div>
+      <h2 class="section-title">{escape(str(title))}</h2>
+    </div>
+    <span class="unit-tag">{escape(str(badge_text))}</span>
+  </div>
+</div>
+"""
+
+
+def _render_page_title(title, lead_text, rule_text="", kicker="Page"):
+    lead_html = f'<p class="page-title-lead">{escape(str(lead_text))}</p>' if str(lead_text or "").strip() else ""
+    rule_html = f'<p class="page-title-rule">{escape(str(rule_text))}</p>' if str(rule_text or "").strip() else ""
+    kicker_html = f'<div class="page-title-kicker">{escape(str(kicker))}</div>' if str(kicker or "").strip() else ""
+    return f"""
+<header class="page-title-shell">
+  {kicker_html}
+  <div class="page-title-main">
+    <h1>{escape(str(title))}</h1>
+    {lead_html}
+    {rule_html}
+  </div>
+</header>
+"""
+
+
+def _render_module_title(title, note=""):
+    note_html = f'<p class="module-note">{escape(str(note))}</p>' if str(note or "").strip() else ""
+    return f"""
+<div class="module-head">
+  <div class="module-title-row">
+    <span class="module-title-line" aria-hidden="true"></span>
+    <h3 class="module-title">{escape(str(title))}</h3>
+  </div>
+  {note_html}
+</div>
+"""
+
+
+def _build_linear_summary_cards(machine_daily_summaries):
+    summary_rows = _build_machine_daily_summary_rows(machine_daily_summaries)
+    cards = []
+    for index, row in enumerate(summary_rows):
+        label = str(row[0] or "").strip() or ("今日" if index == 0 else "昨日")
+        stat_date = (datetime.now() - timedelta(days=index)).strftime("%m-%d")
+        card_class = "summary-card summary-card-today" if index == 0 else "summary-card summary-card-yesterday"
+        cards.append(
+            f"""
+<article class="{card_class}">
+  <div class="summary-card-head">
+    <span class="summary-card-label">{escape(label)}</span>
+    <span class="summary-card-date">{escape(stat_date)}</span>
+  </div>
+  <div class="summary-main">
+    <span class="summary-main-label">总道具变化</span>
+    <strong class="summary-main-value">{row[1]}</strong>
+  </div>
+  <div class="summary-subgrid">
+    <div class="summary-metric">
+      <span class="summary-metric-label">总抢购成功</span>
+      <strong class="summary-metric-value">{row[2]}</strong>
+    </div>
+    <div class="summary-metric">
+      <span class="summary-metric-label">总上架成功</span>
+      <strong class="summary-metric-value">{row[3]}</strong>
+    </div>
+    <div class="summary-metric">
+      <span class="summary-metric-label">总抢购失败</span>
+      <strong class="summary-metric-value">{row[4]}</strong>
+    </div>
+  </div>
+</article>
+"""
+        )
+    return f'<div class="summary-band">{"".join(cards)}</div>'
+
+
+def _render_linear_page_action(href, label):
+    return f'<a class="page-title-action" href="{escape(str(href), quote=True)}">{escape(str(label))}</a>'
+
+
+def _render_linear_page_title(title, lead_text, rule_text="", kicker="Page", action_html=""):
+    lead_html = f'<p class="page-title-lead">{escape(str(lead_text))}</p>' if str(lead_text or "").strip() else ""
+    rule_html = f'<p class="page-title-rule">{escape(str(rule_text))}</p>' if str(rule_text or "").strip() else ""
+    kicker_html = f'<div class="page-title-kicker">{escape(str(kicker))}</div>' if str(kicker or "").strip() else ""
+    action_slot_html = f'<div class="page-title-action-slot">{action_html}</div>' if str(action_html or "").strip() else ""
+    return f"""
+<header class="page-title-shell">
+  <div class="page-title-top">
+    {kicker_html}
+    {action_slot_html}
+  </div>
+  <div class="page-title-main">
+    <h1>{escape(str(title))}</h1>
+    {lead_html}
+    {rule_html}
+  </div>
+</header>
+"""
+
+
+def _render_linear_section_title(title, badge_text, eyebrow="Zone", action_html=""):
+    action_block = f'<div class="section-head-actions">{action_html}</div>' if str(action_html or "").strip() else ""
+    badge_html = f'<span class="unit-tag">{escape(str(badge_text))}</span>' if str(badge_text or "").strip() else ""
+    return f"""
+<div class="section-head">
+  <div class="section-head-main">
+    <div class="section-head-primary">
+      <div class="section-title-wrap">
+        <div class="section-eyebrow">{escape(str(eyebrow))}</div>
+        <h2 class="section-title">{escape(str(title))}</h2>
+      </div>
+      {badge_html}
+    </div>
+    {action_block}
+  </div>
+</div>
+"""
+
+
+def _render_linear_module_toolbar(*items):
+    pills = []
+    for item in items:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        pills.append(f'<span class="toolbar-pill">{escape(text)}</span>')
+    if not pills:
+        return ""
+    return f'<div class="data-module-toolbar">{"".join(pills)}</div>'
+
+
+def _render_linear_data_module(title, note, table_html, *toolbar_items):
+    return f"""
+<div class="data-module">
+  {_render_module_title(title, note)}
+  {_render_linear_module_toolbar(*toolbar_items)}
+  <div class="data-module-frame">
+    {table_html}
+  </div>
+</div>
+"""
+
+
+def _render_linear_frame_only(table_html):
+    return f"""
+<div class="data-module">
+  <div class="data-module-frame">
+    {table_html}
+  </div>
+</div>
+"""
+
+
+def _format_time_without_year(text):
+    value = str(text or "").strip()
+    if not value:
+        return "-"
+    value = re.sub(r"^\d{4}[-/]", "", value)
+    value = re.sub(r"^\d{4}年", "", value)
+    return value
 
 
 def _build_list_form_values(row, edit_result):
@@ -249,8 +436,10 @@ def _render_local_read_only_cells(row):
         row.get("updated_at"),
     )
     inventory_cell = (
-        f'<div class="inline-field"><div class="readonly-value">{inventory_text}</div>'
-        f'<div class="muted-text">更新：{update_tip}</div></div>'
+        f'<div class="inline-field inventory-field"><div class="inventory-inline-row">'
+        f'<div class="readonly-value inventory-value">{inventory_text}</div>'
+        f'<div class="muted-text inventory-updated">{update_tip}</div>'
+        f"</div></div>"
     )
     balance_cell = _format_balance_wan_display(row.get("current_balance_wan"))
     status_cell = _format_value(row.get("round_status"))
@@ -284,9 +473,11 @@ def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
     )
 
     inventory_cell = f"""
-<div class="inline-field">
-  <input form="{escape(form_id, quote=True)}" type="number" name="baseline_item_count" step="1" min="0" required value="{escape(str(form_values.get('baseline_item_count') or ''), quote=True)}">
-  <div class="muted-text">更新：{update_tip}</div>
+<div class="inline-field inventory-field">
+  <div class="inventory-inline-row">
+    <input class="inventory-input" form="{escape(form_id, quote=True)}" type="number" name="baseline_item_count" step="1" min="0" required value="{escape(str(form_values.get('baseline_item_count') or ''), quote=True)}">
+    <div class="muted-text inventory-updated">{update_tip}</div>
+  </div>
   {_render_field_error(field_errors, "baseline_item_count")}
 </div>
 """
@@ -313,8 +504,10 @@ def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
     <input type="hidden" name="nickname" value="{escape(nickname, quote=True)}">
     <input type="hidden" name="return_to" value="index">
   </form>
-  <a href="{escape(f'/account?nickname={nickname}', quote=True)}">查看详情</a>
-  <button type="submit" form="{escape(form_id, quote=True)}">保存</button>
+  <div class="inline-save-main">
+    <button type="submit" form="{escape(form_id, quote=True)}">保存</button>
+    <a href="{escape(f'/account?nickname={nickname}', quote=True)}">查看详情</a>
+  </div>
   {_render_inline_row_result(row, edit_result)}
 </div>
 """
@@ -378,38 +571,10 @@ def _render_remote_refresh_result(section, refresh_result):
     return f'<div class="{css_class}"><strong>刷新结果：</strong>{message}</div>'
 
 
-def _render_remote_refresh_toolbar(section, refresh_result=None):
-    can_refresh = bool(str(section.get("machine_id") or "").strip())
-    button_attrs = (
-        ' type="submit"'
-        ' onclick="this.disabled=true;this.textContent=\'刷新中...\';this.form.submit();"'
-    )
-    if not can_refresh:
-        button_attrs += ' disabled'
-
-    hint_text = "点击后只拉取并刷新当前远端镜像，不会写入对端真源。"
-    if not can_refresh:
-        hint_text = "当前缺少远端机器标识，暂时无法手动刷新。"
-
-    last_refresh_time = str(section.get("last_report_time") or "").strip() or "暂无"
-    machine_label = str(section.get("machine_display_name") or section.get("machine_id") or "远端").strip()
-    machine_label = machine_label.replace("电脑", "").strip() or "远端"
-    return f"""
-<div class="meta">
-  <form method="post" action="/remote-sync/refresh" style="display:inline-block; margin-right:12px;">
-    <input type="hidden" name="target_machine_id" value="{escape(str(section.get('machine_id') or ''), quote=True)}">
-    <button{button_attrs}>刷新</button>
-  </form>
-  {escape(machine_label)}最后快照时间：{escape(last_refresh_time)}<br>
-  刷新说明：{escape(hint_text)}
-</div>
-{_render_remote_refresh_result(section, refresh_result)}
-"""
-
-
 def _build_remote_account_list_rows(section):
     row_items = []
     for row in section.get("rows") or []:
+        status_text = str(row.get("round_status") or "").strip()
         row_items.append(
             (
                 _format_value(row.get("nickname")),
@@ -417,36 +582,17 @@ def _build_remote_account_list_rows(section):
                 _format_balance_wan_display(row.get("current_balance_wan")),
                 _render_remote_countdown_cell(row, "runtime_window_remaining_seconds"),
                 _render_remote_countdown_cell(row, "cooldown_remaining_seconds"),
-                _format_value(row.get("round_status")),
+                _format_value("时长已到" if status_text == "抢购时长已到" else status_text),
                 _render_remote_updated_at_cell(row),
             )
         )
     return row_items
 
 
-def _render_remote_machine_section(section, refresh_result=None):
-    rows = section.get("rows") or []
-    row_items = _build_remote_account_list_rows(section)
-    summary_html = _render_machine_daily_summary(section.get("machine_daily_summaries"))
-    if not rows:
-        empty_html = f'<p class="muted-text">{escape(str(section.get("message") or "暂无远端镜像数据。"))}</p>'
-    else:
-        empty_html = '<p class="muted-text">当前阶段保留远端镜像手动刷新，但不开放远端写回。</p>'
-
-    return f"""
-<div class="section">
-  {_render_machine_section_title(section.get("machine_display_name") or section.get("machine_id") or "远端机器", "远端镜像 / 手动刷新")}
-  {_render_remote_refresh_toolbar(section, refresh_result)}
-  {summary_html}
-  {empty_html}
-  {_render_table(("昵称", "道具库存", "余额（万）", "可运行时间", "冷却剩余时间", "账号状态", "更新时间"), row_items)}
-</div>
-"""
-
-
 def _build_public_local_snapshot_rows(rows):
     row_items = []
     for row in rows or []:
+        status_text = str(row.get("round_status") or "").strip()
         row_items.append(
             (
                 _format_value(row.get("current_execution_slot")),
@@ -455,7 +601,7 @@ def _build_public_local_snapshot_rows(rows):
                 _format_balance_wan_display(row.get("current_balance_wan")),
                 _format_runtime_remaining_text(row.get("runtime_window_remaining_text")),
                 _format_cooldown_remaining_time(row.get("cooldown_remaining_seconds")),
-                _format_value(row.get("round_status")),
+                _format_value("时长已到" if status_text == "抢购时长已到" else status_text),
                 _render_local_relative_time(
                     row.get("updated_at_relative") or "-",
                     row.get("updated_at"),
@@ -472,148 +618,6 @@ def _render_public_local_refresh_result(refresh_result):
     css_class = "flash-success" if status == "success" else "flash-error"
     message = escape(str(refresh_result.get("message") or ""))
     return f'<div class="{css_class}"><strong>刷新结果：</strong>{message}</div>'
-
-
-def _render_public_local_refresh_toolbar(machine_display_name, refresh_result=None):
-    label = str(machine_display_name or "1号电脑").strip() or "1号电脑"
-    return f"""
-<div class="meta">
-  <form method="post" action="/public-snapshot/refresh" style="display:inline-block; margin-right:12px;">
-    <input type="hidden" name="target_scope" value="local">
-    <button type="submit" onclick="this.disabled=true;this.textContent='刷新中...';this.form.submit();">刷新 1号快照</button>
-  </form>
-  当前卡片展示 {escape(label)} 的只读快照视图。
-</div>
-{_render_public_local_refresh_result(refresh_result)}
-"""
-
-
-def _render_public_remote_refresh_toolbar(section, refresh_result=None):
-    machine_id = str(section.get("machine_id") or "").strip()
-    machine_label = str(section.get("machine_display_name") or machine_id or "2号电脑").strip() or "2号电脑"
-    button_attrs = (
-        ' type="submit"'
-        ' onclick="this.disabled=true;this.textContent=\'刷新中...\';this.form.submit();"'
-    )
-    if not machine_id:
-        button_attrs += " disabled"
-    return f"""
-<div class="meta">
-  <form method="post" action="/public-snapshot/refresh" style="display:inline-block; margin-right:12px;">
-    <input type="hidden" name="target_scope" value="remote">
-    <input type="hidden" name="target_machine_id" value="{escape(machine_id, quote=True)}">
-    <button{button_attrs}>刷新 2号快照</button>
-  </form>
-  当前卡片展示 {escape(machine_label)} 的只读快照视图。
-</div>
-{_render_remote_refresh_result(section, refresh_result)}
-"""
-
-
-def render_public_snapshot_page(view_rows_result, remote_machine_sections=None, refresh_result=None):
-    rows = list(view_rows_result.get("rows") or [])
-    local_machine_display_name = view_rows_result.get("machine_display_name") or "1号电脑"
-    local_summary_html = _render_machine_daily_summary(view_rows_result.get("machine_daily_summaries"))
-    local_row_items = _build_public_local_snapshot_rows(rows)
-
-    remote_machine_sections = list(remote_machine_sections or [])
-    remote_section = remote_machine_sections[0] if remote_machine_sections else {
-        "machine_id": "",
-        "machine_display_name": "2号电脑",
-        "rows": [],
-        "machine_daily_summaries": [],
-        "message": "暂无 2号快照数据。",
-        "last_report_time": "",
-    }
-    remote_row_items = _build_remote_account_list_rows(remote_section)
-    remote_summary_html = _render_machine_daily_summary(remote_section.get("machine_daily_summaries"))
-    remote_empty_html = (
-        f'<p class="muted-text">{escape(str(remote_section.get("message") or "暂无 2号快照数据。"))}</p>'
-        if not (remote_section.get("rows") or [])
-        else '<p class="muted-text">该卡片只读展示 2号最新快照，不开放修改或远端写回。</p>'
-    )
-
-    body_html = f"""
-<h1>公网快照页</h1>
-<div class="readonly-notice">
-  <strong>当前页面仅允许查看与刷新快照：</strong>
-  不显示任何修改控件，不显示编辑表单，不开放本机修改、远端修改或远端写回。
-</div>
-
-<div class="section">
-  {_render_machine_section_title(local_machine_display_name, "1号快照 / 只读")}
-  {_render_public_local_refresh_toolbar(local_machine_display_name, refresh_result)}
-  {local_summary_html}
-  {_render_table(("执行位", "昵称", "道具库存", "余额（万）", "可运行时间", "冷却剩余时间", "账号状态", "更新时间"), local_row_items)}
-</div>
-
-<div class="section">
-  {_render_machine_section_title(remote_section.get("machine_display_name") or "2号电脑", "2号快照 / 只读")}
-  {_render_public_remote_refresh_toolbar(remote_section, refresh_result)}
-  {remote_summary_html}
-  {remote_empty_html}
-  {_render_table(("昵称", "道具库存", "余额（万）", "可运行时间", "冷却剩余时间", "账号状态", "更新时间"), remote_row_items)}
-</div>
-
-{_render_local_relative_time_script() if (rows or remote_section.get("rows")) else ""}
-"""
-    return _base_page("公网快照页", body_html)
-
-
-def render_index_page(
-    view_rows_result,
-    runtime_result,
-    remote_machine_sections=None,
-    edit_result=None,
-    refresh_result=None,
-    read_only_mode=False,
-):
-    rows = view_rows_result.get("rows") or []
-    edit_meta = view_rows_result.get("edit_meta") or {}
-    row_items, using_demo_rows = _build_account_list_rows(
-        rows,
-        edit_meta=edit_meta,
-        edit_result=edit_result,
-        read_only_mode=read_only_mode,
-    )
-    demo_notice_html = _render_demo_list_notice() if using_demo_rows else ""
-    account_table_column_classes = (
-        "col-slot",
-        "col-name",
-        "col-inventory",
-        "col-balance",
-        "col-runtime",
-        "col-status",
-        "col-allow",
-        "col-cooldown",
-        "col-action",
-    )
-    local_machine_display_name = view_rows_result.get("machine_display_name") or "本机"
-    local_summary_html = _render_machine_daily_summary(view_rows_result.get("machine_daily_summaries"))
-    remote_machine_sections = list(remote_machine_sections or [])
-    remote_sections_html = "".join(
-        _render_remote_machine_section(section, refresh_result=refresh_result)
-        for section in remote_machine_sections
-    )
-
-    body_html = f"""
-<h1>账号数据查看页</h1>
-{_render_page_notice()}
-{_render_edit_result(edit_result)}
-
-<div class="section">
-  {_render_machine_section_title(local_machine_display_name, "本机真实数据")}
-  <p class="muted-text">此卡片展示 1号电脑本机真实数据，保留本机行内保存能力。</p>
-  {local_summary_html}
-  {demo_notice_html}
-  {_render_table(("执行位", "昵称", "道具库存", "余额（万）", "可运行时间", "账号状态", "允许抢购", "冷却剩余时间", "详情 / 保存"), row_items, column_classes=account_table_column_classes, table_class="account-table")}
-</div>
-
-{remote_sections_html}
-{_render_more_info_entry()}
-{_render_local_relative_time_script() if (rows or remote_machine_sections) else ""}
-"""
-    return _base_page("账号数据查看页", body_html)
 
 
 def render_more_info_page(view_rows_result, runtime_result):
@@ -801,3 +805,391 @@ def render_message_page(title, message, detail_items=None, back_href="/", back_l
 {detail_html}
 """
     return _base_page(title, body_html)
+
+
+def render_account_detail_page(detail_result, runtime_result, edit_result=None, read_only_mode=True):
+    del edit_result, read_only_mode
+    record = detail_result.get("record")
+    health = detail_result.get("health") or {}
+    lookup = detail_result.get("lookup") or {}
+    source_summary = detail_result.get("source_summary") or {}
+
+    if record is None:
+        body_html = f"""
+<h1>账号详情</h1>
+{_render_page_notice()}
+{_render_source_notice(source_summary)}
+<div class="meta">
+  查询条件：昵称 {_format_value(lookup.get("nickname"))}，
+  执行位 {_format_value(lookup.get("execution_slot"))}
+</div>
+<div class="section">
+  <p>未根据当前查询条件找到对应账号记录。</p>
+  <p><a href="/">返回首页</a></p>
+</div>
+"""
+        return _base_page("账号详情", body_html)
+
+    base_items = [
+        ("昵称", record.get("nickname")),
+        ("执行位", record.get("current_execution_slot")),
+        ("账号状态", record.get("round_status")),
+        ("余额（万）", _format_balance_wan_display(record.get("current_balance_wan"))),
+        ("余额原始存储", record.get("current_balance")),
+        ("道具库存", record.get("baseline_item_count")),
+        ("更新", record.get("updated_at_relative")),
+        ("更新时间原值", record.get("updated_at")),
+        ("本轮抢购成功数", record.get("round_purchase_success_count")),
+        ("本轮上架成功数", record.get("round_listing_success_count")),
+        ("本轮抢购失败数", record.get("round_purchase_fail_count")),
+        ("本轮运行秒数", record.get("purchase_running_seconds")),
+        ("最后限制时间", record.get("last_limit_time")),
+        ("最后下号时间", record.get("last_account_end_time")),
+    ]
+    derived_items = [
+        ("允许开始时间", record.get("allow_start_time")),
+        ("当前可抢购", record.get("allow_purchase")),
+        ("可运行时间", record.get("runtime_window_remaining_text")),
+        ("冷却剩余时间", _format_cooldown_remaining_time(record.get("cooldown_remaining_seconds"))),
+    ]
+    record_health_items = [
+        ("存在关键字段缺失", health.get("has_missing_critical_fields")),
+        ("缺失字段", health.get("missing_critical_fields")),
+        ("主库更新时间", record.get("updated_at")),
+        ("辅助快照存在", runtime_result.get("database_exists")),
+    ]
+
+    body_html = f"""
+<h1>账号详情</h1>
+{_render_page_notice()}
+{_render_source_notice(source_summary)}
+<div class="meta">
+  主库路径：<code>{escape(str(detail_result.get("database_path") or ""))}</code><br>
+  查询条件：昵称 {_format_value(lookup.get("nickname"))}，
+  执行位 {_format_value(lookup.get("execution_slot"))}
+</div>
+
+<p class="detail-back-link"><a href="/">返回首页</a></p>
+
+<div class="section">
+  <h2>基础字段</h2>
+  {_render_kv_table(base_items)}
+</div>
+
+<div class="section">
+  <h2>派生字段</h2>
+  {_render_kv_table(derived_items)}
+</div>
+
+<div class="section">
+  <h2>当前记录健康摘要</h2>
+  <p>这里只展示本机主库记录本身的完整性和可读性摘要，不执行任何网页写入。</p>
+  {_render_kv_table(record_health_items)}
+</div>
+
+<div class="section">
+  <h2>与辅助快照的一致性摘要</h2>
+  <p>辅助快照仅做辅助对照，用于观察当前快照与主库详情是否一致。</p>
+  {_render_runtime_consistency_summary(runtime_result, health.get("runtime_consistency") or {})}
+</div>
+"""
+    return _base_page(f"账号详情 - {record.get('nickname')}", body_html)
+
+
+def _render_home_display_field(value, tone="default"):
+    tone_class = f" display-field-{escape(str(tone), quote=True)}" if tone else ""
+    return f'<div class="display-field{tone_class}">{value}</div>'
+
+
+def _format_snapshot_relative_time(value):
+    text = str(value or "").strip()
+    if not text:
+        return "暂无"
+    try:
+        snapshot_time = datetime.fromisoformat(text.replace(" ", "T"))
+    except ValueError:
+        return text
+    now = datetime.now()
+    delta_seconds = max(0, int((now - snapshot_time).total_seconds()))
+    if delta_seconds < 60:
+        return "1分钟前"
+    if delta_seconds < 3600:
+        return f"{max(1, delta_seconds // 60)}分钟前"
+    if delta_seconds < 86400:
+        return f"{max(1, delta_seconds // 3600)}小时前"
+    return f"{max(1, delta_seconds // 86400)}天前"
+
+
+# 首页最终生效模板入口
+def render_index_page(
+    view_rows_result,
+    runtime_result,
+    remote_machine_sections=None,
+    edit_result=None,
+    refresh_result=None,
+    read_only_mode=False,
+):
+    del runtime_result
+    rows = view_rows_result.get("rows") or []
+    edit_meta = view_rows_result.get("edit_meta") or {}
+    row_items, using_demo_rows = _build_account_list_rows(
+        rows,
+        edit_meta=edit_meta,
+        edit_result=edit_result,
+        read_only_mode=read_only_mode,
+    )
+    demo_notice_html = _render_demo_list_notice() if using_demo_rows else ""
+    account_table_column_classes = (
+        "col-name",
+        "col-inventory",
+        "col-balance",
+        "col-runtime",
+        "col-status",
+        "col-cooldown",
+        "col-action",
+    )
+    display_row_items = [
+        (
+            _render_home_display_field(row[1], "name"),
+            row[2],
+            row[3],
+            _render_home_display_field(row[4], "meta"),
+            row[5],
+            _render_home_display_field(row[7], "meta"),
+            row[8],
+        )
+        for row in row_items
+    ]
+    local_machine_display_name = view_rows_result.get("machine_display_name") or "本机"
+    local_summary_html = _build_linear_summary_cards(view_rows_result.get("machine_daily_summaries"))
+    remote_machine_sections = list(remote_machine_sections or [])
+    remote_sections_html = "".join(
+        _render_remote_machine_section(section, refresh_result=refresh_result)
+        for section in remote_machine_sections
+    )
+    local_table_html = _render_table(
+        ("昵称", "道具库存", "余额（万）", "可运行时间", "账号状态", "冷却剩余时间", "详情 / 保存"),
+        display_row_items,
+        column_classes=account_table_column_classes,
+        table_class="account-table account-table-local",
+    )
+
+    body_html = f"""
+<div class="page-shell page-shell-home">
+{_render_edit_result(edit_result)}
+
+<div class="section stage-panel stage-primary">
+  {_render_linear_section_title(local_machine_display_name, "本机真实数据", eyebrow="Primary")}
+  {local_summary_html}
+  {demo_notice_html}
+  {local_table_html}
+</div>
+
+{remote_sections_html}
+{_render_more_info_entry()}
+{_render_local_relative_time_script() if (rows or remote_machine_sections) else ""}
+{_render_strip_year_display_script()}
+</div>
+"""
+    return _base_page("首页", body_html)
+def _build_section_refresh_action(form_action, hidden_inputs, button_label, meta_text="", disabled=False):
+    hidden_html = "".join(
+        f'<input type="hidden" name="{escape(str(name), quote=True)}" value="{escape(str(value), quote=True)}">'
+        for name, value in hidden_inputs
+    )
+    button_attrs = (
+        ' type="submit"'
+        ' class="section-refresh-button"'
+        ' onclick="this.disabled=true;this.textContent=\'刷新中...\';this.form.submit();"'
+    )
+    if disabled:
+        button_attrs += " disabled"
+    meta_html = f'<div class="section-refresh-meta">{escape(str(meta_text))}</div>' if str(meta_text or "").strip() else ""
+    return f"""
+<div class="section-action-cluster">
+  <form method="post" action="{escape(str(form_action), quote=True)}" class="section-refresh-form">
+    {hidden_html}
+    <button{button_attrs}>{escape(str(button_label))}</button>
+  </form>
+  {meta_html}
+</div>
+"""
+
+
+def _build_remote_section_refresh_action(section):
+    machine_id = str(section.get("machine_id") or "").strip()
+    last_refresh_time = _format_snapshot_relative_time(section.get("last_report_time"))
+    machine_label = str(section.get("machine_display_name") or section.get("machine_id") or "远端").strip()
+    machine_label = machine_label.replace("电脑", "").strip() or "远端"
+    return _build_section_refresh_action(
+        "/remote-sync/refresh",
+        (("target_machine_id", machine_id),),
+        "刷新",
+        f"{machine_label}最后快照时间：{last_refresh_time}",
+        disabled=not bool(machine_id),
+    )
+
+
+def _render_remote_refresh_toolbar(section, refresh_result=None):
+    return _render_remote_refresh_result(section, refresh_result)
+
+
+def _render_remote_machine_section(section, refresh_result=None):
+    rows = section.get("rows") or []
+    row_items = _build_remote_account_list_rows(section)
+    summary_html = _build_linear_summary_cards(section.get("machine_daily_summaries"))
+    empty_html = f'<p class="muted-text">{escape(str(section.get("message") or "暂无远端镜像数据。"))}</p>' if not rows else ""
+
+    table_html = _render_table(
+        ("昵称", "道具库存", "余额（万）", "可运行时间", "冷却剩余时间", "账号状态", "更新时间"),
+        row_items,
+    )
+    return f"""
+<div class="section stage-panel stage-secondary">
+  {_render_linear_section_title(
+      section.get("machine_display_name") or section.get("machine_id") or "远端机器",
+      "",
+      eyebrow="Mirror",
+      action_html=_build_remote_section_refresh_action(section),
+  )}
+  {_render_remote_refresh_toolbar(section, refresh_result)}
+  {summary_html}
+  {empty_html}
+  <div class="data-module data-module-public">
+    {table_html}
+  </div>
+</div>
+"""
+
+
+# 公网页最终生效模板入口
+def _build_public_local_section_refresh_action(view_rows_result=None):
+    rows = list((view_rows_result or {}).get("rows") or [])
+    latest_updated_at = ""
+    for row in rows:
+        candidate = str((row or {}).get("updated_at") or "").strip()
+        if candidate and (not latest_updated_at or candidate > latest_updated_at):
+            latest_updated_at = candidate
+    last_refresh_time = _format_snapshot_relative_time(latest_updated_at)
+    return _build_section_refresh_action(
+        "/public-snapshot/refresh",
+        (("target_scope", "local"),),
+        "\u5237\u65b0",
+        f"1\u53f7\u6700\u540e\u5feb\u7167\u65f6\u95f4\uff1a{last_refresh_time}",
+    )
+
+
+def _build_public_remote_section_refresh_action(section):
+    machine_id = str(section.get("machine_id") or "").strip()
+    last_refresh_time = _format_snapshot_relative_time(section.get("last_report_time"))
+    return _build_section_refresh_action(
+        "/public-snapshot/refresh",
+        (("target_scope", "remote"), ("target_machine_id", machine_id)),
+        "\u5237\u65b0",
+        f"2\u53f7\u6700\u540e\u5feb\u7167\u65f6\u95f4\uff1a{last_refresh_time}",
+        disabled=not bool(machine_id),
+    )
+
+
+def _render_public_local_refresh_toolbar(machine_display_name, refresh_result=None):
+    del machine_display_name
+    return _render_public_local_refresh_result(refresh_result)
+
+
+def _render_public_remote_refresh_toolbar(section, refresh_result=None):
+    return _render_remote_refresh_result(section, refresh_result)
+
+
+def render_public_snapshot_page(view_rows_result, remote_machine_sections=None, refresh_result=None):
+    rows = list(view_rows_result.get("rows") or [])
+    local_machine_display_name = view_rows_result.get("machine_display_name") or "1\u53f7\u7535\u8111"
+    local_summary_html = _build_linear_summary_cards(view_rows_result.get("machine_daily_summaries"))
+    local_row_items = _build_public_local_snapshot_rows(rows)
+
+    remote_machine_sections = list(remote_machine_sections or [])
+    remote_section = remote_machine_sections[0] if remote_machine_sections else {
+        "machine_id": "",
+        "machine_display_name": "2\u53f7\u7535\u8111",
+        "rows": [],
+        "machine_daily_summaries": [],
+        "message": "\u6682\u65e0 2\u53f7\u5feb\u7167\u6570\u636e\u3002",
+        "last_report_time": "",
+    }
+    remote_row_items = _build_remote_account_list_rows(remote_section)
+    remote_summary_html = _build_linear_summary_cards(remote_section.get("machine_daily_summaries"))
+    remote_empty_message = str(remote_section.get("message") or "\u6682\u65e0 2\u53f7\u5feb\u7167\u6570\u636e\u3002")
+    remote_display_name = remote_section.get("machine_display_name") or "2\u53f7\u7535\u8111"
+    return_home_label = "\u8fd4\u56de\u9996\u9875"
+    remote_empty_html = (
+        f'<p class="muted-text">{escape(remote_empty_message)}</p>'
+        if not (remote_section.get("rows") or [])
+        else ""
+    )
+
+    local_table_html = _render_table(
+        (
+            "\u6635\u79f0",
+            "\u9053\u5177\u5e93\u5b58",
+            "\u4f59\u989d\uff08\u4e07\uff09",
+            "\u53ef\u8fd0\u884c\u65f6\u95f4",
+            "\u51b7\u5374\u5269\u4f59\u65f6\u95f4",
+            "\u8d26\u53f7\u72b6\u6001",
+            "\u66f4\u65b0\u65f6\u95f4",
+        ),
+        [row[1:] for row in local_row_items],
+    )
+    remote_table_html = _render_table(
+        (
+            "\u6635\u79f0",
+            "\u9053\u5177\u5e93\u5b58",
+            "\u4f59\u989d\uff08\u4e07\uff09",
+            "\u53ef\u8fd0\u884c\u65f6\u95f4",
+            "\u51b7\u5374\u5269\u4f59\u65f6\u95f4",
+            "\u8d26\u53f7\u72b6\u6001",
+            "\u66f4\u65b0\u65f6\u95f4",
+        ),
+        remote_row_items,
+    )
+
+    body_html = f"""
+<div class="page-shell page-shell-public">
+  <div class="section stage-panel stage-primary">
+    {_render_linear_section_title(
+        local_machine_display_name,
+        "",
+        eyebrow="Snapshot",
+        action_html=_build_public_local_section_refresh_action(view_rows_result),
+    )}
+    {_render_public_local_refresh_toolbar(local_machine_display_name, refresh_result)}
+    {local_summary_html}
+    <div class="data-module data-module-public">
+      {_render_module_title("Snapshot Grid 01", "Readonly local snapshot table for fast scanning.")}
+      {local_table_html}
+    </div>
+  </div>
+
+  <div class="section stage-panel stage-secondary">
+    {_render_linear_section_title(
+        remote_display_name,
+        "",
+        eyebrow="Snapshot",
+        action_html=_build_public_remote_section_refresh_action(remote_section),
+    )}
+    {_render_public_remote_refresh_toolbar(remote_section, refresh_result)}
+    {remote_summary_html}
+    {remote_empty_html}
+    <div class="data-module data-module-public">
+      {_render_module_title("Snapshot Grid 02", "Readonly remote snapshot table for comparison only.")}
+      {remote_table_html}
+    </div>
+  </div>
+
+  <div class="detail-back-link">
+    {_render_linear_page_action("/", return_home_label)}
+  </div>
+
+  {_render_local_relative_time_script() if (rows or remote_section.get("rows")) else ""}
+  {_render_strip_year_display_script()}
+</div>
+"""
+    return _base_page("\u516c\u7f51\u5feb\u7167\u9875", body_html)
