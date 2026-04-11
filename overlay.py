@@ -30,40 +30,40 @@ from utils import (
 
 DEFAULT_OVERLAY_STATUS_TEXT = "状态待更新"
 F12_VK = 0x7B
-OVERLAY_SCORE_PANEL_BG = OVERLAY_NORMAL_BG
-OVERLAY_SCORE_MAIN_BG = "#11100f"
-OVERLAY_SCORE_MAIN_BORDER = "#1c1916"
-OVERLAY_SCORE_ITEM_BG = "#151311"
-OVERLAY_SCORE_ITEM_BORDER = "#1f1b17"
+OVERLAY_SCORE_PANEL_BG = "#15110d"
+OVERLAY_SCORE_MAIN_BG = "#15110d"
+OVERLAY_SCORE_MAIN_BORDER = "#19130f"
+OVERLAY_SCORE_ITEM_BG = "#18130f"
+OVERLAY_SCORE_ITEM_BORDER = "#221a14"
 OVERLAY_SCORE_LABEL_FG = "#9f9688"
 OVERLAY_SCORE_SLOT_LABEL_FG = "#8d816c"
-OVERLAY_SCORE_VALUE_FG = "#f3e7cc"
-OVERLAY_SCORE_SLOT_FG = "#fff1c8"
-OVERLAY_SCORE_TIME_FG = "#f7e7b6"
-OVERLAY_SCORE_FAIL_FG = "#e7d5ad"
+OVERLAY_SCORE_VALUE_FG = OVERLAY_SCORE_LABEL_FG
+OVERLAY_SCORE_SLOT_FG = OVERLAY_SCORE_SLOT_LABEL_FG
+OVERLAY_SCORE_TIME_FG = "#d8c6a0"
+OVERLAY_SCORE_FAIL_FG = OVERLAY_SCORE_LABEL_FG
 OVERLAY_SCORE_LABEL_FONT = ("Microsoft YaHei", 11, "bold")
-OVERLAY_SCORE_VALUE_FONT = ("NSimSun", 13, "bold")
-OVERLAY_SCORE_TIME_FONT = ("NSimSun", 14, "bold")
-OVERLAY_SCORE_SLOT_FONT = ("NSimSun", 15, "bold")
-OVERLAY_SCORE_PANEL_PAD_X = 8
-OVERLAY_SCORE_PANEL_PAD_Y = (8, 0)
-OVERLAY_SCORE_MAIN_PAD_X = 10
-OVERLAY_SCORE_MAIN_PAD_Y = 9
-OVERLAY_SCORE_COLUMN_GAP = 6
+OVERLAY_SCORE_VALUE_FONT = OVERLAY_SCORE_LABEL_FONT
+OVERLAY_SCORE_TIME_FONT = ("Bahnschrift", 16, "bold")
+OVERLAY_SCORE_SLOT_FONT = OVERLAY_SCORE_LABEL_FONT
+OVERLAY_SCORE_PANEL_PAD_X = 6
+OVERLAY_SCORE_PANEL_PAD_Y = (5, 0)
+OVERLAY_SCORE_MAIN_PAD_X = 7
+OVERLAY_SCORE_MAIN_PAD_Y = 6
+OVERLAY_SCORE_COLUMN_GAP = 4
 OVERLAY_SCORE_ROW_GAP = 7
-OVERLAY_SCORE_ITEM_PAD_X = 11
-OVERLAY_SCORE_ITEM_PAD_Y = 8
-OVERLAY_SCORE_ITEM_PAD_Y_FIRST_ROW = 9
-OVERLAY_SCORE_TEXT_PAD_Y = 2
+OVERLAY_SCORE_ITEM_PAD_X = 7
+OVERLAY_SCORE_ITEM_PAD_Y = 6
+OVERLAY_SCORE_ITEM_PAD_Y_FIRST_ROW = 7
+OVERLAY_SCORE_TEXT_PAD_Y = 1
 OVERLAY_SCORE_TITLE_PAD_X = (4, 0)
-OVERLAY_SCORE_VALUE_GAP = (8, 4)
-OVERLAY_SCORE_VALUE_GAP_FIRST_ROW = (10, 4)
-OVERLAY_LOG_PANEL_BG = "#100f0e"
-OVERLAY_LOG_PANEL_BORDER = "#1b1815"
+OVERLAY_SCORE_VALUE_GAP = (6, 3)
+OVERLAY_SCORE_VALUE_GAP_FIRST_ROW = (6, 3)
+OVERLAY_LOG_PANEL_BG = "#15110d"
+OVERLAY_LOG_PANEL_BORDER = "#241b15"
 OVERLAY_LOG_TEXT_FG = "#9ab284"
-OVERLAY_LOG_PANEL_PAD_X = 8
+OVERLAY_LOG_PANEL_PAD_X = 6
 OVERLAY_LOG_PANEL_PAD_Y = (8, 10)
-OVERLAY_LOG_TEXT_PAD_X = 10
+OVERLAY_LOG_TEXT_PAD_X = 8
 OVERLAY_LOG_TEXT_PAD_Y = 7
 _pause_hotkey_listener_started = False
 _overlay_shutdown_requested = False
@@ -141,6 +141,8 @@ def _build_score_item(
     score_vars,
     title_fg=None,
     value_padx=(10, 0),
+    value_anchor="e",
+    value_sticky="e",
 ):
     item = tk.Frame(
         parent,
@@ -150,23 +152,25 @@ def _build_score_item(
         highlightbackground=OVERLAY_SCORE_ITEM_BORDER,
     )
     item.grid_columnconfigure(0, weight=1)
+    item.grid_columnconfigure(1, weight=1)
     item.grid_rowconfigure(0, weight=1)
 
-    title_label = tk.Label(
-        item,
-        text=title,
-        font=OVERLAY_SCORE_LABEL_FONT,
-        fg=title_fg or OVERLAY_SCORE_LABEL_FG,
-        bg=OVERLAY_SCORE_ITEM_BG,
-        anchor="w",
-    )
-    title_label.grid(
-        row=0,
-        column=0,
-        sticky="w",
-        padx=OVERLAY_SCORE_TITLE_PAD_X,
-        pady=OVERLAY_SCORE_TEXT_PAD_Y,
-    )
+    if title:
+        title_label = tk.Label(
+            item,
+            text=title,
+            font=OVERLAY_SCORE_LABEL_FONT,
+            fg=title_fg or OVERLAY_SCORE_LABEL_FG,
+            bg=OVERLAY_SCORE_ITEM_BG,
+            anchor="w",
+        )
+        title_label.grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=OVERLAY_SCORE_TITLE_PAD_X,
+            pady=OVERLAY_SCORE_TEXT_PAD_Y,
+        )
 
     value_var = tk.StringVar(master=parent, value="--")
     value_label = tk.Label(
@@ -175,10 +179,20 @@ def _build_score_item(
         font=value_font,
         fg=value_fg,
         bg=OVERLAY_SCORE_ITEM_BG,
-        anchor="e",
+        anchor=value_anchor,
         width=value_width,
     )
-    value_label.grid(row=0, column=1, sticky="e", padx=value_padx, pady=OVERLAY_SCORE_TEXT_PAD_Y)
+    if title:
+        value_label.grid(row=0, column=1, sticky=value_sticky, padx=value_padx, pady=OVERLAY_SCORE_TEXT_PAD_Y)
+    else:
+        value_label.grid(
+            row=0,
+            column=0,
+            columnspan=2,
+            sticky=value_sticky,
+            padx=value_padx,
+            pady=OVERLAY_SCORE_TEXT_PAD_Y,
+        )
 
     score_vars[value_key] = value_var
     return item
@@ -206,8 +220,8 @@ def _create_score_panel(root):
 
     row_specs = [
         (
+            {"title": "", "value_key": "remaining", "value_width": 8, "value_font": OVERLAY_SCORE_TIME_FONT, "value_fg": OVERLAY_SCORE_TIME_FG, "value_padx": 0, "value_anchor": "center", "value_sticky": "ew"},
             {"title": "执行位", "value_key": "slot", "value_width": 3, "value_font": OVERLAY_SCORE_SLOT_FONT, "value_fg": OVERLAY_SCORE_SLOT_FG, "title_fg": OVERLAY_SCORE_SLOT_LABEL_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP_FIRST_ROW},
-            {"title": "时间剩余", "value_key": "remaining", "value_width": 8, "value_font": OVERLAY_SCORE_TIME_FONT, "value_fg": OVERLAY_SCORE_TIME_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP_FIRST_ROW},
         ),
         (
             {"title": "上架成功", "value_key": "listing_success", "value_width": 4, "value_font": OVERLAY_SCORE_VALUE_FONT, "value_fg": OVERLAY_SCORE_VALUE_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP},
@@ -292,8 +306,43 @@ def _apply_log_panel_style(root):
         pass
 
 
+def apply_overlay_normal_layout(root):
+    """按启动时的正常模式样式重新挂载计分板和日志区。"""
+    if root is None:
+        return
+
+    score_label = getattr(root, "_overlay_score_label", None)
+    log_label = getattr(root, "_overlay_log_label", None)
+
+    if score_label is not None:
+        if isinstance(score_label, tk.Label):
+            score_label.configure(**OVERLAY_SCORE_LABEL_STYLE)
+            score_label.pack(**OVERLAY_SCORE_LABEL_PACK)
+        else:
+            try:
+                score_label.configure(bg=OVERLAY_SCORE_PANEL_BG)
+            except Exception:
+                pass
+            score_label.pack(
+                **{**OVERLAY_SCORE_LABEL_PACK, "padx": OVERLAY_SCORE_PANEL_PAD_X, "pady": OVERLAY_SCORE_PANEL_PAD_Y},
+                fill="x",
+            )
+
+    if log_label is not None:
+        log_label.configure(**OVERLAY_LOG_LABEL_STYLE)
+        if isinstance(score_label, tk.Label):
+            log_label.pack(**OVERLAY_LOG_LABEL_PACK)
+        else:
+            log_label.pack(
+                **{**OVERLAY_LOG_LABEL_PACK, "padx": OVERLAY_LOG_PANEL_PAD_X, "pady": OVERLAY_LOG_PANEL_PAD_Y},
+                fill="x",
+            )
+            _apply_log_panel_style(root)
+
+
 def update_score_text():
-    if not state.overlay_root:
+    root = state.overlay_root
+    if not root:
         return
 
     remaining_text = _format_duration(get_runtime_window_remaining_seconds())
@@ -319,7 +368,7 @@ def update_score_text():
                 )
             )
         _set_score_panel_values(root, values)
-        _apply_log_panel_style(state.overlay_root)
+        _apply_log_panel_style(root)
         fit_overlay_to_content()
     except Exception:
         pass
@@ -342,7 +391,7 @@ def create_overlay():
     root.attributes("-topmost", True)
     root.geometry(OVERLAY_NORMAL_GEOMETRY)
     root.attributes("-alpha", OVERLAY_NORMAL_ALPHA)
-    root.config(bg=OVERLAY_NORMAL_BG)
+    root.config(bg=OVERLAY_SCORE_PANEL_BG)
     root._overlay_is_mini = False
     root._overlay_normal_position = OVERLAY_NORMAL_GEOMETRY
     state.log_lines = []
@@ -350,10 +399,6 @@ def create_overlay():
 
     state.score_var = tk.StringVar()
     root._overlay_score_label = _create_score_panel(root)
-    root._overlay_score_label.pack(
-        **{**OVERLAY_SCORE_LABEL_PACK, "padx": OVERLAY_SCORE_PANEL_PAD_X, "pady": OVERLAY_SCORE_PANEL_PAD_Y},
-        fill="x",
-    )
 
     state.log_text_var = tk.StringVar()
     state.log_text_var.set("悬浮窗已就绪。")
@@ -362,8 +407,7 @@ def create_overlay():
         textvariable=state.log_text_var,
         **OVERLAY_LOG_LABEL_STYLE,
     )
-    root._overlay_log_label.pack(**{**OVERLAY_LOG_LABEL_PACK, "padx": OVERLAY_LOG_PANEL_PAD_X, "pady": OVERLAY_LOG_PANEL_PAD_Y}, fill="x")
-    _apply_log_panel_style(root)
+    apply_overlay_normal_layout(root)
 
     if os.name == "nt":
         try:
@@ -447,7 +491,7 @@ def toggle_pause():
         ui_print("脚本暂停（F12 恢复）")
         pause_persist_result = persist_pause_snapshot()
         if pause_persist_result.status == "success":
-            ui_print("暂停后已写入当前账号最小必要字段，账号状态已更新为人工暂停。", save_log=True)
+            ui_print("暂停后已写入库", save_log=True)
         elif pause_persist_result.status != "skipped":
             ui_print(f"暂停写库失败：{pause_persist_result.reason}", save_log=True)
         if state.overlay_root:

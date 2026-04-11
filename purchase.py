@@ -381,7 +381,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                             last_refresh = time.time()
                         else:
                             if state.unknown_page_count == 0 or time_since_last_action > 10.0:
-                                ui_print("\n画面异常，全场景识别。", save_log=True)
+                                ui_print("画面异常，全场景识别。", save_log=True)
                                 is_unknown_page = False
                                 if is_image_present(frame, MONITOR_DIYICI, temp_diyici, threshold=0.6):
                                     fast_click(DIYICI_CLICK_POS)

@@ -303,21 +303,11 @@ def restore_overlay():
         _forget_packed_widget(score_label)
         _forget_packed_widget(log_label)
 
-        if score_label is not None:
-            if isinstance(score_label, tk.Label):
-                score_label.configure(**OVERLAY_SCORE_LABEL_STYLE)
-                score_label.pack(**OVERLAY_SCORE_LABEL_PACK)
-            else:
-                try:
-                    score_label.configure(bg=OVERLAY_NORMAL_BG)
-                except Exception:
-                    pass
-                score_label.pack(**OVERLAY_SCORE_LABEL_PACK, fill="x")
-        if log_label is not None:
-            log_label.configure(**OVERLAY_LOG_LABEL_STYLE)
-            log_label.pack(**OVERLAY_LOG_LABEL_PACK)
-
-        root.config(bg=OVERLAY_NORMAL_BG)
+        try:
+            from overlay import OVERLAY_SCORE_PANEL_BG
+            root.config(bg=OVERLAY_SCORE_PANEL_BG)
+        except Exception:
+            root.config(bg=OVERLAY_NORMAL_BG)
         root.attributes("-alpha", OVERLAY_NORMAL_ALPHA)
         root.attributes("-topmost", True)
         root.deiconify()
@@ -325,8 +315,9 @@ def restore_overlay():
         root._overlay_is_mini = False
 
         try:
-            from overlay import fit_overlay_to_content, update_score_text
+            from overlay import apply_overlay_normal_layout, fit_overlay_to_content, update_score_text
 
+            apply_overlay_normal_layout(root)
             update_score_text()
             fit_overlay_to_content(getattr(root, "_overlay_normal_position", OVERLAY_NORMAL_GEOMETRY))
         except Exception:
