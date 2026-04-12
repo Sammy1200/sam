@@ -787,7 +787,7 @@ def _step02_server_list(camera, suppress_failure_output=False):
     )
     # 启动器刚回到前台时控件可能还没稳定，先等 3 秒再点，避免点在页面过渡阶段导致后续选区失效。
     safe_sleep(config.SWITCH_SERVER_LIST_OPEN_WAIT_SECONDS)
-    pyautogui.click(1500, 990)
+    pyautogui.click(1480, 990)
 
     if not _wait_for(camera, "qd", config.RGN_QD, timeout=config.SWITCH_QIDONG_MATCH_TIMEOUT_SECONDS):
         if not suppress_failure_output:
