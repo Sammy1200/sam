@@ -114,6 +114,7 @@ from switch import (
     detect_current_execution_slot_from_launcher,
     pause_thread6_failure,
     resolve_execution_slot_transition,
+    switch_account_for_temporary_target_slot,
     switch_server_within_account_after_slot_boundary,
     startup_from_server_list,
     switch_account_after_slot_boundary,
@@ -273,18 +274,13 @@ def _prompt_main_mode():
         print("请输入回车或 2。")
 
 
-def _prompt_temporary_item_count():
+def _prompt_temporary_target_execution_slot():
     while True:
-        raw = input("请输入本号当前道具库存: ").strip()
-        try:
-            item_count = int(raw)
-        except ValueError:
-            print("请输入大于等于 0 的整数。")
-            continue
-        if item_count < 0:
-            print("请输入大于等于 0 的整数。")
-            continue
-        return item_count
+        raw = input(f"请输入临时模式结束后切换到的目标执行位(1-{int(config.EXECUTION_SLOT_COUNT)}): ").strip()
+        slot_number = _parse_slot_from_nickname_hint(raw)
+        if slot_number is not None:
+            return slot_number
+        print(f"请输入 1 到 {int(config.EXECUTION_SLOT_COUNT)} 之间的执行位编号。")
 
 
 def _prompt_server_index():
@@ -488,24 +484,55 @@ def _set_account_state_defaults():
     state.account_round_writeback_error = ""
     state.account_limit_reached_at = None
     state.temporary_purchase_mode = False
+    state.temporary_target_execution_slot = None
 
 
-def _prepare_temporary_purchase_context(item_count):
+def _prepare_temporary_purchase_context(target_execution_slot):
     """线程10B：临时模式只初始化运行态，不读取账号库。"""
     _set_account_state_defaults()
     state.temporary_purchase_mode = True
+    state.temporary_target_execution_slot = int(target_execution_slot)
     state.need_switch_server = False
     state.current_nickname = "临时模式"
     state.current_execution_slot = None
-    state.baseline_item_count = item_count
+    state.baseline_item_count = 0
     state.account_allow_purchase = True
     state.account_is_waiting = False
     state.overlay_status = "临时抢购中"
     reset_round_runtime_state("进入临时抢购模式")
     reset_purchase_counters("进入临时抢购模式")
-    ui_print(f"临时抢购模式，当前道具库存：{item_count}", save_log=True)
-    print(f"[临时模式] 已启动，当前道具库存={item_count}")
-    logger.info("[临时模式] 已启动，当前道具库存=%s", item_count)
+    ui_print(f"临时抢购模式，目标执行位：{target_execution_slot}，库存基线从 0 开始", save_log=True)
+    print(f"[临时模式] 已启动，目标执行位={target_execution_slot}，库存基线=0")
+    logger.info("[临时模式] 已启动，目标执行位=%s，库存基线=%s", target_execution_slot, 0)
+
+
+def _ensure_temporary_target_switch_store_context():
+    """临时模式定向切换前，补齐 canonical 主库路径上下文。"""
+    database_path = str(state.account_db_path or "").strip()
+    table_name = state.account_db_table_name or CANONICAL_ACCOUNT_STATS_TABLE
+    if database_path:
+        return True
+
+    database_path, table_name = find_canonical_account_stats_store()
+    if not database_path:
+        database_path, table_name, inserted_seed_records = ensure_local_canonical_account_stats_store()
+        print(f"[账号数据] 临时模式定向切换前未找到现成账号库，已自动初始化本地主数据库：{database_path}")
+        logger.info("[账号数据] 临时模式定向切换前未找到现成账号库，已自动初始化本地主数据库：%s", database_path)
+        if inserted_seed_records:
+            inserted_slots = ",".join(str(record.current_execution_slot) for record in inserted_seed_records)
+            inserted_nicknames = ",".join(record.nickname for record in inserted_seed_records)
+            print(f"[账号数据] 临时模式定向切换前已补齐执行位建档：执行位={inserted_slots}，昵称={inserted_nicknames}")
+            logger.info(
+                "[账号数据] 临时模式定向切换前已补齐执行位建档：执行位=%s 昵称=%s",
+                inserted_slots,
+                inserted_nicknames,
+            )
+
+    ensure_canonical_account_stats_table(database_path, table_name)
+    ensure_canonical_execution_slot_seed_records(database_path, table_name)
+    state.account_db_path = database_path
+    state.account_db_table_name = table_name
+    return True
 
 
 def _format_canonical_status_counts(status_counts):
@@ -882,6 +909,56 @@ def _finalize_current_account_round(default_status):
     return False
 
 
+def _should_dispatch_temporary_target_switch():
+    if not state.temporary_purchase_mode:
+        return False
+    return state.account_round_end_status in ("余额不足", "抢购时长已到", "账号限制")
+
+
+def _handle_temporary_target_execution_slot_dispatch(camera):
+    target_slot = state.temporary_target_execution_slot
+    if target_slot is None:
+        pause_thread6_failure("解析临时模式目标执行位", "临时模式结束时未设置目标执行位。")
+        return "abort"
+
+    if not _ensure_temporary_target_switch_store_context():
+        pause_thread6_failure("准备临时模式账号库上下文", "临时模式定向切换前未能准备 canonical 主库路径。")
+        return "abort"
+
+    ui_print(
+        f"临时模式结束，命中 {state.account_round_end_status}，准备切换到目标执行位 {target_slot}。",
+        save_log=True,
+    )
+    print(
+        f"[临时模式] 命中结束条件：{state.account_round_end_status}，"
+        f"准备切换到目标执行位 {target_slot}。"
+    )
+    logger.info(
+        "[临时模式] 命中结束条件：%s，准备切换到目标执行位 %s。",
+        state.account_round_end_status,
+        target_slot,
+    )
+
+    if not switch_account_for_temporary_target_slot(camera, target_slot) and not state.switch_flow_paused:
+        pause_thread6_failure("临时模式定向切换链路", "链路返回失败，但未命中步骤级或链路级失败出口。")
+        return "abort"
+    if state.switch_flow_paused:
+        return "abort"
+
+    state.temporary_purchase_mode = False
+    state.temporary_target_execution_slot = None
+    if not _run_pre_listing_flow(
+        camera,
+        reset_runtime_before_listing=True,
+        reset_reason="临时模式定向切换后预上架前清空当前账号运行态",
+        purchase_reset_reason="临时模式定向切换后开始目标账号流程",
+    ):
+        if not state.switch_flow_paused:
+            pause_thread6_failure("临时模式切换后预上架衔接", "临时模式定向切换完成后未能完成预上架与账号状态衔接。")
+        return "abort"
+    return "continue"
+
+
 def _handle_execution_slot_dispatch(camera):
     try:
         transition = resolve_execution_slot_transition(state.current_execution_slot)
@@ -1222,10 +1299,10 @@ def main():
                 ):
                     return
             else:
-                item_count = _prompt_temporary_item_count()
+                target_execution_slot = _prompt_temporary_target_execution_slot()
                 ui_print("临时抢购模式在 1 秒后启动...")
                 safe_sleep(1.0)
-                _prepare_temporary_purchase_context(item_count)
+                _prepare_temporary_purchase_context(target_execution_slot)
                 ui_print("开始执行预上架流程...")
                 execute_listing_routine(camera)
                 run_purchase_loop(
@@ -1237,7 +1314,14 @@ def main():
                     temp_meihuo,
                     temp_diyici,
                 )
-                return
+                if not _should_dispatch_temporary_target_switch():
+                    return
+
+                dispatch_action = _handle_temporary_target_execution_slot_dispatch(camera)
+                if dispatch_action == "continue":
+                    pass
+                else:
+                    return
 
             while True:
                 state.need_switch_server = False

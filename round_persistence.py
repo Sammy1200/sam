@@ -16,6 +16,7 @@ from account_db import (
     ROUND_STATUS_RUNTIME_REACHED,
     ROUND_STATUS_RUNNING,
     ROUND_STATUS_UNKNOWN,
+    find_canonical_account_stats_store,
     increment_machine_daily_summary_event,
     read_canonical_account_stats_record,
     read_preferred_canonical_account_stats_record_by_execution_slot,
@@ -191,19 +192,33 @@ def _build_runtime_window_result(changed, actions, persist_result=None):
     }
 
 
+def _resolve_machine_daily_summary_database_path():
+    database_path = str(state.account_db_path or "").strip()
+    if database_path:
+        return database_path
+
+    try:
+        resolved_database_path, _ = find_canonical_account_stats_store()
+    except Exception as exc:
+        logger.warning("[机器汇总] 解析机器级汇总数据库路径失败：%s", exc)
+        return ""
+    return str(resolved_database_path or "").strip()
+
+
 def _record_machine_daily_summary_event(event_name, occurred_at=None):
-    if state.temporary_purchase_mode:
-        return AccountWriteResult("skipped", "temporary mode does not write machine daily summary")
-    if state.account_read_status == "account_not_found" or not state.account_record_loaded:
+    if (not state.temporary_purchase_mode) and (
+        state.account_read_status == "account_not_found" or not state.account_record_loaded
+    ):
         return AccountWriteResult("skipped", "current account record is unavailable")
-    if not state.account_db_path:
-        return AccountWriteResult("skipped", "canonical database path is empty")
+    database_path = _resolve_machine_daily_summary_database_path()
+    if not database_path:
+        return AccountWriteResult("skipped", "machine daily summary database path is empty")
 
     runtime_context = get_machine_sync_runtime_context()
     machine_id = str(runtime_context.get("machine_id") or "local").strip() or "local"
     machine_display_name = str(runtime_context.get("machine_display_name") or "本机").strip() or machine_id
     result = increment_machine_daily_summary_event(
-        state.account_db_path,
+        database_path,
         machine_id,
         machine_display_name,
         event_name,

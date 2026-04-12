@@ -49,6 +49,15 @@ EXIT_DELAY = 1.88
 MISMATCH_EXIT_DELAY = 1.88
 ACCOUNT_LIMIT_THRESHOLD = 5
 ACCOUNT_RUNTIME_CONTINUE_BALANCE_THRESHOLD = 200000000
+# 当“本次新识别余额”比“上一次有效余额”突然减少超过该阈值时，
+# 视为本次 OCR 余额识别出现异常下跳，继续沿用上一次有效余额，
+# 不让这次异常值覆盖当前有效余额，也不让它继续参与后续余额相关判断。
+# 当前默认值为 5000000（500 万）：
+# 1. 目前业务前提是单次真实道具价格不会超过 400 万；
+# 2. 这里额外预留了一段缓冲，避免正常成交或正常波动被误拦截；
+# 3. 这个阈值只用于拦截“突然变小很多”的异常下跳，不用于拦截所有余额波动；
+# 4. 如果以后业务上单次真实消费可能超过 500 万，必须同步把这里调大。
+BALANCE_ABNORMAL_DROP_PROTECTION_THRESHOLD = 5000000
 IDLE_PUSH_INTERVAL = 1800
 STUCK_PUSH_INTERVAL = 300
 FRAME_MAX_AGE = 0.2

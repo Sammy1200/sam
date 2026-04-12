@@ -10,6 +10,7 @@ Public APIs:
   resolve_execution_slot_transition(current_execution_slot)
   switch_server_within_account_after_slot_boundary(camera)
   switch_account_after_slot_boundary(camera)
+  switch_account_for_temporary_target_slot(camera, target_execution_slot)
 """
 
 import os
@@ -21,6 +22,12 @@ import pyautogui
 
 import config
 import state
+from account_db import (
+    CANONICAL_ACCOUNT_STATS_TABLE,
+    ROUND_STATUS_RUNNING,
+    read_preferred_canonical_account_stats_record_by_execution_slot,
+    update_canonical_account_status_fields,
+)
 from local_switch_account_config import (
     load_boundary_switch_accounts,
     load_local_nickname_match_config,
@@ -411,6 +418,62 @@ def _resolve_switch_target(current_execution_slot):
     return target
 
 
+def _resolve_account_id_for_execution_slot_group(slot_number):
+    """按执行位所属账号组，沿用本机换号配置解析目标账号。"""
+    try:
+        normalized_slot_number = int(slot_number)
+    except (TypeError, ValueError):
+        return None, "目标执行位不是有效整数。"
+
+    if normalized_slot_number < 1 or normalized_slot_number > len(config.EXECUTION_SLOT_SERVER_COORD_INDEXES):
+        return None, f"目标执行位 {normalized_slot_number} 超出有效范围。"
+
+    try:
+        boundary_accounts = _get_boundary_switch_accounts()
+    except Exception as exc:
+        return None, f"本机换号配置读取失败：{exc}"
+
+    if normalized_slot_number <= 4:
+        account_id = boundary_accounts.get(8)
+        if not account_id:
+            return None, "本机换号配置缺少账号 1 对应的 after_slot_8_account_id。"
+        return account_id, ""
+
+    account_id = boundary_accounts.get(4)
+    if not account_id:
+        return None, "本机换号配置缺少账号 2 对应的 after_slot_4_account_id。"
+    return account_id, ""
+
+
+def _build_temporary_target_transition(target_execution_slot):
+    """临时模式结束后，直接解析目标执行位对应的账号组和大区。"""
+    try:
+        target_slot = int(target_execution_slot)
+    except (TypeError, ValueError):
+        return {
+            "target_slot": None,
+            "account_id": None,
+            "server_coord_index": None,
+            "config_error": "目标执行位不是有效整数。",
+        }
+
+    if target_slot < 1 or target_slot > len(config.EXECUTION_SLOT_SERVER_COORD_INDEXES):
+        return {
+            "target_slot": target_slot,
+            "account_id": None,
+            "server_coord_index": None,
+            "config_error": f"目标执行位 {target_slot} 超出有效范围。",
+        }
+
+    account_id, config_error = _resolve_account_id_for_execution_slot_group(target_slot)
+    return {
+        "target_slot": target_slot,
+        "account_id": account_id,
+        "server_coord_index": config.EXECUTION_SLOT_SERVER_COORD_INDEXES[target_slot - 1],
+        "config_error": config_error,
+    }
+
+
 def _digits_only(value):
     return "".join(ch for ch in str(value or "") if ch.isdigit())
 
@@ -606,12 +669,52 @@ def _verify_slot_nickname(camera, slot_number):
         ):
             print(f"[切换流程] 执行位 {slot_number} 的昵称模板校验通过：{template_path}")
             logger.info("[切换流程] 执行位 %s 的昵称模板校验通过：%s", slot_number, template_path)
+            _sync_verified_slot_status_to_running(slot_number)
             return True
         safe_sleep(0.5)
 
     return pause_thread6_failure(
         "昵称模板校验",
         f"执行位 {slot_number} 的昵称模板校验失败：{template_path}。",
+    )
+
+
+def _sync_verified_slot_status_to_running(slot_number):
+    """昵称模板校验成功后，把目标执行位账号状态补写为运行中。"""
+    database_path = str(state.account_db_path or "").strip()
+    if not database_path:
+        logger.warning("[线程6] 昵称模板校验通过后未写入“运行中”：canonical 数据库路径为空。")
+        return
+
+    table_name = state.account_db_table_name or CANONICAL_ACCOUNT_STATS_TABLE
+    record = read_preferred_canonical_account_stats_record_by_execution_slot(
+        database_path,
+        slot_number,
+        table_name,
+    )
+    if record is None:
+        logger.warning("[线程6] 昵称模板校验通过后未写入“运行中”：执行位 %s 未解析到账号记录。", slot_number)
+        return
+
+    result = update_canonical_account_status_fields(
+        database_path,
+        record.nickname,
+        ROUND_STATUS_RUNNING,
+        table_name=table_name,
+    )
+    if result.status == "success":
+        logger.info(
+            "[线程6] 昵称模板校验通过后已写入“运行中”：执行位=%s 昵称=%s",
+            slot_number,
+            record.nickname,
+        )
+        return
+
+    logger.warning(
+        "[线程6] 昵称模板校验通过后写入“运行中”失败：执行位=%s 昵称=%s 原因=%s",
+        slot_number,
+        record.nickname,
+        result.reason,
     )
 
 
@@ -1103,3 +1206,81 @@ def switch_account_after_slot_boundary(camera):
         return True
 
     return _run_thread6_chain("跨账号边界切换链路", _chain_impl)
+
+
+def switch_account_for_temporary_target_slot(camera, target_execution_slot):
+    """临时模式结束后，直接切到目标账号组、目标大区并做昵称校验。"""
+    def _chain_impl():
+        target = _build_temporary_target_transition(target_execution_slot)
+        if target.get("config_error"):
+            return pause_thread6_failure("解析临时模式目标执行位", target["config_error"])
+
+        set_overlay_mini("临时模式定向切换中")
+        print(
+            f"[切换流程] 临时模式目标执行位={target['target_slot']}，"
+            f"目标账号={target['account_id']}，目标大区索引={target['server_coord_index']}"
+        )
+        logger.info(
+            "[切换流程] 临时模式目标执行位=%s 目标账号=%s 目标大区索引=%s",
+            target["target_slot"],
+            target["account_id"],
+            target["server_coord_index"],
+        )
+
+        if not _run_thread6_step("退出游戏", "未能在临时模式定向切换前完成退出游戏。", lambda: _step01_exit(camera)):
+            return False
+
+        if not _run_thread6_step("返回启动页确认", "未能在临时模式定向切换前确认回到启动页。", lambda: _wait_for_boundary_start_qidong(camera)):
+            return False
+
+        if not _run_thread6_step(
+            "执行跨账号切换",
+            f"未能切换到目标账号 {target['account_id']}。",
+            lambda: _switch_account_for_slot(camera, target["account_id"]),
+        ):
+            return False
+
+        if not _run_thread6_step(
+            "打开大区列表",
+            "临时模式定向切换后未能打开大区列表。",
+            lambda: _step02_server_list(camera, suppress_failure_output=True),
+        ):
+            return False
+
+        if not _run_thread6_step(
+            "选择目标大区",
+            f"临时模式定向切换后未能切换到目标执行位 {target['target_slot']} 对应的大区。",
+            lambda: _step03_select(camera, target["server_coord_index"], suppress_failure_output=True),
+        ):
+            return False
+
+        if not _run_thread6_step(
+            "昵称模板校验",
+            f"目标执行位 {target['target_slot']} 的昵称模板校验失败。",
+            lambda: _verify_slot_nickname(camera, target["target_slot"]),
+        ):
+            return False
+
+        if not _run_thread6_step("恢复进场链路", "临时模式定向切换后未能完成回到交易行的后续步骤。", lambda: _run_thread6_resume_steps(camera)):
+            return False
+
+        state.current_execution_slot = target["target_slot"]
+        state.current_server_index = target["server_coord_index"]
+        state.current_account_index = 0 if target["target_slot"] <= 4 else 1
+        state.current_nickname = str(target["target_slot"])
+        state.need_switch_server = False
+        state.switch_flow_paused = False
+        state.switch_last_unknown_detail = ""
+        restore_overlay()
+        print(
+            f"[切换流程] 临时模式定向切换完成：目标执行位={target['target_slot']}，"
+            f"目标账号={target['account_id']}，已回到交易行。"
+        )
+        logger.info(
+            "[切换流程] 临时模式定向切换完成：目标执行位=%s 目标账号=%s 已回到交易行。",
+            target["target_slot"],
+            target["account_id"],
+        )
+        return True
+
+    return _run_thread6_chain("临时模式定向切换链路", _chain_impl)

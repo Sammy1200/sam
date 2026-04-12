@@ -11,6 +11,7 @@ import requests
 import state
 from config import (
     ACCOUNT_MAX_PURCHASE_SECONDS,
+    BALANCE_ABNORMAL_DROP_PROTECTION_THRESHOLD,
     ACCOUNT_RUNTIME_CONTINUE_BALANCE_THRESHOLD,
     ACCOUNT_LIMIT_THRESHOLD,
     BUY_POS,
@@ -110,22 +111,45 @@ def check_balance_limit(frame):
     if not bal_str:
         return True
 
-    state.current_balance = bal_str
-    state.last_valid_balance = bal_str
-    state.round_current_balance = bal_str
+    previous_valid_balance_text = str(state.last_valid_balance or "").strip()
+    previous_valid_balance_value = parse_balance_text_to_value(previous_valid_balance_text)
+    recognized_balance_value = parse_balance_text_to_value(bal_str)
+
+    effective_balance_text = bal_str
+    effective_balance_value = recognized_balance_value
+    if (
+        previous_valid_balance_value is not None
+        and recognized_balance_value is not None
+        and previous_valid_balance_value - recognized_balance_value > BALANCE_ABNORMAL_DROP_PROTECTION_THRESHOLD
+    ):
+        effective_balance_text = previous_valid_balance_text
+        effective_balance_value = previous_valid_balance_value
+        ui_print(
+            f"余额识别疑似异常下跳，保留上次有效余额 {previous_valid_balance_text}，本次识别 {bal_str}",
+            save_log=True,
+        )
+        print(
+            f"[余额识别] 检测到异常下跳，保留上次有效余额：上次={previous_valid_balance_text}，"
+            f"本次识别={bal_str}，阈值={BALANCE_ABNORMAL_DROP_PROTECTION_THRESHOLD}"
+        )
+
+    state.current_balance = effective_balance_text
+    state.round_current_balance = effective_balance_text
+    if effective_balance_value is not None:
+        state.last_valid_balance = effective_balance_text
     if state.overlay_root:
         state.overlay_root.after(0, update_score_text)
 
     try:
-        real_val = parse_balance_text_to_value(bal_str)
+        real_val = effective_balance_value
         if real_val is None:
             return True
         if real_val < MAX_PRICE:
             state.account_round_end_status = "余额不足"
             state.overlay_status = "余额不足"
-            ui_print(f"余额不足，当前金额 {bal_str}，准备自动换号", save_log=True)
-            print(f"[余额不足] 当前余额：{bal_str}，已触发自动换号")
-            async_push_msg("【余额不足】准备换号换区", f"当前余额：{bal_str}，已触发自动换号。")
+            ui_print(f"余额不足，当前金额 {effective_balance_text}，准备自动换号", save_log=True)
+            print(f"[余额不足] 当前余额：{effective_balance_text}，已触发自动换号")
+            async_push_msg("【余额不足】准备换号换区", f"当前余额：{effective_balance_text}，已触发自动换号。")
             state.need_switch_server = True
             return False
     except:
@@ -248,7 +272,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                         state.overlay_status = "抢购时长已到"
                         ui_print("时间已到，进入主流程收尾。", save_log=True)
                         state.account_round_end_status = "抢购时长已到"
-                        state.need_switch_server = not state.temporary_purchase_mode
+                        state.need_switch_server = True
                         return
 
                 if (current_time - last_refresh > STUCK_PUSH_INTERVAL and
@@ -357,13 +381,13 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                             if state.limit_count >= ACCOUNT_LIMIT_THRESHOLD:
                                 if state.temporary_purchase_mode:
                                     estimated_total = int(state.baseline_item_count)
-                                    state.account_round_end_status = "临时账号限制"
+                                    state.account_round_end_status = "账号限制"
                                     state.overlay_status = "临时账号限制"
                                     async_push_msg(
-                                        "【临时账号限制】停止抢购",
-                                        f"连续多次店铺为空，已停止临时模式。当前道具库存：{estimated_total}",
+                                        "【临时账号限制】准备切换目标执行位",
+                                        f"连续多次店铺为空，临时模式结束后将切换目标执行位继续。当前道具库存：{estimated_total}",
                                     )
-                                    state.need_switch_server = False
+                                    state.need_switch_server = True
                                     return
                                 state.account_round_end_status = "账号限制"
                                 state.overlay_status = "账号限制"
