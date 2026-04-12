@@ -339,7 +339,7 @@ def check_trigger_listing(camera):
     if state.listing_periodic_disabled:
         if not state.listing_periodic_skip_logged:
             reason = state.listing_periodic_disabled_reason or "当前轮次已停用 10 分钟自动上架。"
-            ui_print(f"[上架限制] 已跳过本轮后续 10 分钟自动上架：{reason}", save_log=True)
+            ui_print("[上架限制]已跳过本轮后续动上架", save_log=True)
             state.listing_periodic_skip_logged = True
         return True
     if elapsed - state.last_list_time >= LIST_INTERVAL:
