@@ -300,7 +300,10 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                     price = price_text if price_value is not None else f"前缀识别 {price_text}"
 
                     if price_action == "accept":
-                        fast_click(BUY_POS)
+                        buy_click_end_time = time.perf_counter() + 0.01
+                        while time.perf_counter() < buy_click_end_time:
+                            fast_click(BUY_POS)
+                            precise_sleep(0.002)
                         precise_sleep(CONFIRM_DELAY)
                         confirm_click_end_time = time.perf_counter() + 0.05
                         while time.perf_counter() < confirm_click_end_time:
@@ -320,9 +323,9 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                             if state.overlay_root:
                                 state.overlay_root.after(0, update_score_text)
                             ui_print(f"抢购成功，价格：{price}", save_log=True, show_console=False)
-                            precise_sleep(0.2)
+                            precise_sleep(0.15)
                             fast_click(SUCCESS_CONFIRM_POS)
-                            precise_sleep(0.2)
+                            precise_sleep(0.15)
                             fast_click(SUCCESS_CONFIRM_POS)
                         else:
                             state.fail_count += 1
