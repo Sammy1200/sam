@@ -32,7 +32,7 @@ from local_switch_account_config import (
     load_boundary_switch_accounts,
     load_local_nickname_match_config,
 )
-from overlay import toggle_pause
+from overlay import toggle_pause, ui_print
 from utils import (
     async_push_msg,
     fast_click,
@@ -221,6 +221,66 @@ def _confirm_white(camera):
     # 白点刚出现时页面可能还在轻微过渡，这里缩短为 0.5 秒复检，既保留二次确认又减少阻塞。
     safe_sleep(config.SWITCH_WHITE_CONFIRM_INTERVAL_SECONDS)
     return _pixels_white(camera)
+
+
+def _find_exact_rgb_point(camera, region, target_rgb, tolerance=0):
+    """在指定区域内查找 RGB 颜色，返回首个命中的绝对坐标。"""
+    frame = safe_get_frame(camera)
+    if frame is None:
+        return None
+
+    x1, y1, x2, y2 = region
+    if x1 >= x2 or y1 >= y2:
+        return None
+    if y2 > frame.shape[0] or x2 > frame.shape[1]:
+        return None
+
+    target_r, target_g, target_b = (int(target_rgb[0]), int(target_rgb[1]), int(target_rgb[2]))
+    tolerance = int(max(0, tolerance))
+    for y in range(y1, y2):
+        for x in range(x1, x2):
+            pixel = frame[y, x]
+            b, g, r = int(pixel[0]), int(pixel[1]), int(pixel[2])
+            if (
+                abs(r - target_r) <= tolerance
+                and abs(g - target_g) <= tolerance
+                and abs(b - target_b) <= tolerance
+            ):
+                return x, y
+    return None
+
+
+def _click_detected_point(point):
+    """统一处理识别成功后的点击延迟。"""
+    if point is None:
+        return
+    time.sleep(config.SWITCH_DETECTED_CLICK_DELAY_SECONDS)
+    fast_click(point)
+
+
+def _return_to_gumu_or_fail(camera, reason):
+    """统一执行返回古墓大厅固定操作，失败时走现有暂停/推送治理出口。"""
+    for retry_index in range(config.SWITCH_RETURN_GUMU_RETRY_COUNT):
+        for attempt in range(config.SWITCH_RETURN_GUMU_CLOSE_CLICK_COUNT):
+            fast_click(config.SWITCH_RETURN_GUMU_CLOSE_POS)
+            time.sleep(config.SWITCH_RETURN_GUMU_CLOSE_CLICK_INTERVAL_SECONDS)
+            press_key(0x1B)
+            if attempt < config.SWITCH_RETURN_GUMU_CLOSE_CLICK_COUNT - 1:
+                time.sleep(config.SWITCH_RETURN_GUMU_CLOSE_CLICK_INTERVAL_SECONDS)
+
+        time.sleep(config.SWITCH_DETECTED_CLICK_DELAY_SECONDS)
+        fast_click(config.SWITCH_RETURN_GUMU_CONFIRM_POS)
+        if _wait_for(
+            camera,
+            "gumu",
+            config.RGN_GUMU,
+            timeout=config.SWITCH_RETURN_GUMU_VERIFY_TIMEOUT_SECONDS,
+            threshold=config.SWITCH_UI_MATCH_THRESHOLD,
+        ):
+            return True
+
+    ui_print("返回古墓失败", save_log=True)
+    return pause_thread6_failure("返回古墓大厅", reason)
 
 
 def _pause_switch_flow(title, detail):
@@ -904,13 +964,50 @@ def _step07_gumu(camera, suppress_failure_output=False):
 def _step08_gold(camera):
     """步骤8：领取金币。"""
     update_overlay_mini("进场中：领取金币")
-    # 领取金币是连续点固定入口，间隔太短容易前一步动画没收完，统一压到 0.8 秒减少空点。
-    pyautogui.click(1868, 1044)
+    gold_entry_point = _find_exact_rgb_point(
+        camera,
+        config.RGN_GOLD_ENTRY,
+        config.GOLD_ENTRY_RGB,
+    )
+    if gold_entry_point is None:
+        ui_print("无需领金币", save_log=True)
+        return True
+
+    _click_detected_point(gold_entry_point)
     time.sleep(config.SWITCH_GOLD_CLICK_WAIT_SECONDS)
-    pyautogui.click(1767, 824)
+
+    gold_step2_point = _find_exact_rgb_point(
+        camera,
+        config.RGN_GOLD_STEP2,
+        config.GOLD_STEP_RGB,
+    )
+    if gold_step2_point is None:
+        ui_print("金币异常回大厅", save_log=True)
+        return _return_to_gumu_or_fail(camera, "金币链路第 2 步找色失败。")
+    _click_detected_point(gold_step2_point)
     time.sleep(config.SWITCH_GOLD_CLICK_WAIT_SECONDS)
-    pyautogui.click(1650, 1000)
-    time.sleep(config.SWITCH_GOLD_CLICK_WAIT_SECONDS)
+
+    time.sleep(config.SWITCH_GOLD_CONFIRM_FIND_START_DELAY_SECONDS)
+    gold_confirm_point = None
+    for attempt in range(config.SWITCH_GOLD_CONFIRM_FIND_RETRY_COUNT):
+        gold_confirm_point = _find_exact_rgb_point(
+            camera,
+            config.RGN_GOLD_CONFIRM,
+            config.GOLD_CONFIRM_RGB,
+            tolerance=config.GOLD_CONFIRM_RGB_TOLERANCE,
+        )
+        if gold_confirm_point is not None:
+            break
+        if attempt < config.SWITCH_GOLD_CONFIRM_FIND_RETRY_COUNT - 1:
+            time.sleep(config.SWITCH_GOLD_CONFIRM_FIND_RETRY_INTERVAL_SECONDS)
+    if gold_confirm_point is None:
+        ui_print("金币异常回大厅", save_log=True)
+        return _return_to_gumu_or_fail(camera, "金币链路第 3 步找色失败。")
+
+    time.sleep(config.SWITCH_GOLD_CONFIRM_PRE_CLICK_DELAY_SECONDS)
+    fast_click(gold_confirm_point)
+    time.sleep(config.SWITCH_GOLD_CONFIRM_POST_CLICK_DELAY_SECONDS)
+    fast_click(config.SWITCH_GOLD_SUCCESS_POPUP_POS)
     return True
 
 
@@ -927,11 +1024,15 @@ def _step09_close(camera, suppress_failure_output=False):
     pyautogui.click(830, 690)
     time.sleep(config.SWITCH_CLOSE_PANEL_AFTER_CLICK_WAIT_SECONDS)
 
-    if not _wait_for(camera, "gumu", config.RGN_GUMU, timeout=5):
-        if not suppress_failure_output:
-            async_push_msg("【切换流程】关闭面板失败", "关闭面板后未能确认仍在古墓大厅。")
-        return False
-    return True
+    if _wait_for(
+        camera,
+        "gumu",
+        config.RGN_GUMU,
+        timeout=config.SWITCH_RETURN_GUMU_VERIFY_TIMEOUT_SECONDS,
+        threshold=config.SWITCH_UI_MATCH_THRESHOLD,
+    ):
+        return True
+    return _return_to_gumu_or_fail(camera, "关闭面板后未能返回古墓大厅。")
 
 
 def _step10_trade(camera):
@@ -1027,11 +1128,11 @@ def full_switch_server(camera, server_index):
 
 def is_at_gumu(camera):
     """返回当前场景是否为古墓大厅。"""
-    if _match(camera, "gumu", config.RGN_GUMU):
+    if _match(camera, "gumu", config.RGN_GUMU, threshold=config.SWITCH_UI_MATCH_THRESHOLD):
         time.sleep(1)
-        return _match(camera, "gumu", config.RGN_GUMU)
+        return _match(camera, "gumu", config.RGN_GUMU, threshold=config.SWITCH_UI_MATCH_THRESHOLD)
     time.sleep(1)
-    return _match(camera, "gumu", config.RGN_GUMU)
+    return _match(camera, "gumu", config.RGN_GUMU, threshold=config.SWITCH_UI_MATCH_THRESHOLD)
 
 
 def navigate_to_trade(camera):
