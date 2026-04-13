@@ -49,6 +49,12 @@ EXIT_DELAY = 1.88
 MISMATCH_EXIT_DELAY = 1.88
 ACCOUNT_LIMIT_THRESHOLD = 5
 ACCOUNT_RUNTIME_CONTINUE_BALANCE_THRESHOLD = 200000000
+# 余额异常下跳保护：
+# 1. 当“上一次有效余额 - 本次识别余额”大于 1000 万时，判定为异常大下跳；
+# 2. 1000 万阈值只用于拦截“异常大下跳”，不用于拦截正常小波动，也不拦上涨；
+# 3. 这条规则只在“上一次有效余额 <= 1.1 亿”时启用；
+# 4. 当前边界设为 1.1 亿，是为了优先拦住低余额阶段的误识别，同时避免高余额阶段被这条保护误拦；
+# 5. 当上一次有效余额高于 1.1 亿时，这条规则不生效，本次识别余额按原链路继续参与后续判断。
 # 当“本次新识别余额”比“上一次有效余额”突然减少超过该阈值时，
 # 视为本次 OCR 余额识别出现异常下跳，继续沿用上一次有效余额，
 # 不让这次异常值覆盖当前有效余额，也不让它继续参与后续余额相关判断。
@@ -57,7 +63,8 @@ ACCOUNT_RUNTIME_CONTINUE_BALANCE_THRESHOLD = 200000000
 # 2. 这里额外预留了一段缓冲，避免正常成交或正常波动被误拦截；
 # 3. 这个阈值只用于拦截“突然变小很多”的异常下跳，不用于拦截所有余额波动；
 # 4. 如果以后业务上单次真实消费可能超过 500 万，必须同步把这里调大。
-BALANCE_ABNORMAL_DROP_PROTECTION_THRESHOLD = 5000000
+BALANCE_ABNORMAL_DROP_PROTECTION_THRESHOLD = 10000000
+BALANCE_ABNORMAL_DROP_PROTECTION_APPLY_MAX_PREVIOUS_BALANCE = 110000000
 IDLE_PUSH_INTERVAL = 1800
 STUCK_PUSH_INTERVAL = 300
 FRAME_MAX_AGE = 0.2
@@ -65,6 +72,9 @@ ACCOUNT_MAX_PURCHASE_SECONDS = (2 * 60 + 50) * 60
 ACCOUNT_LIMIT_COOLDOWN_SECONDS = (24 * 60 + 5) * 60
 
 # --- 上架参数 ---
+# 每次真正进入上架流程前，直接使用最后一次有效余额判断；
+# 当最后一次有效余额大于 5 亿时，本轮直接跳过上架，不额外做余额 OCR。
+LISTING_SKIP_BALANCE_THRESHOLD = 500000000
 LISTING_SCAN_MISS_THRESHOLD = 5  # 连续翻页未找到上架道具达到该次数后，停止本轮后续 10 分钟自动上架
 SIMILARITY_THRESHOLD = 0.95
 POST_LIST_WAIT = 1.5

@@ -1,6 +1,7 @@
 """
 自动上架子系统
 """
+import re
 import time
 
 import cv2
@@ -14,6 +15,7 @@ from config import (
     CONFIRM_BTN_POS,
     LIST_INTERVAL,
     LISTING_SCAN_MISS_THRESHOLD,
+    LISTING_SKIP_BALANCE_THRESHOLD,
     MAX_LISTING_RETRY,
     MONITOR_TEXT_JIAOSHI,
     MONITOR_TEXT_SHANGJIA,
@@ -52,6 +54,37 @@ from vision import (
 )
 
 LISTING_TARGET_PRICE = load_listing_target_price()[0]
+
+
+def _parse_balance_text_to_value(balance_text):
+    try:
+        text = str(balance_text or "").strip()
+        if not text:
+            return None
+        match = re.search(r"[\d\.]+", text)
+        if not match:
+            return None
+
+        num_val = float(match.group())
+        if "亿" in text:
+            return int(round(num_val * 100000000))
+        if "万" in text:
+            return int(round(num_val * 10000))
+        return int(num_val)
+    except:
+        return None
+
+
+def _should_skip_listing_by_last_valid_balance():
+    last_valid_balance_text = str(state.last_valid_balance or "").strip()
+    last_valid_balance_value = _parse_balance_text_to_value(last_valid_balance_text)
+    if (
+        last_valid_balance_value is not None
+        and last_valid_balance_value > LISTING_SKIP_BALANCE_THRESHOLD
+    ):
+        ui_print("余额超5亿跳上架", save_log=True)
+        return True
+    return False
 
 
 def check_and_click_tishi(camera_obj):
@@ -152,6 +185,9 @@ def execute_listing_routine(camera_obj, is_periodic=False):
             ui_print(f"实时库存同步失败：{sync_result.reason}", save_log=True)
 
     try:
+        if _should_skip_listing_by_last_valid_balance():
+            return
+
         ui_print("开始进入背包并执行上架流程。")
         safe_sleep(0.08)
         fast_click(CLICK_1)

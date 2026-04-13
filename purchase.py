@@ -12,6 +12,7 @@ import state
 from config import (
     ACCOUNT_MAX_PURCHASE_SECONDS,
     BALANCE_ABNORMAL_DROP_PROTECTION_THRESHOLD,
+    BALANCE_ABNORMAL_DROP_PROTECTION_APPLY_MAX_PREVIOUS_BALANCE,
     ACCOUNT_RUNTIME_CONTINUE_BALANCE_THRESHOLD,
     ACCOUNT_LIMIT_THRESHOLD,
     BUY_POS,
@@ -119,18 +120,17 @@ def check_balance_limit(frame):
     effective_balance_value = recognized_balance_value
     if (
         previous_valid_balance_value is not None
+        and previous_valid_balance_value <= BALANCE_ABNORMAL_DROP_PROTECTION_APPLY_MAX_PREVIOUS_BALANCE
         and recognized_balance_value is not None
         and previous_valid_balance_value - recognized_balance_value > BALANCE_ABNORMAL_DROP_PROTECTION_THRESHOLD
     ):
         effective_balance_text = previous_valid_balance_text
         effective_balance_value = previous_valid_balance_value
-        ui_print(
-            f"余额识别疑似异常下跳，保留上次有效余额 {previous_valid_balance_text}，本次识别 {bal_str}",
-            save_log=True,
-        )
+        ui_print("余额异常沿旧值", save_log=True)
         print(
             f"[余额识别] 检测到异常下跳，保留上次有效余额：上次={previous_valid_balance_text}，"
-            f"本次识别={bal_str}，阈值={BALANCE_ABNORMAL_DROP_PROTECTION_THRESHOLD}"
+            f"本次识别={bal_str}，阈值={BALANCE_ABNORMAL_DROP_PROTECTION_THRESHOLD}，"
+            f"启用上界={BALANCE_ABNORMAL_DROP_PROTECTION_APPLY_MAX_PREVIOUS_BALANCE}"
         )
 
     state.current_balance = effective_balance_text
@@ -300,7 +300,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                     price = price_text if price_value is not None else f"前缀识别 {price_text}"
 
                     if price_action == "accept":
-                        buy_click_end_time = time.perf_counter() + 0.01
+                        buy_click_end_time = time.perf_counter() + 0.012
                         while time.perf_counter() < buy_click_end_time:
                             fast_click(BUY_POS)
                             precise_sleep(0.002)
