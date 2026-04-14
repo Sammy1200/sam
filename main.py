@@ -854,6 +854,7 @@ def _run_pre_listing_flow(
     reset_runtime_before_listing=False,
     reset_reason="预上架前清空当前账号运行态",
     purchase_reset_reason="开始当前账号流程",
+    force_balance_check_after_switch=False,
 ):
     if not _load_current_account_context():
         return False
@@ -861,7 +862,10 @@ def _run_pre_listing_flow(
         reset_round_runtime_state(reset_reason, reset_purchase_runtime=False, reset_round_counters=False)
         reset_purchase_counters(purchase_reset_reason)
     ui_print("开始执行预上架流程...")
-    execute_listing_routine(camera)
+    execute_listing_routine(
+        camera,
+        force_balance_check_after_switch=force_balance_check_after_switch,
+    )
     return _wait_until_account_ready()
 
 
@@ -952,6 +956,7 @@ def _handle_temporary_target_execution_slot_dispatch(camera):
         reset_runtime_before_listing=True,
         reset_reason="临时模式定向切换后预上架前清空当前账号运行态",
         purchase_reset_reason="临时模式定向切换后开始目标账号流程",
+        force_balance_check_after_switch=True,
     ):
         if not state.switch_flow_paused:
             pause_thread6_failure("临时模式切换后预上架衔接", "临时模式定向切换完成后未能完成预上架与账号状态衔接。")
@@ -1019,6 +1024,7 @@ def _handle_execution_slot_dispatch(camera):
             reset_runtime_before_listing=True,
             reset_reason="换号后预上架前清空当前账号运行态",
             purchase_reset_reason="换号后开始新账号流程",
+            force_balance_check_after_switch=transition["requires_account_switch"],
         ):
             if not state.switch_flow_paused:
                 pause_thread6_failure("切换后预上架衔接", "线程 6 切换完成后未能完成预上架与账号状态衔接。")

@@ -34,7 +34,7 @@ def is_image_present(frame, monitor, template, threshold=0.8):
 def get_number(frame, templates):
     try:
         pixel_color = frame[207, 1320]
-        target_bgr = [110, 237, 255]
+        target_bgr = [51, 205, 255]
         color_diff = (abs(int(pixel_color[0]) - target_bgr[0]) +
                       abs(int(pixel_color[1]) - target_bgr[1]) +
                       abs(int(pixel_color[2]) - target_bgr[2]))
@@ -132,7 +132,7 @@ def _cache_price_decision(roi_bytes, decision, price_value, price_text):
 def get_price_decision(frame, templates):
     try:
         pixel_color = frame[207, 1320]
-        target_bgr = [110, 237, 255]
+        target_bgr = [51, 205, 255]
         color_diff = (abs(int(pixel_color[0]) - target_bgr[0]) +
                       abs(int(pixel_color[1]) - target_bgr[1]) +
                       abs(int(pixel_color[2]) - target_bgr[2]))

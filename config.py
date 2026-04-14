@@ -73,8 +73,8 @@ ACCOUNT_LIMIT_COOLDOWN_SECONDS = (24 * 60 + 1) * 60
 
 # --- 上架参数 ---
 # 每次真正进入上架流程前，直接使用最后一次有效余额判断；
-# 当最后一次有效余额大于 5 亿时，本轮直接跳过上架，不额外做余额 OCR。
-LISTING_SKIP_BALANCE_THRESHOLD = 500000000
+# 当最后一次有效余额大于 4 亿时，本轮直接跳过上架，不额外做余额 OCR。
+LISTING_SKIP_BALANCE_THRESHOLD = 400000000
 LISTING_SCAN_MISS_THRESHOLD = 5  # 连续翻页未找到上架道具达到该次数后，停止本轮后续 10 分钟自动上架
 SIMILARITY_THRESHOLD = 0.95
 POST_LIST_WAIT = 1.5

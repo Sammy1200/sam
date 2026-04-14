@@ -47,6 +47,7 @@ from utils import (
 from vision import (
     compare_region_similarity,
     crop_frame,
+    get_balance,
     is_image_present,
     match_item_in_scan,
     read_capacity,
@@ -82,9 +83,35 @@ def _should_skip_listing_by_last_valid_balance():
         last_valid_balance_value is not None
         and last_valid_balance_value > LISTING_SKIP_BALANCE_THRESHOLD
     ):
-        ui_print("余额超5亿跳上架", save_log=True)
+        ui_print("余额超4亿跳上架", save_log=True)
         return True
     return False
+
+
+def _force_refresh_balance_for_first_listing_after_switch(camera_obj):
+    frame = safe_get_frame(camera_obj)
+    if frame is None:
+        return None
+
+    # 换号后首次上架要求强制重新识别一次当前余额，不能直接沿用旧缓存。
+    state._last_balance_hash = None
+    balance_text = get_balance(frame)
+    if not balance_text:
+        return None
+
+    normalized_balance_text = str(balance_text).strip()
+    if not normalized_balance_text:
+        return None
+
+    state.current_balance = normalized_balance_text
+    state.round_current_balance = normalized_balance_text
+    state.last_valid_balance = normalized_balance_text
+    if state.overlay_root:
+        try:
+            state.overlay_root.after(0, update_score_text)
+        except Exception:
+            pass
+    return _parse_balance_text_to_value(normalized_balance_text)
 
 
 def check_and_click_tishi(camera_obj):
@@ -150,7 +177,7 @@ def _disable_periodic_listing(reason):
     ui_print(reason, save_log=True)
 
 
-def execute_listing_routine(camera_obj, is_periodic=False):
+def execute_listing_routine(camera_obj, is_periodic=False, force_balance_check_after_switch=False):
     gc_checkpoint()
 
     resume_timer_after_listing = state.purchase_timer_active
@@ -185,6 +212,15 @@ def execute_listing_routine(camera_obj, is_periodic=False):
             ui_print(f"实时库存同步失败：{sync_result.reason}", save_log=True)
 
     try:
+        if force_balance_check_after_switch:
+            forced_balance_value = _force_refresh_balance_for_first_listing_after_switch(camera_obj)
+            if (
+                forced_balance_value is not None
+                and forced_balance_value > LISTING_SKIP_BALANCE_THRESHOLD
+            ):
+                _disable_periodic_listing("[上架限制]换后超4亿")
+                return
+
         if _should_skip_listing_by_last_valid_balance():
             return
 
