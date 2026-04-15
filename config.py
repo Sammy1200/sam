@@ -7,6 +7,7 @@ import os
 # --- 脚本路径 ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_DIR = os.path.join(SCRIPT_DIR, "logo", "shangjia")
+BALANCE_TEMPLATE_DIR = os.path.join(SCRIPT_DIR, "logo", "yue")
 
 # --- 监控区域 ---
 MONITOR_PRICE = {"left": 1473, "top": 181, "width": 79, "height": 22}
@@ -43,6 +44,7 @@ SCROLL_POS = (1400, 520)
 # --- 抢购参数 ---
 MAX_PRICE = 2100001
 MIN_PRICE = 325000
+PRICE_DECISION_MAX_PRICE = 1600001
 CONFIRM_DELAY = 0.001
 PRE_EXIT_CLICK_DELAY = 0.03
 EXIT_DELAY = 1.88
@@ -87,6 +89,8 @@ LIST_INTERVAL = 10 * 60
 UPSCALE = 4
 STANDARD_W = 20
 STANDARD_H = 28
+BALANCE_TEMPLATE_MATCH_THRESHOLD = 0.75
+BALANCE_TEMPLATE_DUPLICATE_GAP = 4
 
 # --- 线程 6：执行位/运行态 ---
 EXECUTION_SLOT_COUNT = 8

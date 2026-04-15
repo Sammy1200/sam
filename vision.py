@@ -10,15 +10,35 @@ import state
 from config import (
     MONITOR_PRICE, MONITOR_CAPACITY, MONITOR_BALANCE,
     MIN_PRICE, MAX_PRICE,
-    UPSCALE, STANDARD_W, STANDARD_H, TEMPLATE_DIR
+    UPSCALE, STANDARD_W, STANDARD_H, TEMPLATE_DIR,
+    BALANCE_TEMPLATE_DIR, BALANCE_TEMPLATE_MATCH_THRESHOLD, BALANCE_TEMPLATE_DUPLICATE_GAP,
+    PRICE_DECISION_MAX_PRICE,
 )
 from utils import safe_sleep, safe_get_frame
 import os
 
 
+BALANCE_TEMPLATE_FILE_MAP = {str(d): f"{d}.png" for d in range(10)}
+BALANCE_TEMPLATE_FILE_MAP.update({
+    ".": "dian.png",
+    "万": "wan.png",
+    "亿": "yi.png",
+})
+_BALANCE_TEMPLATES = None
+_BALANCE_TEMPLATE_LOAD_ATTEMPTED = False
+
+
 def crop_frame(frame, monitor):
     t, l = monitor["top"], monitor["left"]
     return frame[t:t + monitor["height"], l:l + monitor["width"]]
+
+
+def _to_gray(image):
+    if len(image.shape) == 2:
+        return image
+    if image.shape[2] == 4:
+        return cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
+    return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
 
 def is_image_present(frame, monitor, template, threshold=0.8):
@@ -87,8 +107,9 @@ def get_number(frame, templates):
 PRICE_MATCH_THRESHOLD = 0.75
 PRICE_DUPLICATE_GAP = 5
 FAST_ACCEPT_FIRST_DIGITS = {"4", "5", "6", "7", "8", "9"}
-FAST_ACCEPT_SECOND_DIGITS = {"0", "1", "2", "3"}
-FAST_REJECT_SECOND_DIGITS = {"5", "6", "7", "8", "9"}
+FAST_ACCEPT_SECOND_DIGITS = {"0", "1", "2", "3", "4", "5"}
+FAST_REJECT_FIRST_DIGITS = {"2"}
+FAST_REJECT_SECOND_DIGITS = {"7", "8", "9"}
 
 
 def _merge_digit_hits(detected):
@@ -129,6 +150,33 @@ def _cache_price_decision(roi_bytes, decision, price_value, price_text):
     state.price_decision_cache_text = price_text
 
 
+def _get_price_prefix_decision(gray, templates):
+    digit_hits = _match_digit_hits(gray, templates, range(0, 10))
+    if not digit_hits:
+        return None, None
+
+    first_digit = digit_hits[0][1]
+    if first_digit in FAST_ACCEPT_FIRST_DIGITS:
+        return "accept", first_digit
+    if first_digit in FAST_REJECT_FIRST_DIGITS:
+        return "reject", first_digit
+    if first_digit == "3":
+        return None, None
+    if first_digit != "1":
+        return None, None
+
+    if len(digit_hits) < 2:
+        return None, None
+
+    second_digit = digit_hits[1][1]
+    prefix_text = f"{first_digit}{second_digit}"
+    if second_digit in FAST_ACCEPT_SECOND_DIGITS:
+        return "accept", prefix_text
+    if second_digit in FAST_REJECT_SECOND_DIGITS:
+        return "reject", prefix_text
+    return None, None
+
+
 def get_price_decision(frame, templates):
     try:
         pixel_color = frame[207, 1320]
@@ -149,14 +197,10 @@ def get_price_decision(frame, templates):
                 state.price_decision_cache_text,
             )
 
-        # 先判断能直接买的价格前缀，2xx/3xx 继续完整识别。
-        first_hits = _match_digit_hits(gray, templates, range(1, 10))
-        if first_hits:
-            _, first_digit, _, _ = first_hits[0]
-
-            if first_digit in FAST_ACCEPT_FIRST_DIGITS or first_digit == "1":
-                _cache_price_decision(roi_bytes, "accept", None, first_digit)
-                return "accept", None, first_digit
+        prefix_decision, prefix_text = _get_price_prefix_decision(gray, templates)
+        if prefix_decision is not None:
+            _cache_price_decision(roi_bytes, prefix_decision, None, prefix_text)
+            return prefix_decision, None, prefix_text
 
         price_value = get_number(frame, templates)
         if price_value is None:
@@ -164,7 +208,7 @@ def get_price_decision(frame, templates):
             return "unknown", None, None
 
         price_text = str(price_value)
-        if MIN_PRICE < price_value < MAX_PRICE:
+        if MIN_PRICE < price_value < PRICE_DECISION_MAX_PRICE:
             decision = "accept"
         else:
             decision = "reject"
@@ -357,101 +401,149 @@ def read_capacity(frame):
 
 # ---- 余额 ----
 
-BALANCE_OCR_CHAR_TRANSLATIONS = str.maketrans({
-    "I": "1",
-    "l": "1",
-    "i": "1",
-    "|": "1",
-    "!": "1",
-    "｜": "1",
-    "ｌ": "1",
-    "ｉ": "1",
-    "O": "0",
-    "o": "0",
-    "Q": "0",
-    "D": "0",
-    "路": ".",
-    "'": ".",
-    "`": ".",
-    "，": ",",
-    "。": ".",
-})
-
-
-def _normalize_balance_text(raw_text):
-    """余额 OCR 只做定向纠偏，避免连续 1 在清洗阶段被误删。"""
-    text = unicodedata.normalize("NFKC", raw_text or "").strip()
-    if not text:
-        return ""
-
-    text = text.replace(" ", "").translate(BALANCE_OCR_CHAR_TRANSLATIONS)
-    if any(unit in text for unit in ["万", "亿"]):
-        text = text.replace(",", ".")
+def _prepare_balance_template(raw):
+    gray = _to_gray(raw)
+    if len(raw.shape) == 3 and raw.shape[2] == 4:
+        alpha = raw[:, :, 3]
+        mask = cv2.threshold(alpha, 0, 255, cv2.THRESH_BINARY)[1]
     else:
-        text = text.replace(",", "").replace(".", "")
+        mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    coords = cv2.findNonZero(mask)
+    if coords is None:
+        return None
+    x, y, w, h = cv2.boundingRect(coords)
+    binary = cv2.threshold(gray[y:y + h, x:x + w], 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    return {
+        "image": binary,
+        "width": w,
+    }
 
-    return re.sub(r"[^\d\.万亿]", "", text)
+
+def load_balance_templates():
+    global _BALANCE_TEMPLATES, _BALANCE_TEMPLATE_LOAD_ATTEMPTED
+
+    if _BALANCE_TEMPLATE_LOAD_ATTEMPTED:
+        return bool(_BALANCE_TEMPLATES)
+
+    _BALANCE_TEMPLATE_LOAD_ATTEMPTED = True
+    _BALANCE_TEMPLATES = {}
+    if not os.path.isdir(BALANCE_TEMPLATE_DIR):
+        return False
+
+    for label, filename in BALANCE_TEMPLATE_FILE_MAP.items():
+        path = os.path.join(BALANCE_TEMPLATE_DIR, filename)
+        if not os.path.isfile(path):
+            continue
+        raw = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+        if raw is None:
+            continue
+        prepared = _prepare_balance_template(raw)
+        if prepared is not None:
+            _BALANCE_TEMPLATES[label] = prepared
+    return bool(_BALANCE_TEMPLATES)
+
+
+def _merge_balance_hits(detected):
+    if not detected:
+        return []
+
+    detected.sort(key=lambda item: item[0])
+    merged = []
+    last = detected[0]
+    for current in detected[1:]:
+        is_overlapping = current[0] <= (last[0] + last[3] - 1)
+        is_adjacent_duplicate = (
+            current[1] == last[1]
+            and current[0] - last[0] <= BALANCE_TEMPLATE_DUPLICATE_GAP
+        )
+        if is_overlapping or is_adjacent_duplicate:
+            if current[2] > last[2]:
+                last = current
+        else:
+            merged.append(last)
+            last = current
+    merged.append(last)
+    return merged
+
+
+def _match_balance_text(gray):
+    if not load_balance_templates():
+        return None
+
+    binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    border = np.concatenate([binary[0], binary[-1], binary[:, 0], binary[:, -1]])
+    if np.mean(border) > 127:
+        binary = cv2.bitwise_not(binary)
+
+    detected = []
+    for label, template in _BALANCE_TEMPLATES.items():
+        tpl_image = template["image"]
+        if binary.shape[0] < tpl_image.shape[0] or binary.shape[1] < tpl_image.shape[1]:
+            continue
+        result = cv2.matchTemplate(binary, tpl_image, cv2.TM_CCORR_NORMED)
+        loc = np.where(result >= BALANCE_TEMPLATE_MATCH_THRESHOLD)
+        for pt in zip(*loc[::-1]):
+            detected.append((pt[0], label, float(result[pt[1], pt[0]]), template["width"]))
+
+    if not detected:
+        return None
+
+    merged = _merge_balance_hits(detected)
+    if not merged:
+        return None
+    return "".join(item[1] for item in merged)
+
+
+def _sanitize_balance_text(raw_text):
+    text = re.sub(r"[^\d\.万亿]", "", str(raw_text or ""))
+    if not text:
+        return None
+
+    units = [char for char in text if char in ("万", "亿")]
+    if len(units) > 1:
+        return None
+
+    unit = units[0] if units else ""
+    if unit:
+        if text[-1] != unit or text.count(unit) != 1:
+            return None
+        number_part = text[:-1]
+    else:
+        number_part = text
+
+    if not number_part:
+        return None
+
+    if unit:
+        if number_part.count(".") > 1:
+            first_dot = number_part.find(".")
+            number_part = number_part[:first_dot + 1] + number_part[first_dot + 1:].replace(".", "")
+        if number_part.startswith(".") or number_part.endswith("."):
+            return None
+        if not re.fullmatch(r"\d+(\.\d+)?", number_part):
+            return None
+    else:
+        number_part = number_part.replace(".", "")
+        if not number_part.isdigit():
+            return None
+
+    return f"{number_part}{unit}" if unit else number_part
 
 
 def get_balance(frame):
     try:
-        if not state.ocr_engine:
-            return None
         cropped = crop_frame(frame, MONITOR_BALANCE)
         tiny = cv2.resize(cropped, (8, 8))
         current_hash = tiny.tobytes()
-        if state._last_balance_hash is not None and current_hash == state._last_balance_hash:
-            return state.current_balance
-        padded_crop = cv2.copyMakeBorder(cropped, 0, 0, 6, 6, cv2.BORDER_REPLICATE)
-        gray_img = cv2.cvtColor(padded_crop, cv2.COLOR_BGRA2GRAY)
-        resized = cv2.resize(gray_img, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
-        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-        sharpened = cv2.filter2D(resized, -1, kernel)
-        padded = cv2.copyMakeBorder(sharpened, 30, 30, 30, 30, cv2.BORDER_REPLICATE)
-        final_img = cv2.cvtColor(padded, cv2.COLOR_GRAY2BGR)
-        result, _ = state.ocr_engine(final_img)
-        if result and len(result) > 0:
-            res_str = _normalize_balance_text("".join([item[1] for item in result]))
-            if res_str:
-                if any(u in res_str for u in ['万', '亿']):
-                    res_str = res_str.replace("。", ".").replace(",", ".")
-                else:
-                    res_str = res_str.replace("。", "").replace(",", "").replace(".", "")
-                res_str = re.sub(
-                    r'[^\d\.万亿]', '',
-                    res_str.replace(" ", "").replace("·", ".").replace("'", ".").replace("`", "."))
-                if res_str:
-                    state._last_balance_hash = current_hash
-            return res_str if res_str else None
-        return None
-    except:
-        return None
-
-
-def get_balance(frame):
-    try:
-        if not state.ocr_engine:
-            return None
-        cropped = crop_frame(frame, MONITOR_BALANCE)
-        tiny = cv2.resize(cropped, (8, 8))
-        current_hash = tiny.tobytes()
-        if state._last_balance_hash is not None and current_hash == state._last_balance_hash:
+        last_balance_hash = getattr(state, "_last_balance_hash", None)
+        if last_balance_hash is not None and current_hash == last_balance_hash:
             return state.current_balance
 
-        padded_crop = cv2.copyMakeBorder(cropped, 0, 0, 6, 6, cv2.BORDER_REPLICATE)
-        gray_img = cv2.cvtColor(padded_crop, cv2.COLOR_BGRA2GRAY)
-        resized = cv2.resize(gray_img, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
-        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-        sharpened = cv2.filter2D(resized, -1, kernel)
-        padded = cv2.copyMakeBorder(sharpened, 30, 30, 30, 30, cv2.BORDER_REPLICATE)
-        final_img = cv2.cvtColor(padded, cv2.COLOR_GRAY2BGR)
-        result, _ = state.ocr_engine(final_img)
-        if result and len(result) > 0:
-            res_str = _normalize_balance_text("".join([item[1] for item in result]))
-            if res_str:
-                state._last_balance_hash = current_hash
-            return res_str if res_str else None
-        return None
+        balance_text = _match_balance_text(_to_gray(cropped))
+        balance_text = _sanitize_balance_text(balance_text)
+        if balance_text:
+            setattr(state, "_last_balance_hash", current_hash)
+        return balance_text
     except:
         return None
 
