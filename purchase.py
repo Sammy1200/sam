@@ -13,6 +13,7 @@ from config import (
     ACCOUNT_MAX_PURCHASE_SECONDS,
     BALANCE_ABNORMAL_DROP_PROTECTION_THRESHOLD,
     BALANCE_ABNORMAL_DROP_PROTECTION_APPLY_MAX_PREVIOUS_BALANCE,
+    BALANCE_INSUFFICIENT_THRESHOLD,
     ACCOUNT_RUNTIME_CONTINUE_BALANCE_THRESHOLD,
     ACCOUNT_LIMIT_THRESHOLD,
     BUY_POS,
@@ -23,7 +24,6 @@ from config import (
     FIX_SHOP_POS1,
     FIX_SHOP_POS2,
     FRAME_MAX_AGE,
-    MAX_PRICE,
     MIN_PRICE,
     MISMATCH_EXIT_DELAY,
     MONITOR_DIYICI,
@@ -54,7 +54,7 @@ from utils import (
     safe_get_frame,
     smart_wait,
 )
-from vision import get_balance, get_price_decision, is_image_present
+from vision import get_balance_recognition, get_price_decision, is_image_present
 
 
 def get_battle_report():
@@ -108,35 +108,54 @@ def reset_purchase_counters(reason):
 
 def check_balance_limit(frame):
     """识别余额，余额不足时直接触发自动换号。"""
-    bal_str = get_balance(frame)
-    if not bal_str:
-        return True
+    recognition = get_balance_recognition(frame)
+    recognized_balance_text = str(recognition.get("text") or "").strip()
+    recognized_balance_confirmed = bool(recognition.get("confirmed")) and bool(recognized_balance_text)
 
-    previous_valid_balance_text = str(state.last_valid_balance or "").strip()
-    previous_valid_balance_value = parse_balance_text_to_value(previous_valid_balance_text)
-    recognized_balance_value = parse_balance_text_to_value(bal_str)
+    previous_confirmed_balance_text = str(state.last_valid_balance or "").strip()
+    previous_confirmed_balance_value = parse_balance_text_to_value(previous_confirmed_balance_text)
+    recognized_balance_value = parse_balance_text_to_value(recognized_balance_text)
 
-    effective_balance_text = bal_str
-    effective_balance_value = recognized_balance_value
-    if (
-        previous_valid_balance_value is not None
-        and previous_valid_balance_value <= BALANCE_ABNORMAL_DROP_PROTECTION_APPLY_MAX_PREVIOUS_BALANCE
-        and recognized_balance_value is not None
-        and previous_valid_balance_value - recognized_balance_value > BALANCE_ABNORMAL_DROP_PROTECTION_THRESHOLD
-    ):
-        effective_balance_text = previous_valid_balance_text
-        effective_balance_value = previous_valid_balance_value
-        ui_print("余额异常沿旧值", save_log=True)
-        print(
-            f"[余额识别] 检测到异常下跳，保留上次有效余额：上次={previous_valid_balance_text}，"
-            f"本次识别={bal_str}，阈值={BALANCE_ABNORMAL_DROP_PROTECTION_THRESHOLD}，"
-            f"启用上界={BALANCE_ABNORMAL_DROP_PROTECTION_APPLY_MAX_PREVIOUS_BALANCE}"
-        )
+    effective_balance_text = previous_confirmed_balance_text
+    effective_balance_value = previous_confirmed_balance_value
+    balance_display_mode = "沿" if previous_confirmed_balance_text else ""
 
-    state.current_balance = effective_balance_text
-    state.round_current_balance = effective_balance_text
-    if effective_balance_value is not None:
-        state.last_valid_balance = effective_balance_text
+    if recognized_balance_confirmed:
+        effective_balance_text = recognized_balance_text
+        effective_balance_value = recognized_balance_value
+        balance_display_mode = "新"
+        if (
+            previous_confirmed_balance_value is not None
+            and previous_confirmed_balance_value <= BALANCE_ABNORMAL_DROP_PROTECTION_APPLY_MAX_PREVIOUS_BALANCE
+            and recognized_balance_value is not None
+            and previous_confirmed_balance_value - recognized_balance_value > BALANCE_ABNORMAL_DROP_PROTECTION_THRESHOLD
+        ):
+            effective_balance_text = previous_confirmed_balance_text
+            effective_balance_value = previous_confirmed_balance_value
+            balance_display_mode = "沿" if previous_confirmed_balance_text else ""
+            ui_print("余额异常沿旧值", save_log=True)
+            print(
+                f"[余额识别] 检测到异常下跳，保留上次有效余额：上次={previous_confirmed_balance_text}，"
+                f"本次识别={recognized_balance_text}，阈值={BALANCE_ABNORMAL_DROP_PROTECTION_THRESHOLD}，"
+                f"启用上界={BALANCE_ABNORMAL_DROP_PROTECTION_APPLY_MAX_PREVIOUS_BALANCE}"
+            )
+        elif effective_balance_value is not None:
+            state.last_valid_balance = effective_balance_text
+    elif previous_confirmed_balance_text:
+        effective_balance_text = previous_confirmed_balance_text
+        effective_balance_value = previous_confirmed_balance_value
+        balance_display_mode = "沿"
+    else:
+        effective_balance_text = str(state.current_balance or "").strip()
+        effective_balance_value = None
+        balance_display_mode = "待"
+
+    state.balance_display_mode = balance_display_mode
+    if effective_balance_text:
+        state.current_balance = effective_balance_text
+        state.round_current_balance = effective_balance_text
+    elif balance_display_mode == "待":
+        state.round_current_balance = ""
     if state.overlay_root:
         state.overlay_root.after(0, update_score_text)
 
@@ -144,7 +163,7 @@ def check_balance_limit(frame):
         real_val = effective_balance_value
         if real_val is None:
             return True
-        if real_val < MAX_PRICE:
+        if real_val < BALANCE_INSUFFICIENT_THRESHOLD:
             state.account_round_end_status = "余额不足"
             state.overlay_status = "余额不足"
             ui_print(f"余额不足，当前金额 {effective_balance_text}，准备自动换号", save_log=True)

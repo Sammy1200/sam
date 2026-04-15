@@ -115,10 +115,15 @@ def _get_overlay_status_text():
 
 def _get_balance_display_text():
     balance_text = str(state.round_current_balance or "").strip()
-    if balance_text:
-        return balance_text
-    fallback_text = str(state.current_balance or "").strip()
-    return fallback_text or "获取中..."
+    if not balance_text:
+        balance_text = str(state.current_balance or "").strip()
+    if not balance_text:
+        return "待确认"
+
+    mode = str(getattr(state, "balance_display_mode", "") or "").strip()
+    if mode in ("新", "沿"):
+        return f"{mode}{balance_text}"
+    return balance_text
 
 
 def _get_current_inventory():
@@ -268,6 +273,34 @@ def _create_score_panel(root):
             ipady=OVERLAY_SCORE_ITEM_PAD_Y_FIRST_ROW if row_index == 0 else OVERLAY_SCORE_ITEM_PAD_Y,
         )
 
+    balance_row = tk.Frame(body, bg=OVERLAY_SCORE_MAIN_BG, bd=0, highlightthickness=0)
+    balance_row.grid(
+        row=len(row_specs),
+        column=0,
+        sticky="ew",
+        padx=OVERLAY_SCORE_MAIN_PAD_X,
+        pady=(0, OVERLAY_SCORE_MAIN_PAD_Y),
+    )
+    balance_row.grid_columnconfigure(0, weight=1)
+
+    balance_item = _build_score_item(
+        balance_row,
+        title="余额",
+        value_key="balance",
+        value_width=10,
+        value_font=OVERLAY_SCORE_VALUE_FONT,
+        value_fg=OVERLAY_SCORE_VALUE_FG,
+        value_padx=OVERLAY_SCORE_VALUE_GAP,
+        score_vars=panel._overlay_score_value_vars,
+    )
+    balance_item.grid(
+        row=0,
+        column=0,
+        sticky="ew",
+        ipadx=OVERLAY_SCORE_ITEM_PAD_X,
+        ipady=OVERLAY_SCORE_ITEM_PAD_Y,
+    )
+
     root._overlay_score_value_vars = panel._overlay_score_value_vars
     return panel
 
@@ -348,6 +381,7 @@ def update_score_text():
     remaining_text = _format_duration(get_runtime_window_remaining_seconds())
     slot_text = str(state.current_execution_slot or "--")
     current_inventory = _get_current_inventory()
+    balance_text = _get_balance_display_text()
     values = {
         "slot": slot_text,
         "remaining": remaining_text,
@@ -355,6 +389,7 @@ def update_score_text():
         "inventory": current_inventory,
         "purchase_success": state.round_purchase_success_count,
         "purchase_fail": state.round_purchase_fail_count,
+        "balance": balance_text,
     }
     try:
         if state.score_var is not None:
@@ -364,6 +399,7 @@ def update_score_text():
                         f"执行位 {slot_text}  时间剩余 {remaining_text}",
                         f"上架成功 {state.round_listing_success_count}  道具库存 {current_inventory}",
                         f"抢购成功 {state.round_purchase_success_count}  抢购失败 {state.round_purchase_fail_count}",
+                        f"余额 {balance_text}",
                     ]
                 )
             )

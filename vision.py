@@ -12,6 +12,11 @@ from config import (
     MIN_PRICE, MAX_PRICE,
     UPSCALE, STANDARD_W, STANDARD_H, TEMPLATE_DIR,
     BALANCE_TEMPLATE_DIR, BALANCE_TEMPLATE_MATCH_THRESHOLD, BALANCE_TEMPLATE_DUPLICATE_GAP,
+    BALANCE_TEMPLATE_DOT_MATCH_THRESHOLD, BALANCE_TEMPLATE_UNIT_MATCH_THRESHOLD,
+    BALANCE_BINARY_BLUR_SIZE, BALANCE_SEGMENT_MIN_COMPONENT_AREA, BALANCE_SEGMENT_CLOSE_KERNEL_SIZE,
+    BALANCE_SEGMENT_MERGE_GAP, BALANCE_SEGMENT_MAX_GROUP_SIZE,
+    BALANCE_DOT_MAX_WIDTH, BALANCE_DOT_MAX_HEIGHT, BALANCE_DOT_MAX_AREA,
+    BALANCE_DOT_BASELINE_OFFSET_RATIO, BALANCE_DOT_MAX_NEIGHBOR_GAP, BALANCE_UNIT_MIN_WIDTH,
     PRICE_DECISION_MAX_PRICE,
 )
 from utils import safe_sleep, safe_get_frame
@@ -415,6 +420,8 @@ def _prepare_balance_template(raw):
     binary = cv2.threshold(gray[y:y + h, x:x + w], 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
     return {
         "image": binary,
+        "height": h,
+        "label": "",
         "width": w,
     }
 
@@ -439,113 +446,499 @@ def load_balance_templates():
             continue
         prepared = _prepare_balance_template(raw)
         if prepared is not None:
+            prepared["label"] = label
             _BALANCE_TEMPLATES[label] = prepared
     return bool(_BALANCE_TEMPLATES)
 
 
-def _merge_balance_hits(detected):
-    if not detected:
-        return []
-
-    detected.sort(key=lambda item: item[0])
-    merged = []
-    last = detected[0]
-    for current in detected[1:]:
-        is_overlapping = current[0] <= (last[0] + last[3] - 1)
-        is_adjacent_duplicate = (
-            current[1] == last[1]
-            and current[0] - last[0] <= BALANCE_TEMPLATE_DUPLICATE_GAP
-        )
-        if is_overlapping or is_adjacent_duplicate:
-            if current[2] > last[2]:
-                last = current
-        else:
-            merged.append(last)
-            last = current
-    merged.append(last)
-    return merged
+def _get_balance_match_threshold(label):
+    if label == ".":
+        return BALANCE_TEMPLATE_DOT_MATCH_THRESHOLD
+    if label in ("万", "亿"):
+        return BALANCE_TEMPLATE_UNIT_MATCH_THRESHOLD
+    return BALANCE_TEMPLATE_MATCH_THRESHOLD
 
 
-def _match_balance_text(gray):
-    if not load_balance_templates():
-        return None
+def _get_balance_params(overrides=None):
+    params = {
+        "binary_blur_size": BALANCE_BINARY_BLUR_SIZE,
+        "digit_threshold": BALANCE_TEMPLATE_MATCH_THRESHOLD,
+        "dot_baseline_offset_ratio": BALANCE_DOT_BASELINE_OFFSET_RATIO,
+        "dot_max_area": BALANCE_DOT_MAX_AREA,
+        "dot_max_height": BALANCE_DOT_MAX_HEIGHT,
+        "dot_max_neighbor_gap": BALANCE_DOT_MAX_NEIGHBOR_GAP,
+        "dot_max_width": BALANCE_DOT_MAX_WIDTH,
+        "dot_threshold": BALANCE_TEMPLATE_DOT_MATCH_THRESHOLD,
+        "min_component_area": BALANCE_SEGMENT_MIN_COMPONENT_AREA,
+        "segment_close_kernel_size": BALANCE_SEGMENT_CLOSE_KERNEL_SIZE,
+        "segment_max_group_size": BALANCE_SEGMENT_MAX_GROUP_SIZE,
+        "segment_merge_gap": BALANCE_SEGMENT_MERGE_GAP,
+        "unit_min_width": BALANCE_UNIT_MIN_WIDTH,
+        "unit_threshold": BALANCE_TEMPLATE_UNIT_MATCH_THRESHOLD,
+    }
+    if overrides:
+        params.update(overrides)
 
-    binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    blur_size = int(params["binary_blur_size"] or 0)
+    if blur_size > 1 and blur_size % 2 == 0:
+        blur_size += 1
+    params["binary_blur_size"] = blur_size
+    params["segment_close_kernel_size"] = max(1, int(params["segment_close_kernel_size"]))
+    params["segment_max_group_size"] = max(1, int(params["segment_max_group_size"]))
+    params["segment_merge_gap"] = max(0, int(params["segment_merge_gap"]))
+    params["min_component_area"] = max(1, int(params["min_component_area"]))
+    params["dot_max_width"] = max(1, int(params["dot_max_width"]))
+    params["dot_max_height"] = max(1, int(params["dot_max_height"]))
+    params["dot_max_area"] = max(1, int(params["dot_max_area"]))
+    params["dot_max_neighbor_gap"] = max(0, int(params["dot_max_neighbor_gap"]))
+    params["unit_min_width"] = max(1, int(params["unit_min_width"]))
+    params["dot_baseline_offset_ratio"] = max(0.0, float(params["dot_baseline_offset_ratio"]))
+    return params
+
+
+def _binarize_balance_region(gray, params=None):
+    params = _get_balance_params(params)
+    working = gray
+    blur_size = params["binary_blur_size"]
+    if blur_size > 1:
+        working = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
+
+    binary = cv2.threshold(working, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
     border = np.concatenate([binary[0], binary[-1], binary[:, 0], binary[:, -1]])
     if np.mean(border) > 127:
         binary = cv2.bitwise_not(binary)
+    return binary
 
-    detected = []
-    for label, template in _BALANCE_TEMPLATES.items():
-        tpl_image = template["image"]
-        if binary.shape[0] < tpl_image.shape[0] or binary.shape[1] < tpl_image.shape[1]:
+
+def _remove_small_balance_components(binary, params=None):
+    params = _get_balance_params(params)
+    component_count, component_labels, component_stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    cleaned = np.zeros_like(binary)
+    for component_index in range(1, component_count):
+        _, _, width, height, area = component_stats[component_index]
+        if area < params["min_component_area"]:
             continue
-        result = cv2.matchTemplate(binary, tpl_image, cv2.TM_CCORR_NORMED)
-        loc = np.where(result >= BALANCE_TEMPLATE_MATCH_THRESHOLD)
-        for pt in zip(*loc[::-1]):
-            detected.append((pt[0], label, float(result[pt[1], pt[0]]), template["width"]))
+        if width < 2 or height < 2:
+            continue
+        cleaned[component_labels == component_index] = 255
+    if params["segment_close_kernel_size"] > 1:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (params["segment_close_kernel_size"], params["segment_close_kernel_size"]),
+        )
+        cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel)
+    return cleaned
 
-    if not detected:
+
+def _extract_balance_blocks(binary, params=None):
+    params = _get_balance_params(params)
+    active_columns = np.any(binary > 0, axis=0)
+    blocks = []
+    start_x = None
+    for column_index, is_active in enumerate(active_columns):
+        if is_active and start_x is None:
+            start_x = column_index
+        elif not is_active and start_x is not None:
+            end_x = column_index
+            block_slice = binary[:, start_x:end_x]
+            active_rows = np.where(np.any(block_slice > 0, axis=1))[0]
+            if active_rows.size > 0:
+                start_y = int(active_rows[0])
+                end_y = int(active_rows[-1]) + 1
+                block_image = block_slice[start_y:end_y, :]
+                area = int(cv2.countNonZero(block_image))
+                if area >= params["min_component_area"]:
+                    blocks.append({
+                        "area": area,
+                        "bottom": end_y,
+                        "height": end_y - start_y,
+                        "image": block_image,
+                        "width": end_x - start_x,
+                        "x": start_x,
+                        "y": start_y,
+                    })
+            start_x = None
+    if start_x is not None:
+        block_slice = binary[:, start_x:]
+        active_rows = np.where(np.any(block_slice > 0, axis=1))[0]
+        if active_rows.size > 0:
+            start_y = int(active_rows[0])
+            end_y = int(active_rows[-1]) + 1
+            block_image = block_slice[start_y:end_y, :]
+            area = int(cv2.countNonZero(block_image))
+            if area >= params["min_component_area"]:
+                blocks.append({
+                    "area": area,
+                    "bottom": end_y,
+                    "height": end_y - start_y,
+                    "image": block_image,
+                    "width": binary.shape[1] - start_x,
+                    "x": start_x,
+                    "y": start_y,
+                })
+    return blocks
+
+
+def _merge_balance_blocks(blocks, start_index, end_index):
+    merged_blocks = blocks[start_index:end_index + 1]
+    left = int(merged_blocks[0]["x"])
+    right = int(merged_blocks[-1]["x"]) + int(merged_blocks[-1]["width"])
+    top = min(int(block["y"]) for block in merged_blocks)
+    bottom = max(int(block["bottom"]) for block in merged_blocks)
+
+    merged_image = np.zeros((bottom - top, right - left), dtype=np.uint8)
+    area = 0
+    for block in merged_blocks:
+        offset_x = int(block["x"]) - left
+        offset_y = int(block["y"]) - top
+        block_image = block["image"]
+        height, width = block_image.shape[:2]
+        merged_image[offset_y:offset_y + height, offset_x:offset_x + width] = np.maximum(
+            merged_image[offset_y:offset_y + height, offset_x:offset_x + width],
+            block_image,
+        )
+        area += int(block["area"])
+    return {
+        "area": area,
+        "bottom": bottom,
+        "height": bottom - top,
+        "image": merged_image,
+        "part_count": end_index - start_index + 1,
+        "width": right - left,
+        "x": left,
+        "y": top,
+    }
+
+
+def _split_balance_block(block):
+    if int(block["width"]) < 14 or int(block["height"]) < 16:
+        return [block]
+
+    image = block["image"]
+    column_counts = np.count_nonzero(image > 0, axis=0)
+    if column_counts.size < 6:
+        return [block]
+
+    search_start = max(2, int(column_counts.size * 0.25))
+    search_end = min(column_counts.size - 2, int(column_counts.size * 0.75))
+    if search_end <= search_start:
+        return [block]
+
+    local_counts = column_counts[search_start:search_end]
+    valley_offset = int(np.argmin(local_counts))
+    valley_index = search_start + valley_offset
+    valley_value = int(column_counts[valley_index])
+    valley_limit = max(2, int(block["height"] * 0.18))
+    if valley_value > valley_limit:
+        return [block]
+
+    left_slice = image[:, :valley_index]
+    right_slice = image[:, valley_index:]
+    split_blocks = []
+    for offset_x, block_slice in ((0, left_slice), (valley_index, right_slice)):
+        active_columns = np.where(np.any(block_slice > 0, axis=0))[0]
+        active_rows = np.where(np.any(block_slice > 0, axis=1))[0]
+        if active_columns.size == 0 or active_rows.size == 0:
+            return [block]
+        start_x = int(active_columns[0])
+        end_x = int(active_columns[-1]) + 1
+        start_y = int(active_rows[0])
+        end_y = int(active_rows[-1]) + 1
+        cropped = block_slice[start_y:end_y, start_x:end_x]
+        if cropped.shape[1] < 2:
+            return [block]
+        split_blocks.append({
+            "area": int(cv2.countNonZero(cropped)),
+            "bottom": int(block["y"]) + end_y,
+            "height": end_y - start_y,
+            "image": cropped,
+            "width": end_x - start_x,
+            "x": int(block["x"]) + offset_x + start_x,
+            "y": int(block["y"]) + start_y,
+        })
+    return split_blocks
+
+
+def _refine_balance_blocks(blocks):
+    refined = []
+    for block in blocks:
+        refined.extend(_split_balance_block(block))
+    refined.sort(key=lambda item: int(item["x"]))
+    return refined
+
+
+def _normalize_balance_block_to_template(block_image, template_image):
+    template_height, template_width = template_image.shape[:2]
+    block_height, block_width = block_image.shape[:2]
+    if template_height <= 0 or template_width <= 0 or block_height <= 0 or block_width <= 0:
         return None
 
-    merged = _merge_balance_hits(detected)
-    if not merged:
+    scale = min(template_width / float(block_width), template_height / float(block_height))
+    resized_width = max(1, min(template_width, int(round(block_width * scale))))
+    resized_height = max(1, min(template_height, int(round(block_height * scale))))
+    resized = cv2.resize(block_image, (resized_width, resized_height), interpolation=cv2.INTER_NEAREST)
+
+    canvas = np.zeros((template_height, template_width), dtype=np.uint8)
+    offset_x = (template_width - resized_width) // 2
+    offset_y = (template_height - resized_height) // 2
+    canvas[offset_y:offset_y + resized_height, offset_x:offset_x + resized_width] = resized
+    return canvas
+
+
+def _score_balance_block(block_image, template_image):
+    normalized = _normalize_balance_block_to_template(block_image, template_image)
+    if normalized is None:
+        return 0.0
+
+    block_mask = normalized > 0
+    template_mask = template_image > 0
+    block_foreground = int(np.count_nonzero(block_mask))
+    template_foreground = int(np.count_nonzero(template_mask))
+    if block_foreground == 0 or template_foreground == 0:
+        return 0.0
+
+    intersection = int(np.count_nonzero(np.logical_and(block_mask, template_mask)))
+    if intersection == 0:
+        return 0.0
+
+    union = int(np.count_nonzero(np.logical_or(block_mask, template_mask)))
+    if union == 0:
+        return 0.0
+
+    iou = intersection / float(union)
+    similarity = cv2.matchTemplate(
+        normalized.astype(np.float32),
+        template_image.astype(np.float32),
+        cv2.TM_CCOEFF_NORMED,
+    )[0][0]
+    if np.isnan(similarity):
+        similarity = 0.0
+    similarity = max(0.0, float(similarity))
+
+    block_ratio = block_image.shape[1] / float(block_image.shape[0])
+    template_ratio = template_image.shape[1] / float(template_image.shape[0])
+    ratio_gap = abs(block_ratio - template_ratio) / max(template_ratio, 1e-6)
+    ratio_penalty = 1.0 - min(0.35, ratio_gap * 0.18)
+
+    block_fill_ratio = block_foreground / float(normalized.size)
+    template_fill_ratio = template_foreground / float(template_image.size)
+    fill_gap = abs(block_fill_ratio - template_fill_ratio)
+    fill_penalty = 1.0 - min(0.20, fill_gap * 0.35)
+
+    return (iou * 0.55 + similarity * 0.45) * ratio_penalty * fill_penalty
+
+
+def _get_best_balance_label_score(block_image, labels):
+    best_label = None
+    best_score = 0.0
+    for label in labels:
+        template = _BALANCE_TEMPLATES.get(label)
+        if template is None:
+            continue
+        score = _score_balance_block(block_image, template["image"])
+        if score > best_score:
+            best_score = score
+            best_label = label
+    return best_label, best_score
+
+
+def _get_balance_candidates(blocks, index, baseline_bottom, max_block_height, params):
+    params = _get_balance_params(params)
+    candidates = []
+    max_end_index = min(len(blocks), index + params["segment_max_group_size"])
+    digit_labels = tuple(str(digit) for digit in range(10))
+
+    for end_index in range(index, max_end_index):
+        if end_index > index:
+            previous_block = blocks[end_index - 1]
+            current_block = blocks[end_index]
+            merge_gap = int(current_block["x"]) - int(previous_block["x"]) - int(previous_block["width"])
+            if merge_gap > params["segment_merge_gap"]:
+                break
+
+        merged_block = _merge_balance_blocks(blocks, index, end_index)
+        block_image = merged_block["image"]
+        best_digit_label, best_digit_score = _get_best_balance_label_score(block_image, digit_labels)
+        best_unit_label, best_unit_score = _get_best_balance_label_score(block_image, ("万", "亿"))
+        _, dot_score = _get_best_balance_label_score(block_image, (".",))
+
+        if merged_block["part_count"] == 1:
+            left_gap = params["dot_max_neighbor_gap"] + 1
+            right_gap = params["dot_max_neighbor_gap"] + 1
+            if index > 0:
+                previous_block = blocks[index - 1]
+                left_gap = int(merged_block["x"]) - int(previous_block["x"]) - int(previous_block["width"])
+            if index < len(blocks) - 1:
+                next_block = blocks[index + 1]
+                right_gap = int(next_block["x"]) - int(merged_block["x"]) - int(merged_block["width"])
+
+            is_dot_candidate = (
+                0 < index < len(blocks) - 1
+                and int(merged_block["width"]) <= params["dot_max_width"]
+                and int(merged_block["height"]) <= params["dot_max_height"]
+                and int(merged_block["area"]) <= params["dot_max_area"]
+                and int(merged_block["bottom"]) >= baseline_bottom - 1
+                and int(merged_block["y"]) >= baseline_bottom - int(max_block_height * params["dot_baseline_offset_ratio"])
+                and int(blocks[index - 1]["height"]) > int(merged_block["height"])
+                and int(blocks[index + 1]["height"]) > int(merged_block["height"])
+                and left_gap <= params["dot_max_neighbor_gap"]
+                and right_gap <= params["dot_max_neighbor_gap"]
+            )
+            if (
+                is_dot_candidate
+                and dot_score >= params["dot_threshold"]
+                and dot_score >= best_digit_score - 0.05
+            ):
+                candidates.append((end_index + 1, ".", dot_score))
+
+        if best_digit_label is not None and best_digit_score >= params["digit_threshold"]:
+            candidates.append((end_index + 1, best_digit_label, best_digit_score))
+
+        if (
+            end_index == len(blocks) - 1
+            and int(merged_block["width"]) >= params["unit_min_width"]
+            and best_unit_label is not None
+            and best_unit_score >= params["unit_threshold"]
+        ):
+            candidates.append((end_index + 1, best_unit_label, best_unit_score))
+
+    candidates.sort(key=lambda item: item[2], reverse=True)
+    return candidates
+
+
+def _search_balance_sequence(blocks, params=None):
+    if not blocks:
         return None
-    return "".join(item[1] for item in merged)
+
+    params = _get_balance_params(params)
+    max_block_height = max(int(block["height"]) for block in blocks)
+    reference_blocks = [block for block in blocks if int(block["height"]) >= max(8, int(max_block_height * 0.55))]
+    baseline_bottom = int(np.median([block["bottom"] for block in reference_blocks])) if reference_blocks else 0
+    block_count = len(blocks)
+    cache = {}
+
+    def dfs(index, state_name):
+        cache_key = (index, state_name)
+        if cache_key in cache:
+            return cache[cache_key]
+
+        results = []
+        if state_name in ("int_tail", "frac_tail"):
+            results.append((index, "", 0.0, 0))
+        if index >= block_count:
+            cache[cache_key] = results
+            return results
+
+        for next_index, label, score in _get_balance_candidates(blocks, index, baseline_bottom, max_block_height, params):
+            if state_name == "int" and label.isdigit():
+                next_state = "int_tail"
+            elif state_name == "int_tail" and label.isdigit():
+                next_state = "int_tail"
+            elif state_name == "int_tail" and label == ".":
+                next_state = "frac_first"
+            elif state_name == "int_tail" and label in ("万", "亿"):
+                if next_index == block_count:
+                    results.append((next_index, label, score, 1))
+                continue
+            elif state_name == "frac_first" and label.isdigit():
+                next_state = "frac_tail"
+            elif state_name == "frac_tail" and label.isdigit():
+                next_state = "frac_tail"
+            elif state_name == "frac_tail" and label in ("万", "亿"):
+                if next_index == block_count:
+                    results.append((next_index, label, score, 1))
+                continue
+            else:
+                continue
+
+            for end_index, suffix_text, suffix_score, suffix_count in dfs(next_index, next_state):
+                results.append((end_index, label + suffix_text, score + suffix_score, suffix_count + 1))
+
+        cache[cache_key] = results
+        return results
+
+    best_text = None
+    best_rank = None
+    for start_index in range(block_count):
+        for end_index, text, score, token_count in dfs(start_index, "int"):
+            if end_index != block_count or not text:
+                continue
+            rank = (token_count, score, -start_index)
+            if best_rank is None or rank > best_rank:
+                best_rank = rank
+                best_text = text
+    return best_text
+
+
+def _match_balance_text(gray, params=None):
+    if not load_balance_templates():
+        return None
+
+    params = _get_balance_params(params)
+    binary = _binarize_balance_region(gray, params)
+    cleaned = _remove_small_balance_components(binary, params)
+    blocks = _extract_balance_blocks(cleaned, params)
+    blocks = _refine_balance_blocks(blocks)
+    if not blocks:
+        return None
+    return _search_balance_sequence(blocks, params)
 
 
 def _sanitize_balance_text(raw_text):
-    text = re.sub(r"[^\d\.万亿]", "", str(raw_text or ""))
+    text = re.sub(r"[^\d\.万亿]", "", str(raw_text or "").strip())
     if not text:
         return None
+    if re.fullmatch(r"\d+", text):
+        return text
+    if re.fullmatch(r"\d+\.\d+", text):
+        return text
+    if re.fullmatch(r"\d+(\.\d+)?[万亿]", text):
+        return text
+    return None
 
-    units = [char for char in text if char in ("万", "亿")]
-    if len(units) > 1:
+
+def recognize_balance_image(image, roi_already_cropped=False, params=None):
+    if image is None:
         return None
-
-    unit = units[0] if units else ""
-    if unit:
-        if text[-1] != unit or text.count(unit) != 1:
-            return None
-        number_part = text[:-1]
-    else:
-        number_part = text
-
-    if not number_part:
-        return None
-
-    if unit:
-        if number_part.count(".") > 1:
-            first_dot = number_part.find(".")
-            number_part = number_part[:first_dot + 1] + number_part[first_dot + 1:].replace(".", "")
-        if number_part.startswith(".") or number_part.endswith("."):
-            return None
-        if not re.fullmatch(r"\d+(\.\d+)?", number_part):
-            return None
-    else:
-        number_part = number_part.replace(".", "")
-        if not number_part.isdigit():
-            return None
-
-    return f"{number_part}{unit}" if unit else number_part
+    cropped = image if roi_already_cropped else crop_frame(image, MONITOR_BALANCE)
+    return _sanitize_balance_text(_match_balance_text(_to_gray(cropped), params))
 
 
-def get_balance(frame):
+def get_balance_recognition(frame):
     try:
         cropped = crop_frame(frame, MONITOR_BALANCE)
         tiny = cv2.resize(cropped, (8, 8))
         current_hash = tiny.tobytes()
         last_balance_hash = getattr(state, "_last_balance_hash", None)
         if last_balance_hash is not None and current_hash == last_balance_hash:
-            return state.current_balance
+            return {
+                "confirmed": bool(getattr(state, "balance_last_recognition_confirmed", False)),
+                "text": str(getattr(state, "balance_last_recognition_text", "") or "").strip() or None,
+            }
 
-        balance_text = _match_balance_text(_to_gray(cropped))
-        balance_text = _sanitize_balance_text(balance_text)
-        if balance_text:
-            setattr(state, "_last_balance_hash", current_hash)
-        return balance_text
+        balance_text = recognize_balance_image(cropped, roi_already_cropped=True)
+        confirmed = bool(balance_text)
+        setattr(state, "_last_balance_hash", current_hash)
+        state.balance_last_recognition_text = str(balance_text or "").strip()
+        state.balance_last_recognition_confirmed = confirmed
+        return {
+            "confirmed": confirmed,
+            "text": balance_text if confirmed else None,
+        }
     except:
-        return None
+        state.balance_last_recognition_text = ""
+        state.balance_last_recognition_confirmed = False
+        return {
+            "confirmed": False,
+            "text": None,
+        }
+
+
+def get_balance(frame):
+    recognition = get_balance_recognition(frame)
+    if recognition.get("confirmed"):
+        return recognition.get("text")
+    return None
 
 
 def compare_region_similarity(frame1, frame2, monitor):

@@ -26,6 +26,9 @@ purchase_timer_active = False
 # --- 现有流程兼容余额 ---
 current_balance = "\u83b7\u53d6\u4e2d..."
 last_valid_balance = ""
+balance_last_recognition_text = ""
+balance_last_recognition_confirmed = False
+balance_display_mode = ""
 _last_balance_hash = None
 price_roi_cache_bytes = None
 price_roi_cache_value = None
