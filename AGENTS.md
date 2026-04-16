@@ -88,8 +88,9 @@
 
 接到任务后：
 1. 先读 `AGENTS.md`
-2. 再按任务范围读取必要文件
-3. 只有任务确实涉及多个模块时，才扩大读取范围
+2. 如果任务是“第一次理解项目 / 知识梳理 / 文档建设”，先读 `docs/knowledge_base/README.md`，再按推荐顺序读 `00 -> 01 -> 02 -> 03 -> 04`
+3. 再按任务范围读取必要文件
+4. 只有任务确实涉及多个模块时，才扩大读取范围
 
 默认范围如下：
 - 抢购问题：`purchase.py` + `config.py`，必要时 `main.py` / `vision.py` / `state.py`
@@ -233,12 +234,18 @@
 1. 不要把 `AGENTS.md` 写成线程日记或阶段流水账。
 2. [`docs/thread_history.md`](docs/thread_history.md) 只作为历史档案，不作为硬规则来源。
 3. 线程阶段完成不等于“整个系统已经全部完成”，当前能力判断以 [`docs/current_baseline.md`](docs/current_baseline.md) 为准。
-4. 当前不做双向同步、不共享 SQLite、不允许远端写回真源，详见 [`docs/web_and_sync.md`](docs/web_and_sync.md)。
+4. 当前不做双向同步、不共享 SQLite；公网快照只用于查看与刷新按钮，不开放其他修改，详见 [`docs/web_and_sync.md`](docs/web_and_sync.md)。
 
 ---
 
 # 附加文档导航
 
+- [`docs/knowledge_base/README.md`](docs/knowledge_base/README.md)：项目知识库入口，第一次接手项目时优先从这里开始
+- [`docs/knowledge_base/00_start_here.md`](docs/knowledge_base/00_start_here.md)：5 分钟总览，先看项目用途、正式启动方式、真源边界
+- [`docs/knowledge_base/01_system_overview.md`](docs/knowledge_base/01_system_overview.md)：系统主流程、数据流、整体边界
+- [`docs/knowledge_base/02_module_map.md`](docs/knowledge_base/02_module_map.md)：模块职责、不负责什么、改动注意点
+- [`docs/knowledge_base/03_runtime_and_data.md`](docs/knowledge_base/03_runtime_and_data.md)：canonical、运行态、派生字段、状态语义
+- [`docs/knowledge_base/04_operations_and_acceptance.md`](docs/knowledge_base/04_operations_and_acceptance.md)：正式运行、验收、live 路径与排错入口
 - [`docs/current_baseline.md`](docs/current_baseline.md)：当前主线稳定基线、已合回主线的线程/阶段、哪些能力已具备但不应夸大
 - [`docs/web_and_sync.md`](docs/web_and_sync.md)：网页查看、最小修改、静默拉起、本地与双机汇总边界、远端只读镜像规则
 - [`docs/local_config.md`](docs/local_config.md)：本机换号配置、昵称模板目录、昵称识别区域/阈值外置，以及示例文件与真实文件边界

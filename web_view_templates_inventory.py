@@ -190,7 +190,7 @@ def _render_page_notice():
     return """
 <div class="readonly-notice">
   <strong>当前页面收口规则：</strong>
-  首页保留本机真实数据修改和远端镜像手动刷新；远端写回和公网写回继续关闭。
+  首页保留本机真实数据最小修改；远端镜像与公网快照只提供查看和刷新，不开放其他修改。
 </div>
 """
 

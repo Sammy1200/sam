@@ -87,7 +87,7 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
                 self._handle_public_snapshot_refresh()
                 return
             if path == "/remote-account/update":
-                self._send_read_only_html("当前阶段仍不开放远端写回。")
+                self._send_read_only_html("公网只开放查看与刷新，不开放远端修改。")
                 return
             if path == "/remote-sync/refresh":
                 self._handle_remote_sync_refresh()
@@ -102,7 +102,7 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     {
                         "status": "forbidden",
-                        "message": "当前阶段仍不开放公网写回。",
+                        "message": "公网只开放查看与刷新，不开放其他修改。",
                     },
                     status_code=403,
                 )
@@ -124,7 +124,7 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
             title="网页只读模式",
             message=message,
             detail_items=[
-                ("当前阶段", "公网只查看"),
+                ("当前阶段", "公网只查看与刷新"),
                 ("处理结果", "本次请求未执行被关闭的写入能力"),
             ],
         )

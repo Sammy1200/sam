@@ -292,7 +292,7 @@ def sync_runtime_window_state(
     initialize_if_missing=False,
     allow_legacy_fallback=False,
 ):
-    """\u540c\u6b65 24 \u5c0f\u65f6 05 \u5206\u8fd0\u884c\u7a97\u53e3\u72b6\u6001\u3002"""
+    """同步 24 小时 01 分运行窗口状态。"""
     if state.temporary_purchase_mode:
         return _build_runtime_window_result(False, [])
 
@@ -340,7 +340,7 @@ def sync_runtime_window_state(
         state.account_limit_reached_at = None
         changed = True
         actions.append(
-            f"24\u5c0f\u65f605\u5206\u8fd0\u884c\u7a97\u53e3\u5df2\u6eda\u52a8\u5230 {new_window_start.strftime('%Y-%m-%d %H:%M:%S')}"
+            f"24小时01分运行窗口已滚动到 {new_window_start.strftime('%Y-%m-%d %H:%M:%S')}"
         )
     else:
         state.round_purchase_running_seconds = current_elapsed_seconds
