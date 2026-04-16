@@ -1,0 +1,237 @@
+"""param_editor_gui.py  F12 暂停态参数修改面板（收起/展开）"""
+
+import tkinter as tk
+
+import listing
+import state
+from local_switch_account_config import save_listing_target_price
+from overlay import enqueue_overlay_task
+from round_persistence import persist_minimal_item_balance_sync
+
+# ── 模块级引用 ──
+_editor_win = None
+
+# ── 配色（深褐色主题，匹配主悬浮窗风格）──
+_BG         = "#1c1714"
+_BG_HEADER  = "#251e19"
+_FG         = "#e0d8d0"
+_FG_DIM     = "#9a918a"
+_ACCENT     = "#6b5d50"
+_ACCENT_HV  = "#8a7a6a"
+_SUCCESS    = "#7acc7a"
+_ERROR      = "#e07070"
+_ENTRY_BG   = "#2a211a"
+_ENTRY_FG   = "#f0ece8"
+_BORDER     = "#3a3028"
+
+# ── 字体 ──
+_FONT_TITLE = ("Microsoft YaHei UI", 11, "bold")
+_FONT_LABEL = ("Microsoft YaHei UI", 9)
+_FONT_ENTRY = ("Consolas", 10)
+_FONT_BTN   = ("Microsoft YaHei UI", 9, "bold")
+_FONT_MSG   = ("Microsoft YaHei UI", 8)
+
+
+# ═══════════════════════════════════════
+#  公开接口（签名不变）
+# ═══════════════════════════════════════
+
+def show_param_editor():
+    enqueue_overlay_task(_create_editor)
+
+
+def destroy_param_editor():
+    enqueue_overlay_task(_destroy_editor)
+
+
+# ═══════════════════════════════════════
+#  内部实现
+# ═══════════════════════════════════════
+
+def _destroy_editor():
+    global _editor_win
+    if _editor_win is not None:
+        try:
+            if _editor_win.winfo_exists():
+                _editor_win.destroy()
+        except Exception:
+            pass
+    _editor_win = None
+
+
+def _create_editor():
+    global _editor_win
+    _destroy_editor()
+
+    root = state.overlay_root
+    if not root:
+        return
+
+    win = tk.Toplevel(root)
+    win.overrideredirect(True)
+    win.attributes("-topmost", True)
+    win.configure(bg=_BG, highlightbackground=_BORDER, highlightthickness=1)
+    win.geometry("+30+30")
+    _editor_win = win
+
+    # ── 状态 ──
+    expanded = [False]
+    msg_var = tk.StringVar(value="")
+
+    # ══════════════════════════════════
+    #  标题行（始终可见，点击切换展开）
+    # ══════════════════════════════════
+    header = tk.Frame(win, bg=_BG_HEADER, cursor="hand2", padx=10, pady=6)
+    header.pack(fill="x")
+
+    arrow_var = tk.StringVar(value="▶")
+    lbl_arrow = tk.Label(header, textvariable=arrow_var,
+                         font=_FONT_TITLE, fg=_ACCENT, bg=_BG_HEADER)
+    lbl_arrow.pack(side="left")
+
+    lbl_title = tk.Label(header, text=" 参数修改",
+                         font=_FONT_TITLE, fg=_FG, bg=_BG_HEADER)
+    lbl_title.pack(side="left")
+
+    # ══════════════════════════════════
+    #  展开区域（初始隐藏）
+    # ══════════════════════════════════
+    body = tk.Frame(win, bg=_BG, padx=10, pady=6)
+
+    # ── 价格行 ──
+    price_row = tk.Frame(body, bg=_BG)
+    price_row.pack(fill="x", pady=(0, 4))
+
+    current_price = str(getattr(listing, "LISTING_TARGET_PRICE", "?"))
+    price_lbl = tk.Label(price_row, text=f"价格: {current_price}",
+                         font=_FONT_LABEL, fg=_FG_DIM, bg=_BG,
+                         width=14, anchor="w")
+    price_lbl.pack(side="left")
+
+    price_entry = tk.Entry(price_row, font=_FONT_ENTRY, width=10,
+                           bg=_ENTRY_BG, fg=_ENTRY_FG,
+                           insertbackground=_ENTRY_FG, relief="flat",
+                           highlightthickness=1, highlightcolor=_ACCENT,
+                           highlightbackground=_BORDER)
+    price_entry.insert(0, current_price)
+    price_entry.pack(side="left", padx=(4, 6), ipady=3)
+
+    price_btn = tk.Label(price_row, text=" 修改 ", font=_FONT_BTN,
+                         fg=_FG, bg=_ACCENT, cursor="hand2",
+                         padx=6, pady=1)
+    price_btn.pack(side="left")
+
+    # ── 库存行（变量名已修正为 baseline_item_count）──
+    stock_row = tk.Frame(body, bg=_BG)
+    stock_row.pack(fill="x", pady=(0, 4))
+
+    current_stock = str(getattr(state, "baseline_item_count", "?"))
+    stock_lbl = tk.Label(stock_row, text=f"库存: {current_stock}",
+                         font=_FONT_LABEL, fg=_FG_DIM, bg=_BG,
+                         width=14, anchor="w")
+    stock_lbl.pack(side="left")
+
+    stock_entry = tk.Entry(stock_row, font=_FONT_ENTRY, width=10,
+                           bg=_ENTRY_BG, fg=_ENTRY_FG,
+                           insertbackground=_ENTRY_FG, relief="flat",
+                           highlightthickness=1, highlightcolor=_ACCENT,
+                           highlightbackground=_BORDER)
+    stock_entry.insert(0, current_stock)
+    stock_entry.pack(side="left", padx=(4, 6), ipady=3)
+
+    stock_btn = tk.Label(stock_row, text=" 修改 ", font=_FONT_BTN,
+                         fg=_FG, bg=_ACCENT, cursor="hand2",
+                         padx=6, pady=1)
+    stock_btn.pack(side="left")
+
+    # ── 消息行 ──
+    msg_label = tk.Label(body, textvariable=msg_var,
+                         font=_FONT_MSG, fg=_SUCCESS, bg=_BG, anchor="w")
+    msg_label.pack(fill="x", pady=(2, 0))
+
+    # ══════════════════════════════════
+    #  展开 / 收起
+    # ══════════════════════════════════
+    def _toggle(event=None):
+        if expanded[0]:
+            body.pack_forget()
+            arrow_var.set("▶")
+            expanded[0] = False
+        else:
+            body.pack(fill="x", after=header)
+            arrow_var.set("▼")
+            expanded[0] = True
+            win.focus_force()
+            price_entry.focus_set()
+        win.update_idletasks()
+
+    for w in (header, lbl_arrow, lbl_title):
+        w.bind("<Button-1>", _toggle)
+
+    # ══════════════════════════════════
+    #  按钮 Hover 效果
+    # ══════════════════════════════════
+    def _hover_in(e):
+        e.widget.configure(bg=_ACCENT_HV)
+
+    def _hover_out(e):
+        e.widget.configure(bg=_ACCENT)
+
+    for btn in (price_btn, stock_btn):
+        btn.bind("<Enter>", _hover_in)
+        btn.bind("<Leave>", _hover_out)
+
+    # ══════════════════════════════════
+    #  消息显示
+    # ══════════════════════════════════
+    def _show_msg(text, color=_SUCCESS):
+        msg_var.set(text)
+        msg_label.configure(fg=color)
+
+    # ══════════════════════════════════
+    #  价格修改
+    # ══════════════════════════════════
+    def _do_save_price(event=None):
+        raw = price_entry.get().strip()
+        if not raw:
+            _show_msg("✗ 请输入价格", _ERROR)
+            return
+        try:
+            save_listing_target_price(raw)
+            listing.LISTING_TARGET_PRICE = raw
+            price_lbl.configure(text=f"价格: {raw}")
+            _show_msg("✓ 价格已更新")
+        except Exception as ex:
+            _show_msg(f"✗ {ex}", _ERROR)
+
+    price_btn.bind("<Button-1>", _do_save_price)
+    price_entry.bind("<Return>", _do_save_price)
+    price_entry.bind("<KP_Enter>", _do_save_price)
+
+    # ══════════════════════════════════
+    #  库存修改（写内存 baseline_item_count + 持久化）
+    # ══════════════════════════════════
+    def _do_save_stock(event=None):
+        raw = stock_entry.get().strip()
+        if not raw:
+            _show_msg("✗ 请输入库存", _ERROR)
+            return
+        try:
+            new_val = int(raw)
+        except ValueError:
+            _show_msg("✗ 库存必须是整数", _ERROR)
+            return
+        try:
+            state.baseline_item_count = new_val
+            result = persist_minimal_item_balance_sync()
+            if not result:
+                _show_msg("✗ 库存写入失败", _ERROR)
+                return
+            stock_lbl.configure(text=f"库存: {new_val}")
+            _show_msg("✓ 库存已更新")
+        except Exception as ex:
+            _show_msg(f"✗ {ex}", _ERROR)
+
+    stock_btn.bind("<Button-1>", _do_save_stock)
+    stock_entry.bind("<Return>", _do_save_stock)
+    stock_entry.bind("<KP_Enter>", _do_save_stock)

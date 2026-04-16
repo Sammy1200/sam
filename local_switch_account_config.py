@@ -112,3 +112,16 @@ def load_local_nickname_match_config():
         ),
     }
     return nickname_match_config, source_path
+
+
+def save_listing_target_price(new_price_str):
+    """将新的上架价格写回 JSON 配置文件。"""
+    normalized_price = _normalize_listing_price(new_price_str, "listing_price")
+    resolved_source_path = resolve_local_switch_account_config_path()
+    source_path = resolved_source_path.path
+    data = _read_json(source_path)
+    if not isinstance(data, dict):
+        raise ValueError("本机换号配置文件格式错误，根节点必须是 JSON 对象")
+    data["listing_price"] = str(normalized_price)
+    with open(source_path, "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=2)

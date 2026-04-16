@@ -535,7 +535,17 @@ def toggle_pause():
                 enqueue_overlay_task(state.overlay_root.withdraw)
             except Exception:
                 pass
+        try:
+            from param_editor_gui import show_param_editor
+            show_param_editor()
+        except Exception:
+            pass
     else:
+        try:
+            from param_editor_gui import destroy_param_editor
+            destroy_param_editor()
+        except Exception:
+            pass
         state.last_resume_time = time.time()
         if state.overlay_root:
             try:

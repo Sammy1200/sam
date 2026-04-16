@@ -76,6 +76,7 @@ except ImportError:
 import dxcam
 import config
 import state
+from launcher_gui import show_launcher
 from config import (
     MONITOR_JIAOYIHANG, MONITOR_SHOP,
     FIX_SHOP_POS1, FIX_SHOP_POS2,
@@ -259,6 +260,7 @@ def run_automation():
                       temp_goumai, temp_meihuo, temp_diyici)
 
 
+# Legacy: 命令行模式选择入口，已被 launcher_gui.show_launcher() 替代
 def _prompt_main_mode():
     while True:
         print("\n" + "=" * 40)
@@ -274,6 +276,7 @@ def _prompt_main_mode():
         print("请输入回车或 2。")
 
 
+# Legacy: 命令行模式选择入口，已被 launcher_gui.show_launcher() 替代
 def _prompt_temporary_target_execution_slot():
     while True:
         raw = input(f"请输入临时模式结束后切换到的目标执行位(1-{int(config.EXECUTION_SLOT_COUNT)}): ").strip()
@@ -1214,7 +1217,7 @@ def _schedule_remote_snapshot_event(event_name):
 
 def main():
     ensure_web_view_server_ready()
-    mode = _prompt_main_mode()
+    mode, _temp_slot = show_launcher()
     start_overlay()
     try:
         if os.name == 'nt':
@@ -1305,7 +1308,7 @@ def main():
                 ):
                     return
             else:
-                target_execution_slot = _prompt_temporary_target_execution_slot()
+                target_execution_slot = _temp_slot
                 ui_print("临时抢购模式在 1 秒后启动...")
                 safe_sleep(1.0)
                 _prepare_temporary_purchase_context(target_execution_slot)
