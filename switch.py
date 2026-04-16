@@ -92,6 +92,8 @@ _SWITCH_WAIT_KEY_LABELS = {
     "open_wait": "打开列表前等待秒数",
     "qidong_timeout": "启动按钮识别超时秒数",
 }
+_GOLD_STEP_SKIP_CLOSE = "skip_close"
+_GOLD_STEP_NEED_CLOSE = "need_close"
 
 
 def _tpl(key):
@@ -962,7 +964,7 @@ def _step07_gumu(camera, suppress_failure_output=False):
 
 
 def _step08_gold(camera):
-    """步骤8：领取金币。"""
+    """步骤8：领取金币。返回是否需要执行关闭面板收口。"""
     update_overlay_mini("进场中：领取金币")
     gold_entry_point = _find_exact_rgb_point(
         camera,
@@ -971,7 +973,7 @@ def _step08_gold(camera):
     )
     if gold_entry_point is None:
         ui_print("无需领金币", save_log=True)
-        return True
+        return _GOLD_STEP_SKIP_CLOSE
 
     _click_detected_point(gold_entry_point)
     time.sleep(config.SWITCH_GOLD_CLICK_WAIT_SECONDS)
@@ -1008,7 +1010,7 @@ def _step08_gold(camera):
     fast_click(gold_confirm_point)
     time.sleep(config.SWITCH_GOLD_CONFIRM_POST_CLICK_DELAY_SECONDS)
     fast_click(config.SWITCH_GOLD_SUCCESS_POPUP_POS)
-    return True
+    return _GOLD_STEP_NEED_CLOSE
 
 
 def _step09_close(camera, suppress_failure_output=False):
@@ -1083,9 +1085,6 @@ def _run_startup_from_launcher(camera, server_index, skip_open_server_list=False
         ("处理空格弹窗", lambda: _step05_space(camera)),
         ("清理广告和弹窗", lambda: _step06_ads(camera)),
         ("进入古墓大厅", lambda: _step07_gumu(camera)),
-        ("领取金币", lambda: _step08_gold(camera)),
-        ("关闭面板", lambda: _step09_close(camera)),
-        ("返回交易行", lambda: _step10_trade(camera)),
     ])
 
     for name, fn in steps:
@@ -1095,6 +1094,29 @@ def _run_startup_from_launcher(camera, server_index, skip_open_server_list=False
             restore_overlay()
             return False
         logger.info("[切换流程] %s完成。", name)
+
+    logger.info("[切换流程] 领取金币开始。")
+    gold_step_result = _step08_gold(camera)
+    if not gold_step_result:
+        logger.error("[切换流程] 领取金币失败。")
+        restore_overlay()
+        return False
+    logger.info("[切换流程] 领取金币完成。")
+
+    if gold_step_result == _GOLD_STEP_NEED_CLOSE:
+        logger.info("[切换流程] 关闭面板开始。")
+        if not _step09_close(camera):
+            logger.error("[切换流程] 关闭面板失败。")
+            restore_overlay()
+            return False
+        logger.info("[切换流程] 关闭面板完成。")
+
+    logger.info("[切换流程] 返回交易行开始。")
+    if not _step10_trade(camera):
+        logger.error("[切换流程] 返回交易行失败。")
+        restore_overlay()
+        return False
+    logger.info("[切换流程] 返回交易行完成。")
 
     logger.info("[切换流程] 目标大区 %s 已就绪。", server_index + 1)
     return True
@@ -1146,13 +1168,30 @@ def _run_thread6_resume_steps(camera):
         ("处理空格弹窗", lambda: _step05_space(camera, suppress_failure_output=True), "未匹配到空格弹窗或处理失败。"),
         ("进入游戏场景", lambda: _step06_ads(camera, suppress_failure_output=True), "未能完成进入游戏场景前的页面清理。"),
         ("确认古墓大厅", lambda: _step07_gumu(camera, suppress_failure_output=True), "未能进入或确认古墓大厅。"),
-        ("领取金币", lambda: _step08_gold(camera), "领取金币步骤执行失败。"),
-        ("关闭面板", lambda: _step09_close(camera, suppress_failure_output=True), "关闭面板后未能确认仍在古墓大厅。"),
-        ("返回交易行", lambda: _step10_trade(camera), "未能完成返回交易行步骤。"),
     ]
     for step_name, fn, detail in resume_steps:
         if not _run_thread6_step(step_name, detail, fn):
             return False
+
+    gold_step_result = {"value": False}
+
+    def _run_gold_step():
+        gold_step_result["value"] = _step08_gold(camera)
+        return bool(gold_step_result["value"])
+
+    if not _run_thread6_step("领取金币", "领取金币步骤执行失败。", _run_gold_step):
+        return False
+
+    if gold_step_result["value"] == _GOLD_STEP_NEED_CLOSE:
+        if not _run_thread6_step(
+            "关闭面板",
+            "关闭面板后未能确认仍在古墓大厅。",
+            lambda: _step09_close(camera, suppress_failure_output=True),
+        ):
+            return False
+
+    if not _run_thread6_step("返回交易行", "未能完成返回交易行步骤。", lambda: _step10_trade(camera)):
+        return False
     return True
 
 

@@ -82,3 +82,7 @@
 4. [04_operations_and_acceptance.md](04_operations_and_acceptance.md)
 
 下一份建议阅读： [01_system_overview.md](01_system_overview.md)
+
+- [`docs/knowledge_base/08_canonical_fields_and_api.md`](docs/knowledge_base/08_canonical_fields_and_api.md)：canonical 字段清单、跨模块函数签名、常见误用
+- [`docs/knowledge_base/09_ui_conventions.md`](docs/knowledge_base/09_ui_conventions.md)：配色、字体、悬浮窗架构规则
+- [`docs/knowledge_base/10_naming_gotchas.md`](docs/knowledge_base/10_naming_gotchas.md)：命名陷阱与历史遗留，新人必读
