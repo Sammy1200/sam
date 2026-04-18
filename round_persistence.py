@@ -575,11 +575,6 @@ def persist_minimal_item_balance_sync():
         state.round_purchase_running_seconds = float(runtime_seconds)
         if reached_time is not None:
             state.last_limit_time = reached_time
-        print(
-            "[账号数据] 实时库存同步完成："
-            f"昵称={nickname}，道具库存={runtime_item_quantity}，"
-            f"余额={balance_log_text}，累计抢购秒数={runtime_seconds}"
-        )
         logger.info(
             "[账号数据] 实时库存同步完成：昵称=%s 道具库存=%s 余额=%s 累计抢购秒数=%s 运行窗口起点=%s",
             nickname,
@@ -589,6 +584,7 @@ def persist_minimal_item_balance_sync():
             state.runtime_window_start_time.strftime("%Y-%m-%d %H:%M:%S")
             if state.runtime_window_start_time is not None
             else "无",
+            extra={"show_console": False},
         )
     elif result.status != "skipped":
         logger.warning("[账号数据] 实时库存同步失败：昵称=%s 原因=%s", nickname, result.reason)

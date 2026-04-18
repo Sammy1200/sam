@@ -18,6 +18,21 @@ from config import (
     BALANCE_DOT_MAX_WIDTH, BALANCE_DOT_MAX_HEIGHT, BALANCE_DOT_MAX_AREA,
     BALANCE_DOT_BASELINE_OFFSET_RATIO, BALANCE_DOT_MAX_NEIGHBOR_GAP, BALANCE_UNIT_MIN_WIDTH,
     PRICE_DECISION_MAX_PRICE,
+    LISTING_TIMER_REGION,
+    LISTING_TIMER_UPSCALE, LISTING_TIMER_BLUR_SIZE, LISTING_TIMER_THRESHOLD_SHIFT,
+    LISTING_TIMER_CLOSE_KERNEL_SIZE, LISTING_TIMER_MIN_COMPONENT_AREA,
+    LISTING_TIMER_MIN_COMPONENT_HEIGHT, LISTING_TIMER_MAX_COMPONENT_WIDTH,
+    LISTING_TIMER_MIN_COMPONENT_X, LISTING_TIMER_SCORE_MARGIN,
+    LISTING_TIMER_DIGIT4_KEEP_THRESHOLD, LISTING_TIMER_DIGIT6_KEEP_THRESHOLD,
+    LISTING_TIMER_DIGIT7_KEEP_THRESHOLD, LISTING_TIMER_OTHER_MAX_4_SCORE,
+    LISTING_TIMER_OTHER_MIN_67_SCORE, LISTING_TIMER_OTHER_MAX_67_SCORE,
+    LISTING_TIMER_SEQUENCE_UPSCALE, LISTING_TIMER_SEQUENCE_BLUR_SIZE,
+    LISTING_TIMER_SEQUENCE_THRESHOLD_SHIFT, LISTING_TIMER_SEQUENCE_CLOSE_KERNEL_SIZE,
+    LISTING_TIMER_SEQUENCE_MIN_COMPONENT_AREA, LISTING_TIMER_SEQUENCE_MIN_COMPONENT_HEIGHT,
+    LISTING_TIMER_SEQUENCE_MAX_COMPONENT_WIDTH, LISTING_TIMER_SEQUENCE_MIN_COMPONENT_X,
+    LISTING_TIMER_SEQUENCE_SCORE_MARGIN, LISTING_TIMER_SEQUENCE_DUPLICATE_GAP,
+    LISTING_TIMER_SEQUENCE_DIGIT4_THRESHOLD, LISTING_TIMER_SEQUENCE_DIGIT6_THRESHOLD,
+    LISTING_TIMER_SEQUENCE_DIGIT7_THRESHOLD,
 )
 from utils import safe_sleep, safe_get_frame
 import os
@@ -31,6 +46,8 @@ BALANCE_TEMPLATE_FILE_MAP.update({
 })
 _BALANCE_TEMPLATES = None
 _BALANCE_TEMPLATE_LOAD_ATTEMPTED = False
+_LISTING_TIMER_TEMPLATES = None
+_LISTING_TIMER_TEMPLATE_LOAD_ATTEMPTED = False
 
 
 def crop_frame(frame, monitor):
@@ -112,9 +129,9 @@ def get_number(frame, templates):
 PRICE_MATCH_THRESHOLD = 0.75
 PRICE_DUPLICATE_GAP = 5
 FAST_ACCEPT_FIRST_DIGITS = {"4", "5", "6", "7", "8", "9"}
-FAST_ACCEPT_SECOND_DIGITS = {"0", "1", "2", "3", "4", "5"}
+FAST_ACCEPT_SECOND_DIGITS = {"0", "1", "2", "3"}
 FAST_REJECT_FIRST_DIGITS = {"2"}
-FAST_REJECT_SECOND_DIGITS = {"7", "8", "9"}
+FAST_REJECT_SECOND_DIGITS = {"5", "6", "7", "8", "9"}
 
 
 def _merge_digit_hits(detected):
@@ -177,6 +194,8 @@ def _get_price_prefix_decision(gray, templates):
     prefix_text = f"{first_digit}{second_digit}"
     if second_digit in FAST_ACCEPT_SECOND_DIGITS:
         return "accept", prefix_text
+    if second_digit == "4":
+        return None, None
     if second_digit in FAST_REJECT_SECOND_DIGITS:
         return "reject", prefix_text
     return None, None
@@ -939,6 +958,381 @@ def get_balance(frame):
     if recognition.get("confirmed"):
         return recognition.get("text")
     return None
+
+
+# ---- 上架倒计时 ----
+
+_LISTING_TIMER_TEMPLATE_FILE_MAP = {
+    "4": ("4.png", "4-4.png"),
+    "6": ("6.png", "6-6.png"),
+    "7": ("7.png", "7-7.png"),
+}
+
+
+def _prepare_listing_timer_template(raw):
+    gray = _to_gray(raw)
+    if len(raw.shape) == 3 and raw.shape[2] == 4:
+        alpha = raw[:, :, 3]
+        mask = cv2.threshold(alpha, 0, 255, cv2.THRESH_BINARY)[1]
+        canvas = np.zeros_like(gray)
+        canvas[mask > 0] = gray[mask > 0]
+        gray = canvas
+    else:
+        mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        border = np.concatenate([mask[0], mask[-1], mask[:, 0], mask[:, -1]])
+        if np.mean(border) > 127:
+            mask = cv2.bitwise_not(mask)
+    coords = cv2.findNonZero(mask)
+    if coords is None:
+        return None
+    x, y, w, h = cv2.boundingRect(coords)
+    return gray[y:y + h, x:x + w]
+
+
+def _load_listing_timer_templates():
+    global _LISTING_TIMER_TEMPLATES, _LISTING_TIMER_TEMPLATE_LOAD_ATTEMPTED
+
+    if _LISTING_TIMER_TEMPLATE_LOAD_ATTEMPTED:
+        return bool(_LISTING_TIMER_TEMPLATES)
+
+    _LISTING_TIMER_TEMPLATE_LOAD_ATTEMPTED = True
+    _LISTING_TIMER_TEMPLATES = {}
+    for label, filenames in _LISTING_TIMER_TEMPLATE_FILE_MAP.items():
+        variants = []
+        for filename in filenames:
+            path = os.path.join(TEMPLATE_DIR, filename)
+            if not os.path.isfile(path):
+                continue
+            raw = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+            if raw is None:
+                continue
+            prepared = _prepare_listing_timer_template(raw)
+            if prepared is not None:
+                variants.append(prepared)
+        if variants:
+            _LISTING_TIMER_TEMPLATES[label] = variants
+    return bool(_LISTING_TIMER_TEMPLATES)
+
+
+def _get_listing_timer_action_params(overrides=None):
+    params = {
+        "blur_size": LISTING_TIMER_BLUR_SIZE,
+        "close_kernel_size": LISTING_TIMER_CLOSE_KERNEL_SIZE,
+        "digit4_keep_threshold": LISTING_TIMER_DIGIT4_KEEP_THRESHOLD,
+        "digit6_keep_threshold": LISTING_TIMER_DIGIT6_KEEP_THRESHOLD,
+        "digit7_keep_threshold": LISTING_TIMER_DIGIT7_KEEP_THRESHOLD,
+        "max_component_width": LISTING_TIMER_MAX_COMPONENT_WIDTH,
+        "min_component_area": LISTING_TIMER_MIN_COMPONENT_AREA,
+        "min_component_height": LISTING_TIMER_MIN_COMPONENT_HEIGHT,
+        "min_component_x": LISTING_TIMER_MIN_COMPONENT_X,
+        "other_max_4_score": LISTING_TIMER_OTHER_MAX_4_SCORE,
+        "other_max_67_score": LISTING_TIMER_OTHER_MAX_67_SCORE,
+        "other_min_67_score": LISTING_TIMER_OTHER_MIN_67_SCORE,
+        "score_margin": LISTING_TIMER_SCORE_MARGIN,
+        "threshold_shift": LISTING_TIMER_THRESHOLD_SHIFT,
+        "upscale": LISTING_TIMER_UPSCALE,
+    }
+    if overrides:
+        params.update(overrides)
+
+    params["blur_size"] = max(0, int(params["blur_size"] or 0))
+    if params["blur_size"] > 1 and params["blur_size"] % 2 == 0:
+        params["blur_size"] += 1
+    params["close_kernel_size"] = max(1, int(params["close_kernel_size"] or 1))
+    params["max_component_width"] = max(1, int(params["max_component_width"] or 1))
+    params["min_component_area"] = max(1, int(params["min_component_area"] or 1))
+    params["min_component_height"] = max(1, int(params["min_component_height"] or 1))
+    params["min_component_x"] = max(0, int(params["min_component_x"] or 0))
+    params["score_margin"] = max(0.0, float(params["score_margin"] or 0.0))
+    params["threshold_shift"] = int(params["threshold_shift"] or 0)
+    params["upscale"] = max(1, int(params["upscale"] or 1))
+    return params
+
+
+def _get_listing_timer_sequence_params(overrides=None):
+    params = {
+        "blur_size": LISTING_TIMER_SEQUENCE_BLUR_SIZE,
+        "close_kernel_size": LISTING_TIMER_SEQUENCE_CLOSE_KERNEL_SIZE,
+        "digit4_threshold": LISTING_TIMER_SEQUENCE_DIGIT4_THRESHOLD,
+        "digit6_threshold": LISTING_TIMER_SEQUENCE_DIGIT6_THRESHOLD,
+        "digit7_threshold": LISTING_TIMER_SEQUENCE_DIGIT7_THRESHOLD,
+        "duplicate_gap": LISTING_TIMER_SEQUENCE_DUPLICATE_GAP,
+        "max_component_width": LISTING_TIMER_SEQUENCE_MAX_COMPONENT_WIDTH,
+        "min_component_area": LISTING_TIMER_SEQUENCE_MIN_COMPONENT_AREA,
+        "min_component_height": LISTING_TIMER_SEQUENCE_MIN_COMPONENT_HEIGHT,
+        "min_component_x": LISTING_TIMER_SEQUENCE_MIN_COMPONENT_X,
+        "score_margin": LISTING_TIMER_SEQUENCE_SCORE_MARGIN,
+        "threshold_shift": LISTING_TIMER_SEQUENCE_THRESHOLD_SHIFT,
+        "upscale": LISTING_TIMER_SEQUENCE_UPSCALE,
+    }
+    if overrides:
+        params.update(overrides)
+
+    params["blur_size"] = max(0, int(params["blur_size"] or 0))
+    if params["blur_size"] > 1 and params["blur_size"] % 2 == 0:
+        params["blur_size"] += 1
+    params["close_kernel_size"] = max(1, int(params["close_kernel_size"] or 1))
+    params["duplicate_gap"] = max(0, int(params["duplicate_gap"] or 0))
+    params["max_component_width"] = max(1, int(params["max_component_width"] or 1))
+    params["min_component_area"] = max(1, int(params["min_component_area"] or 1))
+    params["min_component_height"] = max(1, int(params["min_component_height"] or 1))
+    params["min_component_x"] = max(0, int(params["min_component_x"] or 0))
+    params["score_margin"] = max(0.0, float(params["score_margin"] or 0.0))
+    params["threshold_shift"] = int(params["threshold_shift"] or 0)
+    params["upscale"] = max(1, int(params["upscale"] or 1))
+    return params
+
+
+def _resize_listing_timer_patch(image, width=24, height=32):
+    image_height, image_width = image.shape[:2]
+    if image_height <= 0 or image_width <= 0:
+        return None
+    scale = min(width / float(image_width), height / float(image_height))
+    resized_width = max(1, int(round(image_width * scale)))
+    resized_height = max(1, int(round(image_height * scale)))
+    resized = cv2.resize(image, (resized_width, resized_height), interpolation=cv2.INTER_CUBIC)
+    canvas = np.zeros((height, width), dtype=np.uint8)
+    offset_x = (width - resized_width) // 2
+    offset_y = (height - resized_height) // 2
+    canvas[offset_y:offset_y + resized_height, offset_x:offset_x + resized_width] = resized
+    return canvas
+
+
+def _score_listing_timer_patch(block_gray, template_gray):
+    normalized_block = _resize_listing_timer_patch(block_gray, width=24, height=32)
+    normalized_template = _resize_listing_timer_patch(template_gray, width=24, height=32)
+    if normalized_block is None or normalized_template is None:
+        return 0.0
+    score = cv2.matchTemplate(
+        normalized_block.astype(np.float32),
+        normalized_template.astype(np.float32),
+        cv2.TM_CCOEFF_NORMED,
+    )[0][0]
+    if np.isnan(score):
+        return 0.0
+    return max(0.0, float(score))
+
+
+def _prepare_listing_timer_images(image, params):
+    gray = _to_gray(image)
+    if gray is None or gray.size == 0:
+        return None, None
+
+    working_gray = cv2.resize(
+        gray,
+        None,
+        fx=params["upscale"],
+        fy=params["upscale"],
+        interpolation=cv2.INTER_CUBIC,
+    )
+    if params["blur_size"] > 1:
+        working_gray = cv2.GaussianBlur(
+            working_gray,
+            (params["blur_size"], params["blur_size"]),
+            0,
+        )
+
+    otsu_threshold, _ = cv2.threshold(working_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    threshold_value = max(0, min(255, int(otsu_threshold + params["threshold_shift"])))
+    _, binary = cv2.threshold(working_gray, threshold_value, 255, cv2.THRESH_BINARY)
+    border = np.concatenate([binary[0], binary[-1], binary[:, 0], binary[:, -1]])
+    if np.mean(border) > 127:
+        binary = cv2.bitwise_not(binary)
+    if params["close_kernel_size"] > 1:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (params["close_kernel_size"], params["close_kernel_size"]),
+        )
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    return working_gray, binary
+
+
+def _extract_listing_timer_components(processed_gray, binary, params):
+    component_count, _, component_stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    components = []
+    for component_index in range(1, component_count):
+        x, y, width, height, area = component_stats[component_index]
+        if area < params["min_component_area"]:
+            continue
+        if height < params["min_component_height"]:
+            continue
+        if width > params["max_component_width"]:
+            continue
+        if x < params["min_component_x"]:
+            continue
+        components.append({
+            "area": int(area),
+            "gray": processed_gray[y:y + height, x:x + width],
+            "height": int(height),
+            "width": int(width),
+            "x": int(x),
+            "y": int(y),
+        })
+    components.sort(key=lambda item: (item["x"], item["y"]))
+    return components
+
+
+def _classify_listing_timer_component(component_gray):
+    scores = {}
+    for label, variants in (_LISTING_TIMER_TEMPLATES or {}).items():
+        if not variants:
+            continue
+        scores[label] = max(_score_listing_timer_patch(component_gray, template) for template in variants)
+    return scores
+
+
+def _is_confident_listing_timer_digit(scores, label, threshold, margin):
+    if label not in scores:
+        return False
+    best_score = scores.get(label, 0.0)
+    other_score = max(
+        [score for other_label, score in scores.items() if other_label != label],
+        default=0.0,
+    )
+    return best_score >= threshold and best_score - other_score >= margin
+
+
+def _extract_listing_timer_hour_scores(image, roi_already_cropped=False, params=None):
+    if image is None or not _load_listing_timer_templates():
+        return None
+
+    cropped = image if roi_already_cropped else crop_frame(image, LISTING_TIMER_REGION)
+    params = _get_listing_timer_action_params(params)
+    processed_gray, binary = _prepare_listing_timer_images(cropped, params)
+    if processed_gray is None or binary is None:
+        return None
+
+    components = _extract_listing_timer_components(processed_gray, binary, params)
+    if len(components) < 2:
+        return None
+
+    hour_components = components[:2]
+    first_scores = _classify_listing_timer_component(hour_components[0]["gray"])
+    second_scores = _classify_listing_timer_component(hour_components[1]["gray"])
+    if not first_scores or not second_scores:
+        return None
+
+    return {
+        "params": params,
+        "first_scores": first_scores,
+        "second_scores": second_scores,
+    }
+
+
+def recognize_listing_timer_hour_value(image, roi_already_cropped=False, params=None):
+    result = _extract_listing_timer_hour_scores(
+        image,
+        roi_already_cropped=roi_already_cropped,
+        params=params,
+    )
+    if result is None:
+        return None
+
+    params = result["params"]
+    first_scores = result["first_scores"]
+    second_scores = result["second_scores"]
+    if not _is_confident_listing_timer_digit(
+        first_scores,
+        "4",
+        params["digit4_keep_threshold"],
+        params["score_margin"],
+    ):
+        return None
+
+    if _is_confident_listing_timer_digit(
+        second_scores,
+        "6",
+        params["digit6_keep_threshold"],
+        params["score_margin"],
+    ):
+        return "46"
+
+    if _is_confident_listing_timer_digit(
+        second_scores,
+        "7",
+        params["digit7_keep_threshold"],
+        params["score_margin"],
+    ):
+        return "47"
+
+    return None
+
+
+def recognize_listing_timer_action(image, roi_already_cropped=False, params=None):
+    result = _extract_listing_timer_hour_scores(
+        image,
+        roi_already_cropped=roi_already_cropped,
+        params=params,
+    )
+    if result is None:
+        return None
+
+    params = result["params"]
+    first_scores = result["first_scores"]
+    second_scores = result["second_scores"]
+    if not _is_confident_listing_timer_digit(
+        first_scores,
+        "4",
+        params["digit4_keep_threshold"],
+        params["score_margin"],
+    ):
+        return None
+
+    if recognize_listing_timer_hour_value(
+        image,
+        roi_already_cropped=roi_already_cropped,
+        params=params,
+    ) in {"46", "47"}:
+        return "keep"
+
+    if max(second_scores.get("6", 0.0), second_scores.get("7", 0.0)) <= params["other_max_67_score"]:
+        return "other"
+
+    return None
+
+
+def extract_timer_467_sequence(image, params=None):
+    if image is None or not _load_listing_timer_templates():
+        return None
+
+    params = _get_listing_timer_sequence_params(params)
+    processed_gray, binary = _prepare_listing_timer_images(image, params)
+    if processed_gray is None or binary is None:
+        return None
+
+    components = _extract_listing_timer_components(processed_gray, binary, params)
+    if not components:
+        return None
+
+    sequence = []
+    last_x_by_label = {}
+    for component in components:
+        scores = _classify_listing_timer_component(component["gray"])
+        if not scores:
+            continue
+        best_label = max(scores, key=scores.get)
+        best_score = scores[best_label]
+        second_score = max(
+            [score for label, score in scores.items() if label != best_label],
+            default=0.0,
+        )
+        label_threshold = params[f"digit{best_label}_threshold"]
+        if best_score < label_threshold:
+            continue
+        if best_score - second_score < params["score_margin"]:
+            continue
+
+        last_x = last_x_by_label.get(best_label)
+        if last_x is not None and component["x"] - last_x <= params["duplicate_gap"]:
+            continue
+
+        sequence.append((component["x"], best_label))
+        last_x_by_label[best_label] = component["x"]
+
+    if not sequence:
+        return None
+    sequence.sort(key=lambda item: item[0])
+    return "".join(label for _, label in sequence)
 
 
 def compare_region_similarity(frame1, frame2, monitor):

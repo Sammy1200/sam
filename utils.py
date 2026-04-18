@@ -64,6 +64,13 @@ class ChineseLevelFormatter(logging.Formatter):
             record.levelname = original_levelname
 
 
+class ConsoleVisibilityFilter(logging.Filter):
+    """允许按日志记录粒度控制是否输出到 PowerShell 窗口。"""
+
+    def filter(self, record):
+        return bool(getattr(record, "show_console", True))
+
+
 def setup_logger():
     """初始化日志，同时输出到控制台和文件。"""
     logs_dir = os.path.join(SCRIPT_DIR, "logs")
@@ -95,6 +102,7 @@ def setup_logger():
     stream_handler = logging.StreamHandler()
     stream_handler.setLevel(logging.INFO)
     stream_handler.setFormatter(formatter)
+    stream_handler.addFilter(ConsoleVisibilityFilter())
 
     logger_obj.addHandler(file_handler)
     logger_obj.addHandler(stream_handler)

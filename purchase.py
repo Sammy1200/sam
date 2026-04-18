@@ -11,8 +11,6 @@ import requests
 import state
 from config import (
     ACCOUNT_MAX_PURCHASE_SECONDS,
-    BALANCE_ABNORMAL_DROP_PROTECTION_THRESHOLD,
-    BALANCE_ABNORMAL_DROP_PROTECTION_APPLY_MAX_PREVIOUS_BALANCE,
     BALANCE_INSUFFICIENT_THRESHOLD,
     ACCOUNT_RUNTIME_CONTINUE_BALANCE_THRESHOLD,
     ACCOUNT_LIMIT_THRESHOLD,
@@ -124,22 +122,7 @@ def check_balance_limit(frame):
         effective_balance_text = recognized_balance_text
         effective_balance_value = recognized_balance_value
         balance_display_mode = "新"
-        if (
-            previous_confirmed_balance_value is not None
-            and previous_confirmed_balance_value <= BALANCE_ABNORMAL_DROP_PROTECTION_APPLY_MAX_PREVIOUS_BALANCE
-            and recognized_balance_value is not None
-            and previous_confirmed_balance_value - recognized_balance_value > BALANCE_ABNORMAL_DROP_PROTECTION_THRESHOLD
-        ):
-            effective_balance_text = previous_confirmed_balance_text
-            effective_balance_value = previous_confirmed_balance_value
-            balance_display_mode = "沿" if previous_confirmed_balance_text else ""
-            ui_print("余额异常沿旧值", save_log=True)
-            print(
-                f"[余额识别] 检测到异常下跳，保留上次有效余额：上次={previous_confirmed_balance_text}，"
-                f"本次识别={recognized_balance_text}，阈值={BALANCE_ABNORMAL_DROP_PROTECTION_THRESHOLD}，"
-                f"启用上界={BALANCE_ABNORMAL_DROP_PROTECTION_APPLY_MAX_PREVIOUS_BALANCE}"
-            )
-        elif effective_balance_value is not None:
+        if effective_balance_value is not None:
             state.last_valid_balance = effective_balance_text
     elif previous_confirmed_balance_text:
         effective_balance_text = previous_confirmed_balance_text
@@ -367,7 +350,12 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                         elif state.need_switch_server:
                             return
                     else:
-                        ui_print(f"价格不符：{price}", is_replace=True)
+                        ui_print(
+                            f"价格不符：{price}",
+                            is_replace=True,
+                            save_log=True,
+                            show_console=False,
+                        )
                         click_exit()
                         if wait_and_recognize_balance(MISMATCH_EXIT_DELAY, camera):
                             if not check_trigger_listing(camera):
