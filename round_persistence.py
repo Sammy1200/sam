@@ -35,7 +35,7 @@ STATUS_NORMAL_SWITCH = "\u5f53\u524d\u8d26\u53f7\u6b63\u5e38\u5b8c\u6210\u5e76\u
 
 
 def _is_forced_limit_status(round_status):
-    return round_status in (ROUND_STATUS_LIMITED, ROUND_STATUS_RUNTIME_REACHED)
+    return round_status in (ROUND_STATUS_BALANCE_LOW, ROUND_STATUS_LIMITED, ROUND_STATUS_RUNTIME_REACHED)
 
 
 def _clear_round_counters():
@@ -589,6 +589,14 @@ def persist_minimal_item_balance_sync():
     elif result.status != "skipped":
         logger.warning("[账号数据] 实时库存同步失败：昵称=%s 原因=%s", nickname, result.reason)
 
+    return result
+
+
+def persist_item_balance_and_schedule_snapshot(event_name):
+    """写入最新余额/库存后，补触发一次最小快照。"""
+    result = persist_minimal_item_balance_sync()
+    if result.status in ("success", "skipped"):
+        _schedule_remote_snapshot_event(event_name)
     return result
 
 

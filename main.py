@@ -99,6 +99,7 @@ from account_db import (
     restore_ready_account_status_if_needed,
 )
 from round_persistence import (
+    persist_item_balance_and_schedule_snapshot,
     persist_final_round_snapshot,
     refresh_account_limit_reached_at,
     reset_round_runtime_state,
@@ -110,10 +111,11 @@ from utils import async_push_msg, logger
 from vision import is_image_present, load_digit_templates
 from overlay import shutdown_overlay, start_overlay, ui_print, update_score_text
 from listing import execute_listing_routine
-from purchase import run_purchase_loop, reset_purchase_counters
+from purchase import recognize_latest_balance_at_trade, run_purchase_loop, reset_purchase_counters
 from switch import (
     detect_current_execution_slot_from_launcher,
     pause_thread6_failure,
+    refresh_latest_balance_route,
     resolve_execution_slot_transition,
     switch_account_for_temporary_target_slot,
     switch_server_within_account_after_slot_boundary,
@@ -1215,6 +1217,37 @@ def _schedule_remote_snapshot_event(event_name):
         logger.warning("[网页同步] 事件触发最小快照失败：event=%s reason=%s", event_name, result.get("message"))
 
 
+def _refresh_latest_balance_before_switch(camera):
+    """换号前尽量刷新一次最新余额，并尽快同步到网页。"""
+    refresh_result = refresh_latest_balance_route(camera)
+    if refresh_result["status"] == "no_gold":
+        logger.info("[换号前] 未识别到金币入口，按无金币可领继续换号。")
+        return
+
+    if refresh_result["status"] != "success":
+        slot_text = state.current_execution_slot if state.current_execution_slot not in (None, "") else "?"
+        async_push_msg(
+            "【换号前余额刷新失败】继续换号",
+            f"执行位：{slot_text}，未识别最新余额。",
+        )
+        logger.warning("[换号前] 最新余额刷新失败：%s", refresh_result["detail"])
+        return
+
+    balance_info = recognize_latest_balance_at_trade(camera)
+    if balance_info is None:
+        slot_text = state.current_execution_slot if state.current_execution_slot not in (None, "") else "?"
+        async_push_msg(
+            "【换号前余额刷新失败】继续换号",
+            f"执行位：{slot_text}，未识别最新余额。",
+        )
+        logger.warning("[换号前] 已回到交易行，但未识别到最新余额。")
+        return
+
+    persist_result = persist_item_balance_and_schedule_snapshot("换号前刷新最新余额")
+    if persist_result.status not in ("success", "skipped"):
+        logger.warning("[换号前] 最新余额已识别，但同步网页失败：%s", persist_result.reason)
+
+
 def main():
     ensure_web_view_server_ready()
     mode, _temp_slot = show_launcher()
@@ -1358,6 +1391,7 @@ def main():
                 if not state.need_switch_server:
                     break
 
+                _refresh_latest_balance_before_switch(camera)
                 _clear_runtime_state_after_account_finalize("换号前移清理")
                 dispatch_action = _handle_execution_slot_dispatch(camera)
                 if dispatch_action == "continue":

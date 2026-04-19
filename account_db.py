@@ -859,7 +859,7 @@ def restore_ready_account_status_if_needed(
         )
 
     normalized_status = _normalize_round_status_for_storage(record.round_status)
-    if normalized_status not in (ROUND_STATUS_LIMITED, ROUND_STATUS_RUNTIME_REACHED):
+    if normalized_status not in (ROUND_STATUS_BALANCE_LOW, ROUND_STATUS_LIMITED, ROUND_STATUS_RUNTIME_REACHED):
         return record, AccountWriteResult("skipped", f"current status does not require recovery: {normalized_status}")
 
     now_dt = now or datetime.now()

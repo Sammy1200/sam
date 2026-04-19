@@ -260,9 +260,9 @@ def _click_detected_point(point):
     fast_click(point)
 
 
-def _return_to_gumu_or_fail(camera, reason):
-    """统一执行返回古墓大厅固定操作，失败时走现有暂停/推送治理出口。"""
-    for retry_index in range(config.SWITCH_RETURN_GUMU_RETRY_COUNT):
+def try_return_to_gumu(camera, retry_count=3):
+    """非阻断返回古墓大厅；失败时仅返回 False。"""
+    for _ in range(retry_count):
         for attempt in range(config.SWITCH_RETURN_GUMU_CLOSE_CLICK_COUNT):
             fast_click(config.SWITCH_RETURN_GUMU_CLOSE_POS)
             time.sleep(config.SWITCH_RETURN_GUMU_CLOSE_CLICK_INTERVAL_SECONDS)
@@ -280,6 +280,13 @@ def _return_to_gumu_or_fail(camera, reason):
             threshold=config.SWITCH_UI_MATCH_THRESHOLD,
         ):
             return True
+    return False
+
+
+def _return_to_gumu_or_fail(camera, reason):
+    """统一执行返回古墓大厅固定操作，失败时走现有暂停/推送治理出口。"""
+    if try_return_to_gumu(camera, retry_count=config.SWITCH_RETURN_GUMU_RETRY_COUNT):
+        return True
 
     ui_print("返回古墓失败", save_log=True)
     return pause_thread6_failure("返回古墓大厅", reason)
@@ -702,18 +709,27 @@ def _load_nickname_template(slot_number):
 
 def _verify_slot_nickname(camera, slot_number):
     """选区后执行昵称模板校验。"""
+    verified, failure_detail = _try_verify_slot_nickname_once(camera, slot_number)
+    if verified:
+        return True
+
+    return pause_thread6_failure(
+        "昵称模板校验",
+        failure_detail,
+    )
+
+
+def _try_verify_slot_nickname_once(camera, slot_number):
+    """执行一次昵称模板匹配，返回是否成功和失败详情。"""
     update_overlay_mini(f"正在校验执行位 {slot_number} 的昵称")
     try:
         nickname_match_config = _get_local_nickname_match_config()
     except Exception as exc:
-        return pause_thread6_failure("读取本机昵称模板配置", f"读取失败：{exc}")
+        return False, f"读取本机昵称模板配置失败：{exc}"
 
     template, template_path = _load_nickname_template(slot_number)
     if template is None:
-        return pause_thread6_failure(
-            "加载昵称模板",
-            f"昵称模板缺失：{template_path or 'unresolved path'}。",
-        )
+        return False, f"昵称模板缺失：{template_path or 'unresolved path'}。"
 
     _log_switch_waits(
         "nickname verify",
@@ -732,13 +748,44 @@ def _verify_slot_nickname(camera, slot_number):
             print(f"[切换流程] 执行位 {slot_number} 的昵称模板校验通过：{template_path}")
             logger.info("[切换流程] 执行位 %s 的昵称模板校验通过：%s", slot_number, template_path)
             _sync_verified_slot_status_to_running(slot_number)
-            return True
+            return True, ""
         safe_sleep(0.5)
 
-    return pause_thread6_failure(
-        "昵称模板校验",
-        f"执行位 {slot_number} 的昵称模板校验失败：{template_path}。",
-    )
+    return False, f"执行位 {slot_number} 的昵称模板校验失败：{template_path}。"
+
+
+def _retry_slot_nickname_verification_from_server_select(camera, target_slot, server_coord_index):
+    """线程 6 专用：昵称校验失败后，从打开大区列表开始重试。"""
+    verified, failure_detail = _try_verify_slot_nickname_once(camera, target_slot)
+    if verified:
+        return True
+
+    for retry_index in range(1, config.SWITCH_STEP_MAX_RETRY + 1):
+        ui_print(f"昵称重试{retry_index}/3", save_log=True)
+
+        if not _step02_server_list(camera, suppress_failure_output=True):
+            return pause_thread6_failure(
+                "打开大区列表",
+                f"昵称模板重试 {retry_index}/3 前未能重新打开大区列表。",
+            )
+
+        if not _step03_select(camera, server_coord_index, suppress_failure_output=True):
+            return pause_thread6_failure(
+                "选择目标大区",
+                f"昵称模板重试 {retry_index}/3 时未能重新选择目标大区。",
+            )
+
+        verified, failure_detail = _try_verify_slot_nickname_once(camera, target_slot)
+        if verified:
+            print(f"[切换流程] 执行位 {target_slot} 的昵称模板在第 {retry_index} 次重试后校验通过。")
+            logger.info(
+                "[切换流程] 执行位 %s 的昵称模板在第 %s 次重试后校验通过。",
+                target_slot,
+                retry_index,
+            )
+            return True
+
+    return pause_thread6_failure("昵称模板校验", failure_detail)
 
 
 def _sync_verified_slot_status_to_running(slot_number):
@@ -963,8 +1010,8 @@ def _step07_gumu(camera, suppress_failure_output=False):
     return True
 
 
-def _step08_gold(camera):
-    """步骤8：领取金币。返回是否需要执行关闭面板收口。"""
+def _run_gold_step(camera, pause_on_failure):
+    """执行一次金币链；可选阻断式或非阻断式失败治理。"""
     update_overlay_mini("进场中：领取金币")
     gold_entry_point = _find_exact_rgb_point(
         camera,
@@ -973,7 +1020,7 @@ def _step08_gold(camera):
     )
     if gold_entry_point is None:
         ui_print("无需领金币", save_log=True)
-        return _GOLD_STEP_SKIP_CLOSE
+        return {"status": "no_gold", "detail": "未识别到金币入口。"}
 
     _click_detected_point(gold_entry_point)
     time.sleep(config.SWITCH_GOLD_CLICK_WAIT_SECONDS)
@@ -985,7 +1032,12 @@ def _step08_gold(camera):
     )
     if gold_step2_point is None:
         ui_print("金币异常回大厅", save_log=True)
-        return _return_to_gumu_or_fail(camera, "金币链路第 2 步找色失败。")
+        reason = "金币链路第 2 步找色失败。"
+        if pause_on_failure:
+            _return_to_gumu_or_fail(camera, reason)
+        else:
+            try_return_to_gumu(camera, retry_count=config.SWITCH_RETURN_GUMU_RETRY_COUNT)
+        return {"status": "failed", "detail": reason}
     _click_detected_point(gold_step2_point)
     time.sleep(config.SWITCH_GOLD_CLICK_WAIT_SECONDS)
 
@@ -1004,25 +1056,38 @@ def _step08_gold(camera):
             time.sleep(config.SWITCH_GOLD_CONFIRM_FIND_RETRY_INTERVAL_SECONDS)
     if gold_confirm_point is None:
         ui_print("金币异常回大厅", save_log=True)
-        return _return_to_gumu_or_fail(camera, "金币链路第 3 步找色失败。")
+        reason = "金币链路第 3 步找色失败。"
+        if pause_on_failure:
+            _return_to_gumu_or_fail(camera, reason)
+        else:
+            try_return_to_gumu(camera, retry_count=config.SWITCH_RETURN_GUMU_RETRY_COUNT)
+        return {"status": "failed", "detail": reason}
 
     time.sleep(config.SWITCH_GOLD_CONFIRM_PRE_CLICK_DELAY_SECONDS)
     fast_click(gold_confirm_point)
     time.sleep(config.SWITCH_GOLD_CONFIRM_POST_CLICK_DELAY_SECONDS)
     fast_click(config.SWITCH_GOLD_SUCCESS_POPUP_POS)
-    return _GOLD_STEP_NEED_CLOSE
+    return {"status": _GOLD_STEP_NEED_CLOSE, "detail": ""}
 
 
-def _step09_close(camera, suppress_failure_output=False):
-    """步骤9：关闭面板并确认仍在古墓大厅。"""
+def _step08_gold(camera):
+    """步骤8：领取金币。返回是否需要执行关闭面板收口。"""
+    result = _run_gold_step(camera, pause_on_failure=True)
+    if result["status"] == "no_gold":
+        return _GOLD_STEP_SKIP_CLOSE
+    if result["status"] == _GOLD_STEP_NEED_CLOSE:
+        return _GOLD_STEP_NEED_CLOSE
+    return False
+
+
+def _close_gold_panel(camera, pause_on_failure):
+    """关闭金币面板并确认仍在古墓大厅。"""
     update_overlay_mini("进场中：关闭面板")
-    # 这里连续按 ESC 的目的只是稳定收起面板，按太多会拖慢节奏，按太快又可能没被页面吃到。
     for _ in range(config.SWITCH_CLOSE_PANEL_ESC_COUNT):
         pyautogui.press("escape")
         time.sleep(config.SWITCH_CLOSE_PANEL_ESC_INTERVAL_SECONDS)
     time.sleep(config.SWITCH_CLOSE_PANEL_AFTER_ESC_WAIT_SECONDS)
 
-    # ESC 收完后再点一次中间位置，让焦点真正回到大厅，再等 0.5 秒避免马上识图过早。
     pyautogui.click(830, 690)
     time.sleep(config.SWITCH_CLOSE_PANEL_AFTER_CLICK_WAIT_SECONDS)
 
@@ -1034,7 +1099,15 @@ def _step09_close(camera, suppress_failure_output=False):
         threshold=config.SWITCH_UI_MATCH_THRESHOLD,
     ):
         return True
-    return _return_to_gumu_or_fail(camera, "关闭面板后未能返回古墓大厅。")
+
+    if pause_on_failure:
+        return _return_to_gumu_or_fail(camera, "关闭面板后未能返回古墓大厅。")
+    return try_return_to_gumu(camera, retry_count=config.SWITCH_RETURN_GUMU_RETRY_COUNT)
+
+
+def _step09_close(camera, suppress_failure_output=False):
+    """步骤9：关闭面板并确认仍在古墓大厅。"""
+    return _close_gold_panel(camera, pause_on_failure=True)
 
 
 def _step10_trade(camera):
@@ -1162,6 +1235,25 @@ def navigate_to_trade(camera):
     return _step10_trade(camera)
 
 
+def refresh_latest_balance_route(camera):
+    """非阻断执行：回古墓 -> 尝试领金币 -> 回交易行。"""
+    if not is_at_gumu(camera):
+        if not try_return_to_gumu(camera, retry_count=3):
+            return {"status": "failed", "detail": "返回古墓大厅失败。"}
+
+    gold_result = _run_gold_step(camera, pause_on_failure=False)
+    if gold_result["status"] == "no_gold":
+        return {"status": "no_gold", "detail": "没有金币可领取。"}
+    if gold_result["status"] != _GOLD_STEP_NEED_CLOSE:
+        return {"status": "failed", "detail": gold_result["detail"] or "领取金币失败。"}
+
+    if not _close_gold_panel(camera, pause_on_failure=False):
+        return {"status": "failed", "detail": "关闭金币面板后未能返回古墓大厅。"}
+    if not _step10_trade(camera):
+        return {"status": "failed", "detail": "返回交易行失败。"}
+    return {"status": "success", "detail": "已返回交易行。"}
+
+
 def _run_thread6_resume_steps(camera):
     resume_steps = [
         ("启动游戏", lambda: _step04_launch(camera, suppress_failure_output=True), "未匹配到启动按钮或启动点击失败。"),
@@ -1239,7 +1331,11 @@ def switch_server_within_account_after_slot_boundary(camera, transition=None):
         if not _run_thread6_step(
             "昵称模板校验",
             f"执行位 {target['next_slot']} 的昵称模板校验失败。",
-            lambda: _verify_slot_nickname(camera, target["next_slot"]),
+            lambda: _retry_slot_nickname_verification_from_server_select(
+                camera,
+                target["next_slot"],
+                target["server_coord_index"],
+            ),
         ):
             return False
 
@@ -1319,7 +1415,11 @@ def switch_account_after_slot_boundary(camera):
         if not _run_thread6_step(
             "昵称模板校验",
             f"执行位 {target['next_slot']} 的昵称模板校验失败。",
-            lambda: _verify_slot_nickname(camera, target["next_slot"]),
+            lambda: _retry_slot_nickname_verification_from_server_select(
+                camera,
+                target["next_slot"],
+                target["server_coord_index"],
+            ),
         ):
             return False
 
@@ -1397,7 +1497,11 @@ def switch_account_for_temporary_target_slot(camera, target_execution_slot):
         if not _run_thread6_step(
             "昵称模板校验",
             f"目标执行位 {target['target_slot']} 的昵称模板校验失败。",
-            lambda: _verify_slot_nickname(camera, target["target_slot"]),
+            lambda: _retry_slot_nickname_verification_from_server_select(
+                camera,
+                target["target_slot"],
+                target["server_coord_index"],
+            ),
         ):
             return False
 

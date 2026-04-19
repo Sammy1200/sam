@@ -14,6 +14,7 @@ from account_db import (
     CANONICAL_ACCOUNT_STATS_COLUMNS,
     CANONICAL_ACCOUNT_STATS_TABLE,
     MACHINE_DAILY_SUMMARY_TABLE,
+    ROUND_STATUS_BALANCE_LOW,
     ROUND_STATUS_LIMITED,
     ROUND_STATUS_MANUAL_PAUSE,
     ROUND_STATUS_READY,
@@ -279,7 +280,7 @@ def _format_duration_text(total_seconds):
 
 
 def _is_forced_limit_status(round_status):
-    return round_status in (ROUND_STATUS_LIMITED, ROUND_STATUS_RUNTIME_REACHED)
+    return round_status in (ROUND_STATUS_BALANCE_LOW, ROUND_STATUS_LIMITED, ROUND_STATUS_RUNTIME_REACHED)
 
 
 def _resolve_cooldown_anchor_time(round_status, last_limit_time, updated_at):

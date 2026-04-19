@@ -42,7 +42,12 @@ from round_persistence import (
     record_daily_purchase_fail,
     record_daily_purchase_success,
 )
-from switch import is_at_gumu, navigate_to_trade
+from switch import (
+    is_at_gumu,
+    navigate_to_trade,
+    refresh_latest_balance_route,
+    try_return_to_gumu,
+)
 from utils import (
     click_exit,
     fast_click,
@@ -104,6 +109,99 @@ def reset_purchase_counters(reason):
             pass
 
 
+def _update_balance_state_from_recognition(recognition):
+    recognized_balance_text = str(recognition.get("text") or "").strip()
+    recognized_balance_confirmed = bool(recognition.get("confirmed")) and bool(recognized_balance_text)
+
+    previous_confirmed_balance_text = str(state.last_valid_balance or "").strip()
+    previous_confirmed_balance_value = parse_balance_text_to_value(previous_confirmed_balance_text)
+    recognized_balance_value = parse_balance_text_to_value(recognized_balance_text)
+
+    effective_balance_text = previous_confirmed_balance_text
+    effective_balance_value = previous_confirmed_balance_value
+    balance_display_mode = "沿" if previous_confirmed_balance_text else ""
+
+    if recognized_balance_confirmed:
+        effective_balance_text = recognized_balance_text
+        effective_balance_value = recognized_balance_value
+        balance_display_mode = "新"
+        if effective_balance_value is not None:
+            state.last_valid_balance = effective_balance_text
+    elif previous_confirmed_balance_text:
+        effective_balance_text = previous_confirmed_balance_text
+        effective_balance_value = previous_confirmed_balance_value
+        balance_display_mode = "沿"
+    else:
+        effective_balance_text = str(state.current_balance or "").strip()
+        effective_balance_value = None
+        balance_display_mode = "待确认"
+
+    state.balance_display_mode = balance_display_mode
+    if effective_balance_text:
+        state.current_balance = effective_balance_text
+        state.round_current_balance = effective_balance_text
+    elif balance_display_mode == "待确认":
+        state.round_current_balance = ""
+    if state.overlay_root:
+        state.overlay_root.after(0, update_score_text)
+
+    return {
+        "effective_text": effective_balance_text,
+        "effective_value": effective_balance_value,
+    }
+
+
+def _finalize_balance_insufficient(balance_text, send_push=True):
+    balance_text = str(balance_text or "").strip()
+    state.account_round_end_status = "余额不足"
+    state.overlay_status = "余额不足"
+    ui_print(f"余额不足，当前余额：{balance_text}，准备自动换号", save_log=True)
+    print(f"[余额不足] 当前余额：{balance_text}，已触发自动换号")
+    if send_push:
+        async_push_msg("【余额不足】准备换号换区", f"当前余额：{balance_text}，已触发自动换号。")
+    state.need_switch_server = True
+    return False
+
+
+def recognize_latest_balance_at_trade(camera):
+    """等待交易行并做一次确认态余额识别；失败返回 None。"""
+    start_time = time.time()
+    while time.time() - start_time < 1.4:
+        if state.IS_PAUSED:
+            return None
+
+        frame = safe_get_frame(camera)
+        if frame is None:
+            time.sleep(0.05)
+            continue
+
+        if not is_image_present(frame, MONITOR_JIAOYIHANG, state.temp_jiaoyi, threshold=0.7):
+            time.sleep(0.05)
+            continue
+
+        recognition = get_balance_recognition(frame)
+        recognized_balance_text = str(recognition.get("text") or "").strip()
+        recognized_balance_confirmed = bool(recognition.get("confirmed")) and bool(recognized_balance_text)
+        if not recognized_balance_confirmed:
+            time.sleep(0.05)
+            continue
+
+        recognized_balance_value = parse_balance_text_to_value(recognized_balance_text)
+        if recognized_balance_value is None:
+            time.sleep(0.05)
+            continue
+
+        state.balance_display_mode = "新"
+        state.current_balance = recognized_balance_text
+        state.last_valid_balance = recognized_balance_text
+        state.round_current_balance = recognized_balance_text
+        if state.overlay_root:
+            state.overlay_root.after(0, update_score_text)
+        return {"text": recognized_balance_text, "value": recognized_balance_value}
+
+    return None
+
+
 def check_balance_limit(frame):
     """识别余额，余额不足时直接触发自动换号。"""
     recognition = get_balance_recognition(frame)
@@ -160,6 +258,36 @@ def check_balance_limit(frame):
     return True
 
 
+def check_balance_limit(frame, camera=None, try_refresh_on_low=False):
+    """识别余额；可选在余额不足时先补金币再决定是否换号。"""
+    balance_info = _update_balance_state_from_recognition(get_balance_recognition(frame))
+    effective_balance_text = balance_info["effective_text"]
+    effective_balance_value = balance_info["effective_value"]
+
+    try:
+        if effective_balance_value is None:
+            return True
+        if effective_balance_value < BALANCE_INSUFFICIENT_THRESHOLD:
+            if try_refresh_on_low and camera is not None:
+                refresh_result = refresh_latest_balance_route(camera)
+                if refresh_result["status"] == "success":
+                    refreshed_balance = recognize_latest_balance_at_trade(camera)
+                    if refreshed_balance is not None:
+                        if refreshed_balance["value"] >= BALANCE_INSUFFICIENT_THRESHOLD:
+                            state.overlay_status = "抢购中"
+                            ui_print(f"补领金币后余额恢复：{refreshed_balance['text']}", save_log=True)
+                            return True
+                        return _finalize_balance_insufficient(refreshed_balance["text"], send_push=True)
+                return _finalize_balance_insufficient(
+                    effective_balance_text,
+                    send_push=refresh_result["status"] != "no_gold",
+                )
+    except:
+        pass
+
+    return True
+
+
 def get_latest_runtime_balance_text():
     for balance_text in (state.current_balance, state.last_valid_balance, state.round_current_balance):
         text = str(balance_text or "").strip()
@@ -198,7 +326,7 @@ def wait_and_recognize_balance(wait_time, camera):
         frame = safe_get_frame(camera)
         if frame is not None:
             if is_image_present(frame, MONITOR_JIAOYIHANG, state.temp_jiaoyi, threshold=0.7):
-                if not check_balance_limit(frame):
+                if not check_balance_limit(frame, camera=camera, try_refresh_on_low=True):
                     return False
                 break
 
@@ -401,10 +529,9 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                                     return
                                 state.account_round_end_status = "账号限制"
                                 state.overlay_status = "账号限制"
-                                async_push_msg("【账号限制】准备换号换区", "连续多次店铺为空，已触发自动切号。")
                                 state.need_switch_server = True
                                 return
-                            if not check_balance_limit(frame):
+                            if not check_balance_limit(frame, camera=camera, try_refresh_on_low=True):
                                 if state.need_switch_server:
                                     return
                                 continue
@@ -427,6 +554,8 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                                     precise_sleep(1.0)
                                     fast_click(FIX_SHOP_POS2)
                                 elif is_at_gumu(camera):
+                                    navigate_to_trade(camera)
+                                elif try_return_to_gumu(camera, retry_count=3):
                                     navigate_to_trade(camera)
                                 else:
                                     is_unknown_page = True
