@@ -73,6 +73,8 @@ from vision import (
 
 LISTING_TARGET_PRICE = load_listing_target_price()[0]
 _UNLIST_CONFIRM_TEMPLATE = None
+STARTUP_LISTING_CAPACITY_POLL_SECONDS = 10.0
+STARTUP_LISTING_FAIL_LIMIT = 5
 
 
 def _parse_balance_text_to_value(balance_text):
@@ -288,7 +290,7 @@ def _should_skip_listing_by_last_valid_balance():
         last_valid_balance_value is not None
         and last_valid_balance_value > LISTING_SKIP_BALANCE_THRESHOLD
     ):
-        ui_print("余额超15亿跳上架", save_log=True)
+        ui_print("余额超10亿跳上架", save_log=True)
         return True
     return False
 
@@ -361,6 +363,243 @@ def _disable_periodic_listing(reason):
     state.listing_periodic_disabled_reason = reason
     state.listing_periodic_skip_logged = False
     ui_print(reason, save_log=True)
+
+
+def _sync_listing_success_for_current_account():
+    """上架成功后扣减库存并立即同步真源。"""
+    if state.baseline_item_count > 0:
+        state.baseline_item_count -= 1
+    else:
+        state.baseline_item_count = 0
+        ui_print("库存已为0", save_log=True)
+
+    if state.overlay_root:
+        try:
+            state.overlay_root.after(0, update_score_text)
+        except Exception:
+            pass
+
+    record_daily_listing_success()
+    sync_result = persist_minimal_item_balance_sync()
+    if sync_result.status not in ("success", "skipped"):
+        logger.warning("[上架] 实时库存同步失败：%s", sync_result.reason)
+        ui_print("库存同步失败", save_log=True)
+
+
+def _open_listing_panel(camera_obj):
+    """统一进入上架页。"""
+    ui_print("进入上架页", save_log=True)
+    safe_sleep(0.08)
+    fast_click(CLICK_1)
+    safe_sleep(0.08)
+    if not wait_for_ocr_text(camera_obj, MONITOR_TEXT_SHANGJIA, ["上架", "数量"]):
+        return False
+
+    safe_sleep(0.08)
+    fast_click(CLICK_2)
+    safe_sleep(0.08)
+    if not wait_for_ocr_text(camera_obj, MONITOR_TEXT_JIAOSHI, ["角石"]):
+        return False
+
+    safe_sleep(0.08)
+    fast_click(CLICK_JIAOSHI)
+    safe_sleep(0.5)
+    return True
+
+
+def _verify_startup_listing_capacity_change(camera_obj, expected_current):
+    latest_capacity = None
+    read_success = False
+    for _ in range(5):
+        verify_frame = safe_get_frame(camera_obj)
+        if verify_frame is not None:
+            verify_capacity = read_capacity(verify_frame)
+            if verify_capacity is not None:
+                read_success = True
+                latest_capacity = verify_capacity
+                if verify_capacity[0] >= expected_current:
+                    return {"status": "success", "capacity": latest_capacity}
+        safe_sleep(0.15)
+
+    if read_success:
+        return {"status": "unchanged", "capacity": latest_capacity}
+    return {"status": "unreadable", "capacity": latest_capacity}
+
+
+def _wait_startup_listing_capacity_available(camera_obj, current_capacity):
+    latest_capacity = current_capacity
+    while True:
+        available_slots = _get_available_listing_slots(latest_capacity)
+        if available_slots is not None and available_slots > 0:
+            return {"status": "success", "capacity": latest_capacity}
+
+        ui_print("容量满等待", is_replace=True, save_log=False)
+        safe_sleep(STARTUP_LISTING_CAPACITY_POLL_SECONDS)
+        refreshed_capacity = _read_capacity_with_retry(camera_obj, retry_count=3, interval_seconds=0.2)
+        if refreshed_capacity is None:
+            ui_print("容量未确认", save_log=True)
+            continue
+        latest_capacity = refreshed_capacity
+
+
+def execute_startup_listing_batch(camera_obj, target_success_count):
+    """启动页上架模式专用批次上架，不影响原预上架与周期上架逻辑。"""
+    gc_checkpoint()
+
+    first_popup_checked = False
+    batch_listed = 0
+    fail_strike = 0
+    final_status = "error"
+    final_reason = "未知异常"
+
+    state.overlay_status = "上架模式"
+    move_overlay("+600+0")
+
+    try:
+        if target_success_count <= 0:
+            return {
+                "status": "skipped",
+                "reason": "目标上架数无效",
+                "listed_count": 0,
+            }
+
+        if not _open_listing_panel(camera_obj):
+            return {
+                "status": "failed",
+                "reason": "未能进入上架页面",
+                "listed_count": 0,
+            }
+
+        current_capacity = _read_capacity_with_retry(camera_obj)
+        if not current_capacity:
+            return {
+                "status": "failed",
+                "reason": "容量解析失败",
+                "listed_count": 0,
+            }
+
+        ui_print(f"目标{target_success_count}", save_log=True)
+        while batch_listed < int(target_success_count):
+            wait_capacity_result = _wait_startup_listing_capacity_available(camera_obj, current_capacity)
+            if wait_capacity_result.get("status") != "success":
+                final_status = "failed"
+                final_reason = "容量等待失败"
+                break
+            current_capacity = wait_capacity_result["capacity"]
+
+            frame = safe_get_frame(camera_obj)
+            if frame is None:
+                safe_sleep(0.1)
+                continue
+
+            found, abs_x, abs_y = match_item_in_scan(frame)
+            if not found:
+                ui_print("继续翻页", save_log=True)
+                before_frame = frame
+                safe_sleep(0.08)
+                scroll_down()
+                safe_sleep(0.3)
+                after_frame = safe_get_frame(camera_obj)
+                if after_frame is not None:
+                    similarity = compare_region_similarity(before_frame, after_frame, SCAN_REGION)
+                    if similarity >= SIMILARITY_THRESHOLD:
+                        final_status = "page_end"
+                        final_reason = "翻页到底"
+                        ui_print("翻页到底", save_log=True)
+                        break
+                continue
+
+            safe_sleep(0.08)
+            fast_click((abs_x, abs_y))
+            safe_sleep(0.5)
+
+            popup_found = False
+            if state.TEMP_POPUP is not None:
+                for _ in range(15):
+                    safe_sleep(0.15)
+                    frame_popup = safe_get_frame(camera_obj)
+                    if frame_popup is not None and is_image_present(
+                        frame_popup,
+                        POPUP_REGION,
+                        state.TEMP_POPUP,
+                        threshold=0.7,
+                    ):
+                        popup_found = True
+                        break
+            else:
+                for _ in range(10):
+                    safe_sleep(0.08)
+                    frame_popup = safe_get_frame(camera_obj)
+                    if frame_popup is not None:
+                        similarity = compare_region_similarity(frame, frame_popup, POPUP_REGION)
+                        if similarity < POPUP_THRESHOLD:
+                            popup_found = True
+                            break
+                    safe_sleep(0.2)
+
+            if not popup_found or not input_price_with_verify():
+                fail_strike += 1
+                ui_print(f"失败{fail_strike}/5", save_log=True)
+                if fail_strike >= STARTUP_LISTING_FAIL_LIMIT:
+                    final_status = "fail_limit"
+                    final_reason = "上架失败5次"
+                    ui_print("上架失败5次", save_log=True)
+                    break
+                continue
+
+            before_current = int(current_capacity[0])
+            fast_click(CONFIRM_BTN_POS)
+
+            if not first_popup_checked:
+                check_and_click_tishi(camera_obj)
+                first_popup_checked = True
+
+            safe_sleep(0.8)
+            verify_result = _verify_startup_listing_capacity_change(camera_obj, before_current + 1)
+            if verify_result["status"] != "success":
+                fail_strike += 1
+                ui_print(f"失败{fail_strike}/5", save_log=True)
+                if fail_strike >= STARTUP_LISTING_FAIL_LIMIT:
+                    final_status = "fail_limit"
+                    final_reason = "上架失败5次"
+                    ui_print("上架失败5次", save_log=True)
+                    break
+                if verify_result.get("capacity") is not None:
+                    current_capacity = verify_result["capacity"]
+                continue
+
+            current_capacity = verify_result["capacity"]
+            batch_listed += 1
+            state.total_listed_count += 1
+            state.round_listing_success_count += 1
+            _sync_listing_success_for_current_account()
+            fail_strike = 0
+            ui_print(f"上架{batch_listed}", save_log=True)
+
+        if batch_listed >= int(target_success_count):
+            final_status = "target_reached"
+            final_reason = f"达到目标 {target_success_count}"
+
+        return {
+            "status": final_status,
+            "reason": final_reason,
+            "listed_count": batch_listed,
+        }
+    except Exception as exc:
+        logger.exception("[上架模式] 启动页上架批次异常：%s", exc)
+        return {
+            "status": "error",
+            "reason": f"上架批次异常：{exc}",
+            "listed_count": batch_listed,
+        }
+    finally:
+        time.sleep(0.5)
+        ui_print("返回交易行", save_log=True)
+        press_key(0x1B)
+        time.sleep(0.5)
+        state._last_balance_hash = None
+        move_overlay("+20+20")
+        ui_print("批次已结束", save_log=True)
 
 
 def execute_listing_routine(camera_obj, is_periodic=False, force_balance_check_after_switch=False):

@@ -7,6 +7,7 @@ Public APIs:
   is_at_gumu(camera)
   navigate_to_trade(camera)
   pause_thread6_failure(step_name, detail)
+  enter_startup_listing_target_slot(camera, target_execution_slot, ...)
   resolve_execution_slot_transition(current_execution_slot)
   switch_server_within_account_after_slot_boundary(camera)
   switch_account_after_slot_boundary(camera)
@@ -1528,3 +1529,327 @@ def switch_account_for_temporary_target_slot(camera, target_execution_slot):
         return True
 
     return _run_thread6_chain("临时模式定向切换链路", _chain_impl)
+
+
+def _wait_for_launcher_ready_nonblocking(camera, timeout_seconds):
+    """非阻断确认启动页 qidong 按钮已出现。"""
+    end_time = time.time() + max(0.1, float(timeout_seconds))
+    while time.time() < end_time:
+        if _match(
+            camera,
+            "qd",
+            config.SWITCH_BOUNDARY_START_QIDONG_REGION,
+            threshold=config.SWITCH_UI_MATCH_THRESHOLD,
+        ):
+            return True
+        safe_sleep(0.5)
+    return False
+
+
+def _switch_account_for_slot_nonblocking(camera, account_id):
+    """启动页上架模式专用：切号失败时只返回失败信息，不进入线程 6 阻断停机。"""
+    _log_switch_waits(
+        "switch-user entry",
+        click_wait=config.SWITCH_ACCOUNT_LIST_CLICK_WAIT_SECONDS,
+        entry_timeout=config.SWITCH_USER_ENTRY_MATCH_TIMEOUT_SECONDS,
+        login_click_wait=config.SWITCH_SWITCH_USER_CLICK_WAIT_SECONDS,
+        login_timeout=config.SWITCH_LOGIN_PAGE_MATCH_TIMEOUT_SECONDS,
+    )
+    fast_click(config.SWITCH_ACCOUNT_LIST_BUTTON_POS)
+    safe_sleep(config.SWITCH_ACCOUNT_LIST_CLICK_WAIT_SECONDS)
+
+    switch_center = _wait_for_match_center(
+        camera,
+        "qiehuan",
+        config.SWITCH_USER_TEMPLATE_REGION,
+        timeout=config.SWITCH_USER_ENTRY_MATCH_TIMEOUT_SECONDS,
+        threshold=config.SWITCH_UI_MATCH_THRESHOLD,
+    )
+    if switch_center is None:
+        return False, "点击账号列表后未匹配到切换账号入口。"
+
+    fast_click(switch_center)
+    safe_sleep(config.SWITCH_SWITCH_USER_CLICK_WAIT_SECONDS)
+
+    login_center = _wait_for_match_center(
+        camera,
+        "denglu",
+        config.SWITCH_LOGIN_TEMPLATE_REGION,
+        timeout=config.SWITCH_LOGIN_PAGE_MATCH_TIMEOUT_SECONDS,
+        threshold=config.SWITCH_UI_MATCH_THRESHOLD,
+    )
+    if login_center is None:
+        return False, "点击切换账号入口后未匹配到登录页。"
+
+    _log_switch_waits(
+        "account input verify",
+        verify_wait=config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS,
+    )
+    fast_click(config.SWITCH_ACCOUNT_INPUT_POS)
+    safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
+    hotkey(0x11, 0x41)
+    safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
+    type_digits(str(account_id))
+    safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
+    hotkey(0x11, 0x41)
+    safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
+    hotkey(0x11, 0x43)
+    safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
+
+    actual = _digits_only(get_clipboard_text())
+    expected = _digits_only(account_id)
+    if actual != expected:
+        return False, f"账号输入校验失败，期望 {expected}，实际 {actual or '空'}。"
+
+    _log_switch_waits(
+        "denglu click",
+        login_click_wait=config.SWITCH_LOGIN_CLICK_WAIT_SECONDS,
+    )
+    fast_click(login_center)
+    safe_sleep(config.SWITCH_LOGIN_CLICK_WAIT_SECONDS)
+
+    _log_switch_waits(
+        "heping verify",
+        login_click_wait=config.SWITCH_LOGIN_CLICK_WAIT_SECONDS,
+        heping_timeout=config.SWITCH_HEPING_MATCH_TIMEOUT_SECONDS,
+        maximize_wait=config.SWITCH_MAXIMIZE_WAIT_SECONDS,
+    )
+    if _wait_for(
+        camera,
+        "heping",
+        config.SWITCH_HEPING_REGION_PRIMARY,
+        timeout=config.SWITCH_HEPING_MATCH_TIMEOUT_SECONDS,
+        threshold=config.SWITCH_UI_MATCH_THRESHOLD,
+    ):
+        fast_click((45, 277))
+        safe_sleep(0.8)
+        return True, ""
+
+    if _match(
+        camera,
+        "heping",
+        config.SWITCH_HEPING_REGION_SECONDARY,
+        threshold=config.SWITCH_UI_MATCH_THRESHOLD,
+    ):
+        pyautogui.hotkey("winleft", "up")
+        safe_sleep(config.SWITCH_MAXIMIZE_WAIT_SECONDS)
+        if _wait_for(
+            camera,
+            "heping",
+            config.SWITCH_HEPING_REGION_PRIMARY,
+            timeout=config.SWITCH_HEPING_MATCH_TIMEOUT_SECONDS,
+            threshold=config.SWITCH_UI_MATCH_THRESHOLD,
+        ):
+            fast_click((45, 277))
+            safe_sleep(0.8)
+            return True, ""
+
+    return False, "账号登录后未匹配到和平精英页。"
+
+
+def _verify_startup_listing_slot_nonblocking(camera, target_slot, server_coord_index):
+    """启动页上架模式专用：昵称校验失败时只返回失败信息。"""
+    verified, failure_detail = _try_verify_slot_nickname_once(camera, target_slot)
+    if verified:
+        return True, ""
+
+    for retry_index in range(1, config.SWITCH_STEP_MAX_RETRY + 1):
+        ui_print(f"昵称重试{retry_index}/3", save_log=True)
+        if not _step02_server_list(camera, suppress_failure_output=True):
+            return False, f"昵称重试 {retry_index}/3 前未能重新打开大区列表。"
+        if not _step03_select(camera, server_coord_index, suppress_failure_output=True):
+            return False, f"昵称重试 {retry_index}/3 时未能重新选择目标大区。"
+
+        verified, failure_detail = _try_verify_slot_nickname_once(camera, target_slot)
+        if verified:
+            return True, ""
+
+    return False, failure_detail
+
+
+def enter_startup_listing_target_slot(
+    camera,
+    target_execution_slot,
+    force_login=False,
+    already_at_launcher=False,
+):
+    """启动页上架模式专用：进入任意执行位并回到交易行，不改线程 6 现有链路。"""
+    target = _build_temporary_target_transition(target_execution_slot)
+    if target.get("config_error"):
+        return {
+            "status": "failed",
+            "detail": target["config_error"],
+            "target_slot": target.get("target_slot"),
+            "account_id": target.get("account_id"),
+            "server_coord_index": target.get("server_coord_index"),
+        }
+
+    set_overlay_mini(f"上架模式{target['target_slot']}")
+
+    if already_at_launcher:
+        if not _wait_for_launcher_ready_nonblocking(camera, 3.0):
+            return {
+                "status": "failed",
+                "detail": "当前不在启动页，无法开始启动页上架模式进场。",
+                "target_slot": target["target_slot"],
+                "account_id": target["account_id"],
+                "server_coord_index": target["server_coord_index"],
+            }
+    else:
+        if not _step01_exit(camera):
+            return {
+                "status": "failed",
+                "detail": "退出当前游戏失败。",
+                "target_slot": target["target_slot"],
+                "account_id": target["account_id"],
+                "server_coord_index": target["server_coord_index"],
+            }
+        launcher_wait_seconds = (
+            config.SWITCH_BOUNDARY_START_QIDONG_RETRY_COUNT
+            * config.SWITCH_BOUNDARY_START_QIDONG_RETRY_INTERVAL_SECONDS
+        )
+        if not _wait_for_launcher_ready_nonblocking(camera, launcher_wait_seconds):
+            return {
+                "status": "failed",
+                "detail": "退出游戏后未能确认返回启动页。",
+                "target_slot": target["target_slot"],
+                "account_id": target["account_id"],
+                "server_coord_index": target["server_coord_index"],
+            }
+
+    if force_login:
+        switched, switch_detail = _switch_account_for_slot_nonblocking(camera, target["account_id"])
+        if not switched:
+            return {
+                "status": "failed",
+                "detail": switch_detail,
+                "target_slot": target["target_slot"],
+                "account_id": target["account_id"],
+                "server_coord_index": target["server_coord_index"],
+            }
+
+    if not _step02_server_list(camera, suppress_failure_output=True):
+        return {
+            "status": "failed",
+            "detail": "未能打开大区列表。",
+            "target_slot": target["target_slot"],
+            "account_id": target["account_id"],
+            "server_coord_index": target["server_coord_index"],
+        }
+
+    if not _step03_select(camera, target["server_coord_index"], suppress_failure_output=True):
+        return {
+            "status": "failed",
+            "detail": f"未能切换到执行位 {target['target_slot']} 对应大区。",
+            "target_slot": target["target_slot"],
+            "account_id": target["account_id"],
+            "server_coord_index": target["server_coord_index"],
+        }
+
+    verified, verify_detail = _verify_startup_listing_slot_nonblocking(
+        camera,
+        target["target_slot"],
+        target["server_coord_index"],
+    )
+    if not verified:
+        return {
+            "status": "failed",
+            "detail": verify_detail,
+            "target_slot": target["target_slot"],
+            "account_id": target["account_id"],
+            "server_coord_index": target["server_coord_index"],
+        }
+
+    if not _step04_launch(camera, suppress_failure_output=True):
+        return {
+            "status": "failed",
+            "detail": "未能点击启动游戏。",
+            "target_slot": target["target_slot"],
+            "account_id": target["account_id"],
+            "server_coord_index": target["server_coord_index"],
+        }
+    if not _step05_space(camera, suppress_failure_output=True):
+        return {
+            "status": "failed",
+            "detail": "未能完成空格弹窗处理。",
+            "target_slot": target["target_slot"],
+            "account_id": target["account_id"],
+            "server_coord_index": target["server_coord_index"],
+        }
+    if not _step06_ads(camera, suppress_failure_output=True):
+        return {
+            "status": "failed",
+            "detail": "未能完成广告和弹窗清理。",
+            "target_slot": target["target_slot"],
+            "account_id": target["account_id"],
+            "server_coord_index": target["server_coord_index"],
+        }
+    if not _step07_gumu(camera, suppress_failure_output=True):
+        return {
+            "status": "failed",
+            "detail": "未能进入古墓大厅。",
+            "target_slot": target["target_slot"],
+            "account_id": target["account_id"],
+            "server_coord_index": target["server_coord_index"],
+        }
+
+    gold_step_result = _step08_gold(camera)
+    if not gold_step_result:
+        return {
+            "status": "failed",
+            "detail": "领取金币失败。",
+            "target_slot": target["target_slot"],
+            "account_id": target["account_id"],
+            "server_coord_index": target["server_coord_index"],
+        }
+
+    if gold_step_result == _GOLD_STEP_NEED_CLOSE and not _step09_close(camera):
+        return {
+            "status": "failed",
+            "detail": "关闭金币面板失败。",
+            "target_slot": target["target_slot"],
+            "account_id": target["account_id"],
+            "server_coord_index": target["server_coord_index"],
+        }
+
+    if not _step10_trade(camera):
+        return {
+            "status": "failed",
+            "detail": "未能返回交易行。",
+            "target_slot": target["target_slot"],
+            "account_id": target["account_id"],
+            "server_coord_index": target["server_coord_index"],
+        }
+
+    state.current_execution_slot = target["target_slot"]
+    state.current_server_index = target["server_coord_index"]
+    state.current_account_index = 0 if target["target_slot"] <= 4 else 1
+    state.current_nickname = str(target["target_slot"])
+    state.need_switch_server = False
+    state.switch_flow_paused = False
+    state.switch_last_unknown_detail = ""
+    restore_overlay()
+    return {
+        "status": "success",
+        "detail": "",
+        "target_slot": target["target_slot"],
+        "account_id": target["account_id"],
+        "server_coord_index": target["server_coord_index"],
+    }
+
+
+def exit_to_launcher_for_startup_listing(camera):
+    """启动页上架模式专用：正常下号并确认回到启动页。"""
+    set_overlay_mini("上架模式下号")
+    if not _step01_exit(camera):
+        return {"status": "failed", "detail": "退出当前游戏失败。"}
+
+    launcher_wait_seconds = (
+        config.SWITCH_BOUNDARY_START_QIDONG_RETRY_COUNT
+        * config.SWITCH_BOUNDARY_START_QIDONG_RETRY_INTERVAL_SECONDS
+    )
+    if not _wait_for_launcher_ready_nonblocking(camera, launcher_wait_seconds):
+        return {"status": "failed", "detail": "退出游戏后未能确认返回启动页。"}
+
+    restore_overlay()
+    return {"status": "success", "detail": ""}

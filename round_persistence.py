@@ -21,6 +21,7 @@ from account_db import (
     read_canonical_account_stats_record,
     read_preferred_canonical_account_stats_record_by_execution_slot,
     save_canonical_account_stats_record,
+    update_canonical_account_listing_pause_fields,
     update_canonical_account_status_fields,
     update_canonical_account_runtime_fields,
     update_canonical_account_item_balance_fields,
@@ -600,10 +601,108 @@ def persist_item_balance_and_schedule_snapshot(event_name):
     return result
 
 
+def persist_startup_listing_mode_account_snapshot(round_status, update_last_limit_time=False, last_limit_time=None):
+    """启动页上架模式专用：写回当前账号的上架轮次结果。"""
+    if state.temporary_purchase_mode:
+        return AccountWriteResult("skipped", "临时模式不写入 canonical SQLite")
+
+    target = _resolve_current_canonical_target()
+    nickname = str(target.get("nickname") or "").strip()
+    database_path = str(target.get("database_path") or "").strip()
+    table_name = target.get("table_name") or CANONICAL_ACCOUNT_STATS_TABLE
+    if state.account_read_status == "account_not_found" or not state.account_record_loaded or not nickname:
+        return AccountWriteResult("skipped", f"当前账号未加载 SQLite 记录: {nickname}")
+    if not database_path:
+        return AccountWriteResult("db_unavailable", "canonical database path is empty")
+
+    existing_record = target.get("record") or read_canonical_account_stats_record(database_path, nickname, table_name)
+    if existing_record is None:
+        return AccountWriteResult("account_not_found", f"sqlite record not found for nickname: {nickname}")
+
+    normalized_status = _normalize_round_status(round_status, True)
+    write_time = datetime.now()
+    normalized_limit_time = existing_record.last_limit_time
+    if update_last_limit_time:
+        normalized_limit_time = last_limit_time or write_time
+
+    effective_balance = _get_effective_balance()
+    record = AccountStatsRecord(
+        nickname=existing_record.nickname,
+        baseline_item_count=int(state.baseline_item_count),
+        last_limit_time=normalized_limit_time,
+        last_account_end_time=write_time,
+        updated_at=write_time,
+        current_execution_slot=existing_record.current_execution_slot or state.current_execution_slot,
+        round_purchase_success_count=int(state.round_purchase_success_count),
+        round_listing_success_count=int(state.round_listing_success_count),
+        round_purchase_fail_count=int(state.round_purchase_fail_count),
+        current_balance=effective_balance,
+        purchase_running_seconds=int(state.round_purchase_running_seconds),
+        runtime_window_start_time=state.runtime_window_start_time,
+        round_status=normalized_status,
+    )
+    result = save_canonical_account_stats_record(database_path, record, table_name)
+    if result.status == "success":
+        state.round_status = normalized_status
+        state.updated_at = write_time
+        state.last_limit_time = normalized_limit_time
+        state.last_account_end_time = write_time
+        _schedule_remote_snapshot_event("启动页上架模式账号收尾")
+        logger.info(
+            "[账号数据] 启动页上架模式写库完成：昵称=%s 状态=%s 上架=%s 余额=%s",
+            nickname,
+            normalized_status,
+            state.round_listing_success_count,
+            effective_balance or "保持原值",
+        )
+    elif result.status != "skipped":
+        logger.warning("[账号数据] 启动页上架模式写库失败：昵称=%s 原因=%s", nickname, result.reason)
+    return result
+
+
+def _persist_startup_listing_mode_pause_resume_snapshot(event_name):
+    """启动页上架模式 F12 专用：只写库存、余额、本轮上架成功数。"""
+    if state.temporary_purchase_mode:
+        return AccountWriteResult("skipped", "临时模式不写入 canonical SQLite")
+
+    target = _resolve_current_canonical_target()
+    nickname = str(target.get("nickname") or "").strip()
+    database_path = str(target.get("database_path") or "").strip()
+    table_name = target.get("table_name") or CANONICAL_ACCOUNT_STATS_TABLE
+    if state.account_read_status == "account_not_found" or not state.account_record_loaded or not nickname:
+        return AccountWriteResult("skipped", f"当前账号未加载 SQLite 记录: {nickname}")
+    if not database_path:
+        return AccountWriteResult("skipped", "canonical database path is empty")
+
+    effective_balance = _get_effective_balance()
+    result = update_canonical_account_listing_pause_fields(
+        database_path,
+        nickname,
+        int(state.baseline_item_count),
+        current_balance=effective_balance,
+        round_listing_success_count=int(state.round_listing_success_count),
+        table_name=table_name,
+    )
+    if result.status == "success":
+        _schedule_remote_snapshot_event(event_name)
+        logger.info(
+            "[账号数据] 启动页上架模式 F12 最小写库完成：昵称=%s 上架=%s 余额=%s 库存=%s",
+            nickname,
+            int(state.round_listing_success_count),
+            effective_balance or "保持原值",
+            int(state.baseline_item_count),
+        )
+    elif result.status != "skipped":
+        logger.warning("[账号数据] 启动页上架模式 F12 最小写库失败：昵称=%s 原因=%s", nickname, result.reason)
+    return result
+
+
 def persist_pause_snapshot():
     """F12 暂停后只补当前账号最小必要字段，并写入人工暂停状态。"""
     if state.temporary_purchase_mode:
         return AccountWriteResult("skipped", "临时模式不写入 canonical SQLite")
+    if state.startup_listing_mode_active:
+        return _persist_startup_listing_mode_pause_resume_snapshot("启动页上架模式F12暂停时")
 
     target = _resolve_current_canonical_target()
     nickname = str(target.get("nickname") or "").strip()
@@ -664,6 +763,8 @@ def persist_resume_snapshot():
     """F12 恢复后仅在库内当前状态为人工暂停时恢复为运行中。"""
     if state.temporary_purchase_mode:
         return AccountWriteResult("skipped", "临时模式不写入 canonical SQLite")
+    if state.startup_listing_mode_active:
+        return _persist_startup_listing_mode_pause_resume_snapshot("启动页上架模式F12恢复时")
 
     nickname = (state.current_nickname or "").strip()
     if state.account_read_status == "account_not_found" or not state.account_record_loaded or not nickname:

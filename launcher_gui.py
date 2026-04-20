@@ -10,6 +10,7 @@ def show_launcher():
 
     返回:
         ("launcher", None)        — 登录界面启动
+        ("listing_launcher", None) — 启动页上架模式
         ("2", int)                — 临时抢购模式 + 执行位编号
     """
     result = [None]
@@ -19,7 +20,7 @@ def show_launcher():
     root.resizable(False, False)
 
     window_width = 400
-    window_height = 280
+    window_height = 340
     screen_width = root.winfo_screenwidth()
     screen_height = root.winfo_screenheight()
     pos_x = (screen_width - window_width) // 2
@@ -39,6 +40,10 @@ def show_launcher():
 
     def choose_launcher():
         result[0] = ("launcher", None)
+        root.destroy()
+
+    def choose_listing_launcher():
+        result[0] = ("listing_launcher", None)
         root.destroy()
 
     input_frame = tk.Frame(root, bg="#2b2b2b")
@@ -124,6 +129,19 @@ def show_launcher():
         command=choose_launcher,
     )
     launcher_button.pack()
+
+    listing_button = tk.Button(
+        root,
+        text="启动页上架模式",
+        width=25,
+        height=2,
+        bg="#4a90d9",
+        fg="white",
+        font=("Microsoft YaHei", 11),
+        relief="flat",
+        command=choose_listing_launcher,
+    )
+    listing_button.pack(pady=(10, 0))
 
     temporary_button = tk.Button(
         root,

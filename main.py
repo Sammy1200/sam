@@ -112,8 +112,10 @@ from vision import is_image_present, load_digit_templates
 from overlay import shutdown_overlay, start_overlay, ui_print, update_score_text
 from listing import execute_listing_routine
 from purchase import recognize_latest_balance_at_trade, run_purchase_loop, reset_purchase_counters
+from startup_listing_mode import run_startup_listing_mode
 from switch import (
     detect_current_execution_slot_from_launcher,
+    enter_startup_listing_target_slot,
     pause_thread6_failure,
     refresh_latest_balance_route,
     resolve_execution_slot_transition,
@@ -490,6 +492,7 @@ def _set_account_state_defaults():
     state.account_limit_reached_at = None
     state.temporary_purchase_mode = False
     state.temporary_target_execution_slot = None
+    state.startup_listing_mode_active = False
 
 
 def _prepare_temporary_purchase_context(target_execution_slot):
@@ -900,6 +903,37 @@ def _pause_after_launcher_start_failure():
     print(f"[启动器] {message}")
     logger.error("[启动器] %s", message)
     os.system('pause')
+
+
+def _handle_startup_listing_normal_handoff(camera, target_slot):
+    if target_slot is None:
+        pause_thread6_failure("解析正常模式目标执行位", "启动页上架模式结束时未解析到目标执行位。")
+        return False
+
+    ui_print(f"上架模式结束，切回正常模式 {target_slot}", save_log=True)
+    logger.info("[上架模式] 扫描完成，准备切回正常模式执行位 %s。", target_slot)
+
+    enter_result = enter_startup_listing_target_slot(
+        camera,
+        target_slot,
+        force_login=True,
+        already_at_launcher=True,
+    )
+    if enter_result["status"] != "success":
+        pause_thread6_failure("启动页上架切回正常模式", f"目标执行位 {target_slot} 进场失败：{enter_result['detail']}")
+        return False
+
+    if not _run_pre_listing_flow(
+        camera,
+        reset_runtime_before_listing=True,
+        reset_reason="启动页上架结束后切回正常模式，预上架前清空当前账号运行态",
+        purchase_reset_reason="启动页上架结束后开始正常模式账号流程",
+        force_balance_check_after_switch=True,
+    ):
+        if not state.switch_flow_paused:
+            pause_thread6_failure("启动页上架切回正常模式预上架衔接", "启动页上架模式切回正常模式后未能完成预上架与账号状态衔接。")
+        return False
+    return True
 
 
 def _finalize_current_account_round(default_status):
@@ -1340,6 +1374,28 @@ def main():
                     purchase_reset_reason="启动后开始当前账号流程",
                 ):
                     return
+            elif mode == "listing_launcher":
+                ui_print("上架模式启动", save_log=True)
+                listing_mode_result = run_startup_listing_mode(camera)
+                if not isinstance(listing_mode_result, dict):
+                    return
+                if listing_mode_result.get("status") == "handoff_to_normal":
+                    target_slot = listing_mode_result.get("target_slot")
+                    if not _handle_startup_listing_normal_handoff(camera, target_slot):
+                        return
+                    run_purchase_loop(
+                        camera,
+                        templates,
+                        temp_success,
+                        temp_shop,
+                        temp_goumai,
+                        temp_meihuo,
+                        temp_diyici,
+                    )
+                    return
+                if listing_mode_result.get("status") != "completed":
+                    return
+                return
             else:
                 target_execution_slot = _temp_slot
                 ui_print("临时抢购模式在 1 秒后启动...")

@@ -2158,6 +2158,97 @@ def update_canonical_account_status_fields(
         conn.close()
 
 
+def update_canonical_account_listing_pause_fields(
+    database_path,
+    nickname,
+    item_quantity,
+    current_balance="",
+    round_listing_success_count=0,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+):
+    """启动页上架模式 F12 专用：只更新库存、余额、本轮上架成功数。"""
+    normalized_nickname = str(nickname or "").strip()
+    if not normalized_nickname:
+        return AccountWriteResult("nickname_missing", "当前昵称为空")
+
+    try:
+        normalized_item_quantity = int(item_quantity)
+    except (TypeError, ValueError):
+        return AccountWriteResult("invalid_item_quantity", f"道具数量无效: {item_quantity}")
+    if normalized_item_quantity < 0:
+        return AccountWriteResult("invalid_item_quantity", f"道具数量为负数: {normalized_item_quantity}")
+
+    try:
+        normalized_listing_success_count = max(0, int(round_listing_success_count))
+    except (TypeError, ValueError):
+        return AccountWriteResult(
+            "invalid_round_listing_success_count",
+            f"invalid round_listing_success_count: {round_listing_success_count}",
+        )
+
+    if not database_path or not os.path.isfile(database_path):
+        return AccountWriteResult("db_unavailable", f"数据库文件不存在: {database_path}")
+
+    normalized_balance = str(current_balance or "").strip()
+
+    try:
+        conn = sqlite3.connect(database_path)
+    except sqlite3.Error as exc:
+        return AccountWriteResult("db_unavailable", f"数据库不可用: {exc}")
+
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _canonical_table_exists(conn, table_name):
+            return AccountWriteResult("schema_not_found", f"canonical 表不存在: {table_name}")
+
+        row = conn.execute(
+            f"SELECT 1 "
+            f"FROM {_quote_identifier(table_name)} "
+            f"WHERE {_quote_identifier('nickname')} = ? "
+            "LIMIT 1",
+            (normalized_nickname,),
+        ).fetchone()
+        if row is None:
+            return AccountWriteResult(
+                "account_not_found",
+                f"未找到昵称为 {normalized_nickname} 的账号记录",
+            )
+
+        set_clauses = [
+            f"{_quote_identifier('baseline_item_count')} = ?",
+            f"{_quote_identifier('round_listing_success_count')} = ?",
+        ]
+        params = [normalized_item_quantity, normalized_listing_success_count]
+        if normalized_balance:
+            set_clauses.append(f"{_quote_identifier('current_balance')} = ?")
+            params.append(normalized_balance)
+        params.append(normalized_nickname)
+
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.execute(
+            f"UPDATE {_quote_identifier(table_name)} "
+            f"SET {', '.join(set_clauses)} "
+            f"WHERE {_quote_identifier('nickname')} = ?",
+            params,
+        )
+        if cursor.rowcount <= 0:
+            conn.rollback()
+            return AccountWriteResult(
+                "account_not_found",
+                f"未找到昵称为 {normalized_nickname} 的账号记录",
+            )
+        conn.commit()
+        return AccountWriteResult("success", "", normalized_item_quantity)
+    except sqlite3.Error as exc:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return AccountWriteResult("write_failed", f"写入失败: {exc}")
+    finally:
+        conn.close()
+
+
 def ensure_canonical_execution_slot_seed_records(
     database_path,
     table_name=CANONICAL_ACCOUNT_STATS_TABLE,
