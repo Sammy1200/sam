@@ -219,6 +219,19 @@ def _wait_unlist_capacity_change(camera_obj, expected_available):
     return {"status": "skipped", "capacity": last_capacity_result}
 
 
+def _sync_unlist_inventory_recovered():
+    state.baseline_item_count += 1
+    if state.overlay_root:
+        try:
+            state.overlay_root.after(0, update_score_text)
+        except Exception:
+            pass
+
+    sync_result = persist_minimal_item_balance_sync()
+    if sync_result.status not in ("success", "skipped"):
+        ui_print(f"库存同步失败：{sync_result.reason}", save_log=True)
+
+
 def _handle_capacity_full_recovery(camera_obj, capacity_result):
     current_capacity = capacity_result
     freed_any_slot = False
@@ -253,6 +266,8 @@ def _handle_capacity_full_recovery(camera_obj, capacity_result):
         updated_capacity = capacity_check_result.get("capacity")
         if capacity_check_result.get("status") == "skipped":
             ui_print("下架跳过校验", save_log=True)
+        elif capacity_check_result.get("status") == "confirmed":
+            _sync_unlist_inventory_recovered()
         if updated_capacity is not None:
             current_capacity = updated_capacity
         freed_any_slot = True
@@ -273,7 +288,7 @@ def _should_skip_listing_by_last_valid_balance():
         last_valid_balance_value is not None
         and last_valid_balance_value > LISTING_SKIP_BALANCE_THRESHOLD
     ):
-        ui_print("余额超4亿跳上架", save_log=True)
+        ui_print("余额超15亿跳上架", save_log=True)
         return True
     return False
 

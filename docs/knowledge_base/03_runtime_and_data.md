@@ -92,6 +92,27 @@ canonical SQLite 是当前系统的唯一真实数据源。
 - “24 小时 05 分”只属于历史口径，不是当前规则。
 - 当前代码和当前文档统一按 24 小时 01 分理解。
 
+## 限制类状态的统一语义
+
+当前以下 3 个正式状态都按“限制类状态”处理：
+
+- `余额不足`
+- `账号限制`
+- `抢购时长已到`
+
+它们的共同语义是：
+
+- 最终写库时会写入或刷新 `last_limit_time`
+- `purchase_running_seconds` 会清零
+- `runtime_window_start_time` 会清空
+- 当前账号本轮三项计数会清零：
+  - `round_purchase_success_count`
+  - `round_purchase_fail_count`
+  - `round_listing_success_count`
+- 网页上的冷却倒计时会启动
+- 网页上的“可运行时间”会立即归 `0`
+- 冷却结束后会自动恢复为 `已准备`
+
 ## 运行态字段、持久化字段、派生字段
 
 ### 运行态字段
