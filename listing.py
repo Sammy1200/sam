@@ -508,29 +508,30 @@ def _handle_capacity_full_recovery(camera_obj, capacity_result):
         frame = safe_get_frame(camera_obj)
         timer_action = recognize_listing_timer_action(frame) if frame is not None else None
         if timer_action == "keep":
-            ui_print("鍛戒腑46/47", save_log=True)
+            ui_print("命中46/47", save_log=True)
             if freed_any_slot:
                 return {"status": "resume", "capacity": current_capacity}
             return {"status": "skip"}
 
         if timer_action is None:
-            ui_print("鏃堕棿鏈‘璁?", save_log=True)
+            ui_print("时间未确认", save_log=True)
 
         recovery_count += 1
         if recovery_count > LISTING_UNLIST_MAX_LOOP_COUNT:
-            return _pause_listing_recovery("瀹归噺婊℃仮澶嶉摼璺弽澶嶆墽琛屼笅鏋讹紝宸茶Е鍙戝惊鐜繚鎶ゃ€?")
+            return _pause_listing_recovery("容量满恢复链路反复执行下架，已触发循环保护。")
 
-        ui_print("鎵ц涓嬫灦", save_log=True)
+        ui_print("执行下架", save_log=True)
         safe_sleep(LISTING_UNLIST_PRE_ACTION_DELAY)
         confirm_result = _confirm_unlist_success(camera_obj)
         if confirm_result.get("status") == "template_missing":
-            return _pause_listing_recovery("涓嬫灦纭妯℃澘缂哄け锛屾棤娉曠户缁仮澶嶄笂鏋朵綅銆?")
+            return _pause_listing_recovery("下架确认模板缺失，无法继续恢复上架位。")
         if confirm_result.get("status") == "not_found":
-            return _pause_listing_recovery("鏈瘑鍒埌涓嬫灦纭寮圭獥锛屾棤娉曠户缁仮澶嶄笂鏋朵綅銆?")
+            return _pause_listing_recovery("未识别到下架确认弹窗，无法继续恢复上架位。")
         if confirm_result.get("status") != "success":
-            return _pause_listing_recovery("涓嬫灦纭寮圭獥鏈秷澶憋紝鏃犳硶缁х画鎭㈠涓婃灦浣嶃€?")
+            return _pause_listing_recovery("下架确认弹窗未消失，无法继续恢复上架位。")
 
         _sync_unlist_inventory_recovered()
+        safe_sleep(0.5)
         updated_capacity = _build_capacity_after_unlist_success(current_capacity)
         if updated_capacity is not None:
             current_capacity = updated_capacity
@@ -670,6 +671,7 @@ def execute_startup_listing_batch(camera_obj, target_success_count):
                     break
                 continue
 
+            safe_sleep(0.5)
             if not first_popup_checked:
                 check_and_click_tishi(camera_obj)
                 first_popup_checked = True
@@ -682,7 +684,7 @@ def execute_startup_listing_batch(camera_obj, target_success_count):
             state.round_listing_success_count += 1
             _sync_listing_success_for_current_account()
             fail_strike = 0
-            ui_print(f"涓婃灦{batch_listed}", save_log=True)
+            ui_print(f"上架{batch_listed}", save_log=True)
             continue
 
             before_current = int(current_capacity[0])
@@ -861,6 +863,7 @@ def execute_listing_routine(camera_obj, is_periodic=False, force_balance_check_a
                     if popup_found and input_price_with_verify():
                         submit_result = _confirm_listing_submit_success(camera_obj)
                         if submit_result.get("status") == "success":
+                            safe_sleep(0.5)
                             if not first_popup_checked:
                                 check_and_click_tishi(camera_obj)
                                 first_popup_checked = True
@@ -875,11 +878,11 @@ def execute_listing_routine(camera_obj, is_periodic=False, force_balance_check_a
                             state.round_listing_success_count += 1
                             _sync_listing_success()
                             fail_strike = 0
-                            ui_print(f"涓婃灦楠岃瘉閫氳繃 {cycle_listed}/{remaining}")
+                            ui_print(f"上架验证通过 {cycle_listed}/{remaining}")
                             continue
 
                         fail_strike += 1
-                        ui_print(f"涓婃灦楠岃瘉澶辫触锛岄噸璇? {fail_strike}/{MAX_LISTING_RETRY}")
+                        ui_print(f"上架验证失败，重试 {fail_strike}/{MAX_LISTING_RETRY}")
                         continue
 
                         safe_sleep(0.08)
