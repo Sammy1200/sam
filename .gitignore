@@ -12,3 +12,4 @@ local_switch_account_config.json
 local_nickname_templates/
 local_web_sync_config.json
 remote_sync_mirror.sqlite3
+desktop.ini
