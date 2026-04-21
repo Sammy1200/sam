@@ -38,6 +38,8 @@ from config import (
     LISTING_UNLIST_NEXT_CYCLE_DELAY,
     LISTING_UNLIST_POST_CONFIRM_DELAY,
     LISTING_UNLIST_PRE_ACTION_DELAY,
+    LISTING_SUBMIT_VERIFY_MATCH_THRESHOLD,
+    LISTING_SUBMIT_VERIFY_REGION,
 )
 from overlay import move_overlay, toggle_pause, ui_print, update_score_text
 from round_persistence import (
@@ -73,6 +75,7 @@ from vision import (
 
 LISTING_TARGET_PRICE = load_listing_target_price()[0]
 _UNLIST_CONFIRM_TEMPLATE = None
+_LISTING_SUBMIT_TEMPLATE = None
 STARTUP_LISTING_CAPACITY_POLL_SECONDS = 10.0
 STARTUP_LISTING_FAIL_LIMIT = 5
 
@@ -111,7 +114,7 @@ def _load_unlist_confirm_template():
     if _UNLIST_CONFIRM_TEMPLATE is not None:
         return _UNLIST_CONFIRM_TEMPLATE
 
-    template_path = os.path.join(TEMPLATE_DIR, "queding1.png")
+    template_path = os.path.join(TEMPLATE_DIR, "queding2.png")
     if not os.path.isfile(template_path):
         return None
 
@@ -120,6 +123,22 @@ def _load_unlist_confirm_template():
         return None
     _UNLIST_CONFIRM_TEMPLATE = _to_gray_image(raw)
     return _UNLIST_CONFIRM_TEMPLATE
+
+
+def _load_listing_submit_template():
+    global _LISTING_SUBMIT_TEMPLATE
+    if _LISTING_SUBMIT_TEMPLATE is not None:
+        return _LISTING_SUBMIT_TEMPLATE
+
+    template_path = os.path.join(TEMPLATE_DIR, "shangjia1.png")
+    if not os.path.isfile(template_path):
+        return None
+
+    raw = cv2.imdecode(np.fromfile(template_path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+    if raw is None:
+        return None
+    _LISTING_SUBMIT_TEMPLATE = _to_gray_image(raw)
+    return _LISTING_SUBMIT_TEMPLATE
 
 
 def _find_template_center(frame, monitor, template, threshold):
@@ -180,27 +199,81 @@ def _pause_listing_recovery(detail):
     return {"status": "pause"}
 
 
-def _click_unlist_confirm(camera_obj):
-    confirm_template = _load_unlist_confirm_template()
-    if confirm_template is None:
-        return False
+def _click_template_and_verify_disappear(
+    camera_obj,
+    monitor,
+    template,
+    threshold,
+    appear_attempts=10,
+    disappear_attempts=5,
+    poll_interval=0.12,
+):
+    if template is None:
+        return {"status": "template_missing"}
+
+    target_center = None
+    for _ in range(appear_attempts):
+        safe_sleep(poll_interval)
+        frame = safe_get_frame(camera_obj)
+        target_center = _find_template_center(frame, monitor, template, threshold)
+        if target_center is not None:
+            break
+
+    if target_center is None:
+        return {"status": "not_found"}
 
     safe_sleep(0.08)
-    fast_click(LISTING_UNLIST_BUTTON_POS)
-    for _ in range(10):
-        safe_sleep(0.12)
+    fast_click(target_center)
+
+    for _ in range(disappear_attempts):
+        safe_sleep(poll_interval)
         frame = safe_get_frame(camera_obj)
-        confirm_center = _find_template_center(
-            frame,
-            LISTING_UNLIST_CONFIRM_REGION,
-            confirm_template,
-            LISTING_UNLIST_CONFIRM_MATCH_THRESHOLD,
-        )
-        if confirm_center is not None:
-            safe_sleep(0.08)
-            fast_click(confirm_center)
-            return True
-    return False
+        target_center = _find_template_center(frame, monitor, template, threshold)
+        if target_center is None:
+            return {"status": "success"}
+
+    return {"status": "still_visible"}
+
+
+def _build_capacity_after_unlist_success(capacity_result):
+    if not capacity_result:
+        return None
+    current_count, total_count = capacity_result
+    current_count = max(0, int(current_count) - 1)
+    return current_count, int(total_count)
+
+
+def _refresh_capacity_after_listing_success(camera_obj, fallback_capacity):
+    refreshed_capacity = _read_capacity_with_retry(camera_obj, retry_count=3, interval_seconds=0.15)
+    if refreshed_capacity is not None:
+        return refreshed_capacity
+    if not fallback_capacity:
+        return None
+    current_count, total_count = fallback_capacity
+    current_count = min(int(total_count), int(current_count) + 1)
+    return current_count, int(total_count)
+
+
+def _confirm_listing_submit_success(camera_obj):
+    submit_template = _load_listing_submit_template()
+    return _click_template_and_verify_disappear(
+        camera_obj,
+        LISTING_SUBMIT_VERIFY_REGION,
+        submit_template,
+        LISTING_SUBMIT_VERIFY_MATCH_THRESHOLD,
+    )
+
+
+def _confirm_unlist_success(camera_obj):
+    confirm_template = _load_unlist_confirm_template()
+    safe_sleep(0.08)
+    fast_click(LISTING_UNLIST_BUTTON_POS)
+    return _click_template_and_verify_disappear(
+        camera_obj,
+        LISTING_UNLIST_CONFIRM_REGION,
+        confirm_template,
+        LISTING_UNLIST_CONFIRM_MATCH_THRESHOLD,
+    )
 
 
 def _wait_unlist_capacity_change(camera_obj, expected_available):
@@ -290,7 +363,7 @@ def _should_skip_listing_by_last_valid_balance():
         last_valid_balance_value is not None
         and last_valid_balance_value > LISTING_SKIP_BALANCE_THRESHOLD
     ):
-        ui_print("余额超10亿跳上架", save_log=True)
+        ui_print("余额超8亿跳上架", save_log=True)
         return True
     return False
 
@@ -426,6 +499,45 @@ def _verify_startup_listing_capacity_change(camera_obj, expected_current):
     return {"status": "unreadable", "capacity": latest_capacity}
 
 
+def _handle_capacity_full_recovery(camera_obj, capacity_result):
+    current_capacity = capacity_result
+    freed_any_slot = False
+    recovery_count = 0
+
+    while True:
+        frame = safe_get_frame(camera_obj)
+        timer_action = recognize_listing_timer_action(frame) if frame is not None else None
+        if timer_action == "keep":
+            ui_print("鍛戒腑46/47", save_log=True)
+            if freed_any_slot:
+                return {"status": "resume", "capacity": current_capacity}
+            return {"status": "skip"}
+
+        if timer_action is None:
+            ui_print("鏃堕棿鏈‘璁?", save_log=True)
+
+        recovery_count += 1
+        if recovery_count > LISTING_UNLIST_MAX_LOOP_COUNT:
+            return _pause_listing_recovery("瀹归噺婊℃仮澶嶉摼璺弽澶嶆墽琛屼笅鏋讹紝宸茶Е鍙戝惊鐜繚鎶ゃ€?")
+
+        ui_print("鎵ц涓嬫灦", save_log=True)
+        safe_sleep(LISTING_UNLIST_PRE_ACTION_DELAY)
+        confirm_result = _confirm_unlist_success(camera_obj)
+        if confirm_result.get("status") == "template_missing":
+            return _pause_listing_recovery("涓嬫灦纭妯℃澘缂哄け锛屾棤娉曠户缁仮澶嶄笂鏋朵綅銆?")
+        if confirm_result.get("status") == "not_found":
+            return _pause_listing_recovery("鏈瘑鍒埌涓嬫灦纭寮圭獥锛屾棤娉曠户缁仮澶嶄笂鏋朵綅銆?")
+        if confirm_result.get("status") != "success":
+            return _pause_listing_recovery("涓嬫灦纭寮圭獥鏈秷澶憋紝鏃犳硶缁х画鎭㈠涓婃灦浣嶃€?")
+
+        _sync_unlist_inventory_recovered()
+        updated_capacity = _build_capacity_after_unlist_success(current_capacity)
+        if updated_capacity is not None:
+            current_capacity = updated_capacity
+        freed_any_slot = True
+        return {"status": "resume", "capacity": current_capacity}
+
+
 def _wait_startup_listing_capacity_available(camera_obj, current_capacity):
     latest_capacity = current_capacity
     while True:
@@ -546,6 +658,32 @@ def execute_startup_listing_batch(camera_obj, target_success_count):
                     ui_print("上架失败5次", save_log=True)
                     break
                 continue
+
+            submit_result = _confirm_listing_submit_success(camera_obj)
+            if submit_result.get("status") != "success":
+                fail_strike += 1
+                ui_print(f"失败{fail_strike}/5", save_log=True)
+                if fail_strike >= STARTUP_LISTING_FAIL_LIMIT:
+                    final_status = "fail_limit"
+                    final_reason = "上架失败5次"
+                    ui_print("上架失败5次", save_log=True)
+                    break
+                continue
+
+            if not first_popup_checked:
+                check_and_click_tishi(camera_obj)
+                first_popup_checked = True
+
+            refreshed_capacity = _refresh_capacity_after_listing_success(camera_obj, current_capacity)
+            if refreshed_capacity is not None:
+                current_capacity = refreshed_capacity
+            batch_listed += 1
+            state.total_listed_count += 1
+            state.round_listing_success_count += 1
+            _sync_listing_success_for_current_account()
+            fail_strike = 0
+            ui_print(f"涓婃灦{batch_listed}", save_log=True)
+            continue
 
             before_current = int(current_capacity[0])
             fast_click(CONFIRM_BTN_POS)
@@ -721,6 +859,29 @@ def execute_listing_routine(camera_obj, is_periodic=False, force_balance_check_a
                             safe_sleep(0.2)
 
                     if popup_found and input_price_with_verify():
+                        submit_result = _confirm_listing_submit_success(camera_obj)
+                        if submit_result.get("status") == "success":
+                            if not first_popup_checked:
+                                check_and_click_tishi(camera_obj)
+                                first_popup_checked = True
+
+                            refreshed_capacity = _refresh_capacity_after_listing_success(camera_obj, current_capacity)
+                            if refreshed_capacity is not None:
+                                current_capacity = refreshed_capacity
+
+                            cycle_listed += 1
+                            total_listed += 1
+                            state.total_listed_count += 1
+                            state.round_listing_success_count += 1
+                            _sync_listing_success()
+                            fail_strike = 0
+                            ui_print(f"涓婃灦楠岃瘉閫氳繃 {cycle_listed}/{remaining}")
+                            continue
+
+                        fail_strike += 1
+                        ui_print(f"涓婃灦楠岃瘉澶辫触锛岄噸璇? {fail_strike}/{MAX_LISTING_RETRY}")
+                        continue
+
                         safe_sleep(0.08)
                         fast_click(CONFIRM_BTN_POS)
 

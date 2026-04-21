@@ -519,6 +519,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                             if state.limit_count >= ACCOUNT_LIMIT_THRESHOLD:
                                 if state.temporary_purchase_mode:
                                     estimated_total = int(state.baseline_item_count)
+                                    state.account_limit_reached_at = None
                                     state.account_round_end_status = "账号限制"
                                     state.overlay_status = "临时账号限制"
                                     async_push_msg(
@@ -527,6 +528,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                                     )
                                     state.need_switch_server = True
                                     return
+                                state.account_limit_reached_at = None
                                 state.account_round_end_status = "账号限制"
                                 state.overlay_status = "账号限制"
                                 state.need_switch_server = True

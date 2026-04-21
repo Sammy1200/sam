@@ -1259,21 +1259,11 @@ def _refresh_latest_balance_before_switch(camera):
         return
 
     if refresh_result["status"] != "success":
-        slot_text = state.current_execution_slot if state.current_execution_slot not in (None, "") else "?"
-        async_push_msg(
-            "【换号前余额刷新失败】继续换号",
-            f"执行位：{slot_text}，未识别最新余额。",
-        )
         logger.warning("[换号前] 最新余额刷新失败：%s", refresh_result["detail"])
         return
 
     balance_info = recognize_latest_balance_at_trade(camera)
     if balance_info is None:
-        slot_text = state.current_execution_slot if state.current_execution_slot not in (None, "") else "?"
-        async_push_msg(
-            "【换号前余额刷新失败】继续换号",
-            f"执行位：{slot_text}，未识别最新余额。",
-        )
         logger.warning("[换号前] 已回到交易行，但未识别到最新余额。")
         return
 
@@ -1383,19 +1373,8 @@ def main():
                     target_slot = listing_mode_result.get("target_slot")
                     if not _handle_startup_listing_normal_handoff(camera, target_slot):
                         return
-                    run_purchase_loop(
-                        camera,
-                        templates,
-                        temp_success,
-                        temp_shop,
-                        temp_goumai,
-                        temp_meihuo,
-                        temp_diyici,
-                    )
+                elif listing_mode_result.get("status") != "completed":
                     return
-                if listing_mode_result.get("status") != "completed":
-                    return
-                return
             else:
                 target_execution_slot = _temp_slot
                 ui_print("临时抢购模式在 1 秒后启动...")

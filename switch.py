@@ -756,31 +756,41 @@ def _try_verify_slot_nickname_once(camera, slot_number):
 
 
 def _retry_slot_nickname_verification_from_server_select(camera, target_slot, server_coord_index):
-    """线程 6 专用：昵称校验失败后，从打开大区列表开始重试。"""
+    """线程 6 专用：昵称校验失败后，重登同执行位账号再回选区重试。"""
     verified, failure_detail = _try_verify_slot_nickname_once(camera, target_slot)
     if verified:
         return True
 
-    for retry_index in range(1, config.SWITCH_STEP_MAX_RETRY + 1):
-        ui_print(f"昵称重试{retry_index}/3", save_log=True)
+    account_id, config_error = _resolve_account_id_for_execution_slot_group(target_slot)
+    if config_error:
+        return pause_thread6_failure("读取本机换号配置", config_error)
+
+    for retry_index in range(1, config.SWITCH_NICKNAME_RELOGIN_RETRY_COUNT + 1):
+        ui_print(f"重登重试{retry_index}/2", save_log=True)
+
+        if not _switch_account_for_slot(camera, account_id):
+            return pause_thread6_failure(
+                "重新登录账号",
+                f"昵称模板重试 {retry_index}/2 时未能重新登录执行位 {target_slot} 对应账号。",
+            )
 
         if not _step02_server_list(camera, suppress_failure_output=True):
             return pause_thread6_failure(
                 "打开大区列表",
-                f"昵称模板重试 {retry_index}/3 前未能重新打开大区列表。",
+                f"昵称模板重试 {retry_index}/2 前未能重新打开大区列表。",
             )
 
         if not _step03_select(camera, server_coord_index, suppress_failure_output=True):
             return pause_thread6_failure(
                 "选择目标大区",
-                f"昵称模板重试 {retry_index}/3 时未能重新选择目标大区。",
+                f"昵称模板重试 {retry_index}/2 时未能重新选择目标大区。",
             )
 
         verified, failure_detail = _try_verify_slot_nickname_once(camera, target_slot)
         if verified:
-            print(f"[切换流程] 执行位 {target_slot} 的昵称模板在第 {retry_index} 次重试后校验通过。")
+            print(f"[切换流程] 执行位 {target_slot} 的昵称模板在第 {retry_index} 次重登重试后校验通过。")
             logger.info(
-                "[切换流程] 执行位 %s 的昵称模板在第 %s 次重试后校验通过。",
+                "[切换流程] 执行位 %s 的昵称模板在第 %s 次重登重试后校验通过。",
                 target_slot,
                 retry_index,
             )
@@ -1648,17 +1658,24 @@ def _switch_account_for_slot_nonblocking(camera, account_id):
 
 
 def _verify_startup_listing_slot_nonblocking(camera, target_slot, server_coord_index):
-    """启动页上架模式专用：昵称校验失败时只返回失败信息。"""
+    """启动页上架模式专用：昵称校验失败时重登同执行位账号后再重试。"""
     verified, failure_detail = _try_verify_slot_nickname_once(camera, target_slot)
     if verified:
         return True, ""
 
-    for retry_index in range(1, config.SWITCH_STEP_MAX_RETRY + 1):
-        ui_print(f"昵称重试{retry_index}/3", save_log=True)
+    account_id, config_error = _resolve_account_id_for_execution_slot_group(target_slot)
+    if config_error:
+        return False, config_error
+
+    for retry_index in range(1, config.SWITCH_NICKNAME_RELOGIN_RETRY_COUNT + 1):
+        ui_print(f"重登重试{retry_index}/2", save_log=True)
+        switched, switch_detail = _switch_account_for_slot_nonblocking(camera, account_id)
+        if not switched:
+            return False, f"昵称模板重试 {retry_index}/2 时未能重新登录执行位 {target_slot} 对应账号：{switch_detail}"
         if not _step02_server_list(camera, suppress_failure_output=True):
-            return False, f"昵称重试 {retry_index}/3 前未能重新打开大区列表。"
+            return False, f"昵称模板重试 {retry_index}/2 前未能重新打开大区列表。"
         if not _step03_select(camera, server_coord_index, suppress_failure_output=True):
-            return False, f"昵称重试 {retry_index}/3 时未能重新选择目标大区。"
+            return False, f"昵称模板重试 {retry_index}/2 时未能重新选择目标大区。"
 
         verified, failure_detail = _try_verify_slot_nickname_once(camera, target_slot)
         if verified:

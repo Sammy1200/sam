@@ -188,16 +188,24 @@ def _read_slot_record(slot_number):
     )
 
 
-def _find_next_candidate(processed_slots):
+def _is_limited_slot_record(record):
+    if record is None:
+        return False
+    return str(record.round_status or "").strip() == ROUND_STATUS_LIMITED
+
+
+def _find_next_candidate(processed_slots, skipped_slots=None):
+    ignored_slots = set(processed_slots or ())
+    ignored_slots.update(skipped_slots or ())
     for slot_number in range(1, int(config.EXECUTION_SLOT_COUNT) + 1):
-        if slot_number in processed_slots:
+        if slot_number in ignored_slots:
             continue
 
         record = _read_slot_record(slot_number)
         if record is None:
             continue
 
-        if str(record.round_status or "").strip() == ROUND_STATUS_LIMITED:
+        if _is_limited_slot_record(record):
             continue
 
         balance_text = str(record.current_balance or "").strip()
@@ -362,11 +370,20 @@ def _push_account_summary(slot_number, reason_text, latest_balance_text):
     async_push_msg(f"【启动页上架完成】执行位 {slot_number}", content)
 
 
-def _finalize_account(slot_number, reason_text, latest_balance_text, limit_account=False):
+def _finalize_account(
+    slot_number,
+    reason_text,
+    latest_balance_text,
+    limit_account=False,
+    round_status_override=None,
+):
     update_last_limit_time = bool(limit_account)
     if latest_balance_text:
         _apply_balance_to_state(latest_balance_text)
-    save_status = ROUND_STATUS_LIMITED if limit_account else ROUND_STATUS_READY
+    if round_status_override is not None:
+        save_status = str(round_status_override or "").strip() or ROUND_STATUS_READY
+    else:
+        save_status = ROUND_STATUS_LIMITED if limit_account else ROUND_STATUS_READY
     persist_result = persist_startup_listing_mode_account_snapshot(
         save_status,
         update_last_limit_time=update_last_limit_time,
@@ -376,12 +393,17 @@ def _finalize_account(slot_number, reason_text, latest_balance_text, limit_accou
     _push_account_summary(slot_number, reason_text, latest_balance_text)
 
 
-def _push_final_summary(processed_slots):
+def _push_final_summary(processed_slots, skipped_limited_slots=None):
+    skipped_limited_slots = set(skipped_limited_slots or ())
     if processed_slots:
         ordered_slots = ",".join(str(slot) for slot in sorted(processed_slots))
-        content = f"本轮已处理执行位：{ordered_slots}\n全部账号执行上架完成。"
+        content = f"本轮已处理执行位：{ordered_slots}"
     else:
         content = "本轮未找到符合条件的账号。"
+    if skipped_limited_slots:
+        skipped_slots_text = ",".join(str(slot) for slot in sorted(skipped_limited_slots))
+        content += f"\n跳过限制执行位：{skipped_slots_text}"
+    content += "\n全部账号执行上架完成。"
     async_push_msg("【启动页上架】全部账号执行完成", content)
 
 
@@ -404,6 +426,7 @@ def _best_effort_exit_after_fatal(camera, slot_number, failure_detail):
 
 def run_startup_listing_mode(camera):
     processed_slots = set()
+    skipped_limited_slots = set()
     current_group = 0
     already_at_launcher = True
     first_entry = True
@@ -415,10 +438,10 @@ def run_startup_listing_mode(camera):
         logger.info("[上架模式] 启动页上架模式开始。")
 
         while True:
-            candidate = _find_next_candidate(processed_slots)
+            candidate = _find_next_candidate(processed_slots, skipped_limited_slots)
             if candidate is None:
                 handoff_target = _select_normal_mode_handoff_target()
-                _push_final_summary(processed_slots)
+                _push_final_summary(processed_slots, skipped_limited_slots)
                 logger.info(
                     "[上架模式] 无剩余候选执行位，准备切回正常模式：slot=%s mode=%s value=%s",
                     handoff_target["target_slot"],
@@ -434,8 +457,15 @@ def run_startup_listing_mode(camera):
                 }
 
             slot_number = int(candidate["slot"])
-            record = candidate["record"]
-            expected_balance_text = candidate["balance_text"]
+            latest_record = _read_slot_record(slot_number)
+            if latest_record is not None and _is_limited_slot_record(latest_record):
+                skipped_limited_slots.add(slot_number)
+                ui_print(f"限号跳过{slot_number}", save_log=True)
+                logger.info("[上架模式] 执行位 %s 当前状态为账号限制，进场前跳过。", slot_number)
+                continue
+
+            record = latest_record or candidate["record"]
+            expected_balance_text = str(record.current_balance or "").strip() or candidate["balance_text"]
             ui_print(f"候选号{slot_number}", save_log=True)
             logger.info(
                 "[上架模式] 命中候选执行位：slot=%s status=%s balance=%s",
@@ -472,6 +502,20 @@ def run_startup_listing_mode(camera):
                     logger.error("[上架模式] 执行位 %s 读库失败。", slot_number)
                     _best_effort_exit_after_fatal(camera, slot_number, "读库失败")
                     return {"status": "failed", "detail": "读库失败", "target_slot": slot_number}
+
+                if _is_limited_slot_record(loaded_record):
+                    skipped_limited_slots.add(slot_number)
+                    ui_print(f"限号跳过{slot_number}", save_log=True)
+                    logger.info("[上架模式] 执行位 %s 进场后读库命中账号限制，跳过本号上架。", slot_number)
+                    exit_result = exit_to_launcher_for_startup_listing(camera)
+                    if exit_result["status"] != "success":
+                        async_push_msg(
+                            "【启动页上架】限号跳过失败",
+                            f"执行位：{slot_number}\n结束原因：账号限制后跳过时未能正常下号\n失败原因：{exit_result['detail']}",
+                        )
+                        return {"status": "failed", "detail": exit_result["detail"], "target_slot": slot_number}
+                    already_at_launcher = True
+                    continue
 
                 latest_balance_info = _read_latest_trade_balance(camera, expected_balance_text, "进场后")
                 latest_balance_text = latest_balance_info["text"]
@@ -515,7 +559,13 @@ def run_startup_listing_mode(camera):
 
                         if batch_result["status"] == "page_end":
                             processed_slots.add(slot_number)
-                            _finalize_account(slot_number, "翻页到底", latest_balance_text, limit_account=False)
+                            _finalize_account(
+                                slot_number,
+                                "翻页到底",
+                                latest_balance_text,
+                                limit_account=False,
+                                round_status_override=loaded_record.round_status,
+                            )
                             break
 
                         processed_slots.add(slot_number)
