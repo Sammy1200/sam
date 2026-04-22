@@ -33,13 +33,24 @@ PORT = WEB_VIEW_PORT
 
 class ReadOnlyViewHandler(BaseHTTPRequestHandler):
     @staticmethod
+    def _parse_scroll_value(raw_value):
+        text = str(raw_value or "").strip()
+        if not text:
+            return None
+        try:
+            value = int(text)
+        except (TypeError, ValueError):
+            return None
+        return max(0, value)
+
+    @staticmethod
     def _build_local_flash_edit_result(query):
         status = str(((query.get("flash_status") or [""])[0] or "")).strip().lower()
         scope = str(((query.get("flash_scope") or [""])[0] or "")).strip().lower()
         nickname = str(((query.get("flash_nickname") or [""])[0] or "")).strip()
         if status != "success" or scope != "local" or not nickname:
             return None
-        return {
+        result = {
             "status": "success",
             "message": "保存成功，已完成写库并回读确认。",
             "scope": "local",
@@ -48,6 +59,13 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
             },
             "field_errors": {},
         }
+        scroll_x = ReadOnlyViewHandler._parse_scroll_value((query.get("flash_scroll_x") or [""])[0])
+        scroll_y = ReadOnlyViewHandler._parse_scroll_value((query.get("flash_scroll_y") or [""])[0])
+        if scroll_x is not None:
+            result["scroll_x"] = scroll_x
+        if scroll_y is not None:
+            result["scroll_y"] = scroll_y
+        return result
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -254,6 +272,8 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         round_status = ((form.get("round_status") or [""])[0] or "").strip()
         current_balance_wan = ((form.get("current_balance_wan") or [""])[0] or "").strip()
         return_to = ((form.get("return_to") or ["detail"])[0] or "detail").strip().lower()
+        scroll_x = self._parse_scroll_value((form.get("scroll_x") or [""])[0])
+        scroll_y = self._parse_scroll_value((form.get("scroll_y") or [""])[0])
 
         update_result = update_account_view_record(
             nickname=nickname,
@@ -267,15 +287,23 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         status_code = 200 if update_result.get("status") == "success" else 400
 
         if update_result.get("status") == "success":
-            redirect_query = urlencode(
-                {
-                    "flash_status": "success",
-                    "flash_scope": "local",
-                    "flash_nickname": nickname,
-                }
-            )
+            redirect_payload = {
+                "flash_status": "success",
+                "flash_scope": "local",
+                "flash_nickname": nickname,
+            }
+            if scroll_x is not None:
+                redirect_payload["flash_scroll_x"] = str(scroll_x)
+            if scroll_y is not None:
+                redirect_payload["flash_scroll_y"] = str(scroll_y)
+            redirect_query = urlencode(redirect_payload)
             self._send_redirect(f"/?{redirect_query}")
             return
+
+        if scroll_x is not None:
+            update_result["scroll_x"] = scroll_x
+        if scroll_y is not None:
+            update_result["scroll_y"] = scroll_y
 
         view_rows_result = get_account_view_rows()
         runtime_result = get_runtime_snapshot()

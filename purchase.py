@@ -49,6 +49,7 @@ from utils import (
     click_exit,
     fast_click,
     gc_checkpoint,
+    get_current_elapsed,
     precise_sleep,
     safe_get_frame,
     smart_wait,

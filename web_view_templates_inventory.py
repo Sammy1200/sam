@@ -351,12 +351,13 @@ def _render_linear_page_title(title, lead_text, rule_text="", kicker="Page", act
 def _render_linear_section_title(title, badge_text, eyebrow="Zone", action_html=""):
     action_block = f'<div class="section-head-actions">{action_html}</div>' if str(action_html or "").strip() else ""
     badge_html = f'<span class="unit-tag">{escape(str(badge_text))}</span>' if str(badge_text or "").strip() else ""
+    eyebrow_html = f'<div class="section-eyebrow">{escape(str(eyebrow))}</div>' if str(eyebrow or "").strip() else ""
     return f"""
 <div class="section-head">
   <div class="section-head-main">
     <div class="section-head-primary">
       <div class="section-title-wrap">
-        <div class="section-eyebrow">{escape(str(eyebrow))}</div>
+        {eyebrow_html}
         <h2 class="section-title">{escape(str(title))}</h2>
       </div>
       {badge_html}
@@ -427,6 +428,123 @@ def _get_local_edit_result(edit_result):
         return None
     scope = str(edit_result.get("scope") or "local").strip()
     return edit_result if scope == "local" else None
+
+
+def _render_inline_row_result(row, edit_result):
+    if not _is_active_edit_row(row, edit_result):
+        return ""
+
+    if str(edit_result.get("status") or "").strip() == "success":
+        return ""
+
+    return f'<div class="inline-result error">{escape(str(edit_result.get("message") or ""))}</div>'
+
+
+def _build_restore_scroll_script(edit_result):
+    if not edit_result:
+        return ""
+
+    scroll_x = edit_result.get("scroll_x")
+    scroll_y = edit_result.get("scroll_y")
+    if scroll_x is None and scroll_y is None:
+        return ""
+
+    try:
+        target_x = max(0, int(scroll_x or 0))
+        target_y = max(0, int(scroll_y or 0))
+    except (TypeError, ValueError):
+        return ""
+
+    return f"""
+<script>
+(function () {{
+  var targetX = {target_x};
+  var targetY = {target_y};
+  function restoreScrollPosition() {{
+    window.scrollTo(targetX, targetY);
+  }}
+  if (document.readyState === "loading") {{
+    document.addEventListener("DOMContentLoaded", restoreScrollPosition, {{ once: true }});
+  }} else {{
+    restoreScrollPosition();
+  }}
+  window.requestAnimationFrame(restoreScrollPosition);
+  window.setTimeout(restoreScrollPosition, 0);
+}})();
+</script>
+"""
+
+
+def _build_inline_save_scroll_script():
+    return """
+<script>
+(function () {
+  function writeScrollPosition(form) {
+    if (!form) return;
+    var scrollXInput = form.querySelector('input[name="scroll_x"]');
+    var scrollYInput = form.querySelector('input[name="scroll_y"]');
+    if (scrollXInput) scrollXInput.value = String(window.scrollX || window.pageXOffset || 0);
+    if (scrollYInput) scrollYInput.value = String(window.scrollY || window.pageYOffset || 0);
+  }
+
+  document.querySelectorAll('form[data-preserve-scroll="true"]').forEach(function (form) {
+    form.addEventListener("submit", function () {
+      writeScrollPosition(form);
+    });
+  });
+})();
+</script>
+"""
+
+
+def _build_flash_cleanup_script(edit_result):
+    if not edit_result or str(edit_result.get("status") or "").strip() != "success":
+        return ""
+
+    return """
+<script>
+(function () {
+  var url = new URL(window.location.href);
+  var changed = false;
+  ["flash_status", "flash_scope", "flash_nickname", "flash_scroll_x", "flash_scroll_y"].forEach(function (key) {
+    if (url.searchParams.has(key)) {
+      url.searchParams.delete(key);
+      changed = true;
+    }
+  });
+  if (changed && window.history && typeof window.history.replaceState === "function") {
+    window.history.replaceState({}, document.title, url.pathname + url.search + url.hash);
+  }
+})();
+</script>
+"""
+
+
+def _build_saved_button_state_script(edit_result):
+    if not edit_result or str(edit_result.get("status") or "").strip() != "success":
+        return ""
+
+    nickname = str(((edit_result.get("form_values") or {}).get("nickname") or "")).strip()
+    if not nickname:
+        return ""
+
+    return f"""
+<script>
+(function () {{
+  var targetNickname = {nickname!r};
+  document.querySelectorAll('form[data-preserve-scroll="true"]').forEach(function (form) {{
+    var nicknameInput = form.querySelector('input[name="nickname"]');
+    if (!nicknameInput || String(nicknameInput.value || "").trim() !== targetNickname) {{
+      return;
+    }}
+    var submitButton = document.querySelector('button[form="' + form.id + '"]');
+    if (submitButton) {{
+      submitButton.classList.add("is-saved");
+    }}
+  }});
+}})();
+</script>
+"""
 
 
 def _render_local_read_only_cells(row):
@@ -500,9 +618,11 @@ def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
 """
     action_cell = f"""
 <div class="inline-save">
-  <form id="{escape(form_id, quote=True)}" method="post" action="/account/update">
+  <form id="{escape(form_id, quote=True)}" method="post" action="/account/update" data-preserve-scroll="true">
     <input type="hidden" name="nickname" value="{escape(nickname, quote=True)}">
     <input type="hidden" name="return_to" value="index">
+    <input type="hidden" name="scroll_x" value="">
+    <input type="hidden" name="scroll_y" value="">
   </form>
   <div class="inline-save-main">
     <button type="submit" form="{escape(form_id, quote=True)}">保存</button>
@@ -973,13 +1093,12 @@ def render_index_page(
         column_classes=account_table_column_classes,
         table_class="account-table account-table-local",
     )
+    page_edit_result_html = _render_edit_result(edit_result)
 
     body_html = f"""
 <div class="page-shell page-shell-home">
-{_render_edit_result(edit_result)}
-
 <div class="section stage-panel stage-primary">
-  {_render_linear_section_title(local_machine_display_name, "本机真实数据", eyebrow="Primary")}
+  {_render_linear_section_title(local_machine_display_name, "本机真实数据", eyebrow="")}
   {local_summary_html}
   {demo_notice_html}
   {local_table_html}
@@ -987,6 +1106,11 @@ def render_index_page(
 
 {remote_sections_html}
 {_render_more_info_entry()}
+{page_edit_result_html}
+{_build_restore_scroll_script(edit_result)}
+{_build_inline_save_scroll_script() if not read_only_mode and not using_demo_rows else ""}
+{_build_saved_button_state_script(edit_result)}
+{_build_flash_cleanup_script(edit_result)}
 {_render_local_relative_time_script() if (rows or remote_machine_sections) else ""}
 {_render_strip_year_display_script()}
 </div>

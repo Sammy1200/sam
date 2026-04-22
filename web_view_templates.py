@@ -832,6 +832,28 @@ def _base_page(title, body_html):
       min-width: 56px;
       flex: 0 0 auto;
     }
+    .inline-save button.is-saved {
+      border-color: rgba(39,166,68,0.42);
+      background:
+        linear-gradient(180deg, rgba(39,166,68,0.2) 0%, rgba(255,255,255,0.05) 100%);
+      color: #d7f5de;
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.05),
+        0 8px 18px -16px rgba(39,166,68,0.45);
+    }
+    .inline-save button.is-saved:hover {
+      background:
+        linear-gradient(180deg, rgba(39,166,68,0.26) 0%, rgba(255,255,255,0.07) 100%);
+      border-color: rgba(92,194,114,0.5);
+      color: #f4fff6;
+    }
+    .inline-save button.is-saved:focus {
+      outline: none;
+      border-color: rgba(92,194,114,0.52);
+      box-shadow:
+        0 0 0 3px rgba(39,166,68,0.18),
+        inset 0 1px 0 rgba(255,255,255,0.05);
+    }
     .inline-result { border-radius: 6px; padding: 6px 8px; font-size: 12px; line-height: 1.5; }
     .inline-result.success { background: rgba(39,166,68,0.12); color: #8ad39c; }
     .inline-result.error { background: rgba(255,123,114,0.12); color: #ff9b94; }
