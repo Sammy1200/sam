@@ -358,19 +358,20 @@ def _resolve_batch_target(balance_value):
     return 0
 
 
-def _push_account_summary(slot_number, reason_text, latest_balance_text):
-    content = (
-        f"执行位：{slot_number}\n"
-        f"昵称：{state.current_nickname}\n"
-        f"结束原因：{reason_text}\n"
-        f"最新余额：{latest_balance_text or '未识别'}\n"
-        f"上架次数：{int(state.round_listing_success_count)}\n"
-        f"道具库存：{int(state.baseline_item_count)}"
+def _append_summary_entry(summary_entries, slot_number, reason_text, latest_balance_text):
+    summary_entries.append(
+        {
+            "execution_slot": int(slot_number),
+            "end_reason": str(reason_text or "").strip() or "未说明",
+            "latest_balance_text": str(latest_balance_text or "").strip() or "未识别",
+            "listing_count": int(state.round_listing_success_count),
+            "item_inventory": int(state.baseline_item_count),
+        }
     )
-    async_push_msg(f"【启动页上架完成】执行位 {slot_number}", content)
 
 
 def _finalize_account(
+    summary_entries,
     slot_number,
     reason_text,
     latest_balance_text,
@@ -390,21 +391,32 @@ def _finalize_account(
     )
     if persist_result.status not in ("success", "skipped"):
         logger.warning("[上架模式] 执行位 %s 收尾写库失败：%s", slot_number, persist_result.reason)
-    _push_account_summary(slot_number, reason_text, latest_balance_text)
+    _append_summary_entry(summary_entries, slot_number, reason_text, latest_balance_text)
 
 
-def _push_final_summary(processed_slots, skipped_limited_slots=None):
+def _push_final_summary(summary_entries, skipped_limited_slots=None):
     skipped_limited_slots = set(skipped_limited_slots or ())
-    if processed_slots:
-        ordered_slots = ",".join(str(slot) for slot in sorted(processed_slots))
-        content = f"本轮已处理执行位：{ordered_slots}"
+    if summary_entries:
+        lines = []
+        for entry in sorted(summary_entries, key=lambda item: item["execution_slot"]):
+            lines.append(
+                "\n".join(
+                    (
+                        f"执行位：{entry['execution_slot']}",
+                        f"结束原因：{entry['end_reason']}",
+                        f"最新余额：{entry['latest_balance_text']}",
+                        f"上架次数：{entry['listing_count']}",
+                        f"道具库存：{entry['item_inventory']}",
+                    )
+                )
+            )
+        content = "\n\n".join(lines)
     else:
         content = "本轮未找到符合条件的账号。"
     if skipped_limited_slots:
         skipped_slots_text = ",".join(str(slot) for slot in sorted(skipped_limited_slots))
         content += f"\n跳过限制执行位：{skipped_slots_text}"
-    content += "\n全部账号执行上架完成。"
-    async_push_msg("【启动页上架】全部账号执行完成", content)
+    async_push_msg("【上架汇总】执行完成", content)
 
 
 def _best_effort_exit_after_fatal(camera, slot_number, failure_detail):
@@ -427,6 +439,7 @@ def _best_effort_exit_after_fatal(camera, slot_number, failure_detail):
 def run_startup_listing_mode(camera):
     processed_slots = set()
     skipped_limited_slots = set()
+    summary_entries = []
     current_group = 0
     already_at_launcher = True
     first_entry = True
@@ -441,7 +454,7 @@ def run_startup_listing_mode(camera):
             candidate = _find_next_candidate(processed_slots, skipped_limited_slots)
             if candidate is None:
                 handoff_target = _select_normal_mode_handoff_target()
-                _push_final_summary(processed_slots, skipped_limited_slots)
+                _push_final_summary(summary_entries, skipped_limited_slots)
                 logger.info(
                     "[上架模式] 无剩余候选执行位，准备切回正常模式：slot=%s mode=%s value=%s",
                     handoff_target["target_slot"],
@@ -522,13 +535,13 @@ def run_startup_listing_mode(camera):
                 latest_balance_value = latest_balance_info["value"]
                 if latest_balance_value is None:
                     processed_slots.add(slot_number)
-                    _finalize_account(slot_number, "余额未识别", latest_balance_text, limit_account=False)
+                    _finalize_account(summary_entries, slot_number, "余额未识别", latest_balance_text, limit_account=False)
                 else:
                     while True:
                         batch_target = _resolve_batch_target(latest_balance_value)
                         if batch_target <= 0:
                             processed_slots.add(slot_number)
-                            _finalize_account(slot_number, "余额超5亿", latest_balance_text, limit_account=False)
+                            _finalize_account(summary_entries, slot_number, "余额超5亿", latest_balance_text, limit_account=False)
                             break
 
                         ui_print(f"批次{batch_target}", save_log=True)
@@ -548,18 +561,19 @@ def run_startup_listing_mode(camera):
                         if batch_result["status"] == "target_reached":
                             if latest_balance_value is not None and latest_balance_value > STARTUP_LISTING_BALANCE_THRESHOLD:
                                 processed_slots.add(slot_number)
-                                _finalize_account(slot_number, "余额超5亿", latest_balance_text, limit_account=False)
+                                _finalize_account(summary_entries, slot_number, "余额超5亿", latest_balance_text, limit_account=False)
                                 break
                             continue
 
                         if batch_result["status"] == "fail_limit":
                             processed_slots.add(slot_number)
-                            _finalize_account(slot_number, "上架失败5次", latest_balance_text, limit_account=True)
+                            _finalize_account(summary_entries, slot_number, "上架失败5次", latest_balance_text, limit_account=True)
                             break
 
                         if batch_result["status"] == "page_end":
                             processed_slots.add(slot_number)
                             _finalize_account(
+                                summary_entries,
                                 slot_number,
                                 "翻页到底",
                                 latest_balance_text,
@@ -569,7 +583,7 @@ def run_startup_listing_mode(camera):
                             break
 
                         processed_slots.add(slot_number)
-                        _finalize_account(slot_number, batch_result["reason"], latest_balance_text, limit_account=False)
+                        _finalize_account(summary_entries, slot_number, batch_result["reason"], latest_balance_text, limit_account=False)
                         break
             except Exception as exc:
                 logger.exception("[上架模式] 执行位 %s 处理异常：%s", slot_number, exc)

@@ -3,10 +3,7 @@
 """
 import gc
 import re
-import threading
 import time
-
-import requests
 
 import state
 from config import (
@@ -48,10 +45,10 @@ from switch import (
     try_return_to_gumu,
 )
 from utils import (
+    async_push_msg as shared_async_push_msg,
     click_exit,
     fast_click,
     gc_checkpoint,
-    get_current_elapsed,
     precise_sleep,
     safe_get_frame,
     smart_wait,
@@ -59,34 +56,8 @@ from utils import (
 from vision import get_balance_recognition, get_price_decision, is_image_present
 
 
-def get_battle_report():
-    elapsed = int(get_current_elapsed())
-    h, m, s = elapsed // 3600, (elapsed % 3600) // 60, elapsed % 60
-    bal_str = str(state.current_balance)
-    return (
-        "--------------------\n"
-        f"当前余额：{bal_str}\n"
-        f"抢购成功：{state.success_count} 次\n"
-        f"抢购失败：{state.fail_count} 次\n"
-        f"累计上架：{state.total_listed_count} 件\n"
-        f"运行时间：{h}小时{m}分{s}秒"
-    )
-
-
 def async_push_msg(title, content):
-    report = get_battle_report()
-    full_content = f"{content}\n\n{report}"
-
-    def send():
-        token = "59653da98d3049adb1deb19660767621"
-        url = "http://www.pushplus.plus/send"
-        data = {"token": token, "title": title, "content": full_content, "template": "txt"}
-        try:
-            requests.post(url, json=data, timeout=3)
-        except:
-            pass
-
-    threading.Thread(target=send, daemon=True).start()
+    shared_async_push_msg(title, content)
 
 
 def reset_purchase_counters(reason):
@@ -201,62 +172,6 @@ def recognize_latest_balance_at_trade(camera):
     return None
 
 
-def check_balance_limit(frame):
-    """识别余额，余额不足时直接触发自动换号。"""
-    recognition = get_balance_recognition(frame)
-    recognized_balance_text = str(recognition.get("text") or "").strip()
-    recognized_balance_confirmed = bool(recognition.get("confirmed")) and bool(recognized_balance_text)
-
-    previous_confirmed_balance_text = str(state.last_valid_balance or "").strip()
-    previous_confirmed_balance_value = parse_balance_text_to_value(previous_confirmed_balance_text)
-    recognized_balance_value = parse_balance_text_to_value(recognized_balance_text)
-
-    effective_balance_text = previous_confirmed_balance_text
-    effective_balance_value = previous_confirmed_balance_value
-    balance_display_mode = "沿" if previous_confirmed_balance_text else ""
-
-    if recognized_balance_confirmed:
-        effective_balance_text = recognized_balance_text
-        effective_balance_value = recognized_balance_value
-        balance_display_mode = "新"
-        if effective_balance_value is not None:
-            state.last_valid_balance = effective_balance_text
-    elif previous_confirmed_balance_text:
-        effective_balance_text = previous_confirmed_balance_text
-        effective_balance_value = previous_confirmed_balance_value
-        balance_display_mode = "沿"
-    else:
-        effective_balance_text = str(state.current_balance or "").strip()
-        effective_balance_value = None
-        balance_display_mode = "待"
-
-    state.balance_display_mode = balance_display_mode
-    if effective_balance_text:
-        state.current_balance = effective_balance_text
-        state.round_current_balance = effective_balance_text
-    elif balance_display_mode == "待":
-        state.round_current_balance = ""
-    if state.overlay_root:
-        state.overlay_root.after(0, update_score_text)
-
-    try:
-        real_val = effective_balance_value
-        if real_val is None:
-            return True
-        if real_val < BALANCE_INSUFFICIENT_THRESHOLD:
-            state.account_round_end_status = "余额不足"
-            state.overlay_status = "余额不足"
-            ui_print(f"余额不足，当前金额 {effective_balance_text}，准备自动换号", save_log=True)
-            print(f"[余额不足] 当前余额：{effective_balance_text}，已触发自动换号")
-            async_push_msg("【余额不足】准备换号换区", f"当前余额：{effective_balance_text}，已触发自动换号。")
-            state.need_switch_server = True
-            return False
-    except:
-        pass
-
-    return True
-
-
 def check_balance_limit(frame, camera=None, try_refresh_on_low=False):
     """识别余额；可选在余额不足时先补金币再决定是否换号。"""
     balance_info = _update_balance_state_from_recognition(get_balance_recognition(frame))
@@ -276,10 +191,10 @@ def check_balance_limit(frame, camera=None, try_refresh_on_low=False):
                             state.overlay_status = "抢购中"
                             ui_print(f"补领金币后余额恢复：{refreshed_balance['text']}", save_log=True)
                             return True
-                        return _finalize_balance_insufficient(refreshed_balance["text"], send_push=True)
+                        return _finalize_balance_insufficient(refreshed_balance["text"], send_push=False)
                 return _finalize_balance_insufficient(
                     effective_balance_text,
-                    send_push=refresh_result["status"] != "no_gold",
+                    send_push=False,
                 )
     except:
         pass
@@ -406,7 +321,6 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
 
                 if (current_time - last_refresh > STUCK_PUSH_INTERVAL and
                         current_time - last_stuck_push_time > STUCK_PUSH_INTERVAL):
-                    async_push_msg("【2号电脑】脚本卡顿提醒", "已超过 5 分钟未执行刷新。")
                     last_stuck_push_time = current_time
 
                 raw_frame = safe_get_frame(camera)
@@ -517,14 +431,9 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                             ui_print(f"暂无道具可抢（{state.limit_count}/{ACCOUNT_LIMIT_THRESHOLD}）", is_replace=True)
                             if state.limit_count >= ACCOUNT_LIMIT_THRESHOLD:
                                 if state.temporary_purchase_mode:
-                                    estimated_total = int(state.baseline_item_count)
                                     state.account_limit_reached_at = None
                                     state.account_round_end_status = "账号限制"
                                     state.overlay_status = "临时账号限制"
-                                    async_push_msg(
-                                        "【临时账号限制】准备切换目标执行位",
-                                        f"连续多次店铺为空，临时模式结束后将切换目标执行位继续。当前道具库存：{estimated_total}",
-                                    )
                                     state.need_switch_server = True
                                     return
                                 state.account_limit_reached_at = None
@@ -563,7 +472,6 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                                     state.unknown_page_count += 1
                                     if state.unknown_page_count >= 5:
                                         state.overlay_status = "未知异常"
-                                        async_push_msg("【2号电脑】未知页面卡死", "长时间停留在未知页面。")
                                         state.unknown_page_count = 0
                                         if not state.IS_PAUSED:
                                             toggle_pause()

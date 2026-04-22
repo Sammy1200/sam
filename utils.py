@@ -6,6 +6,7 @@ import time
 import gc
 import logging
 import queue
+import re
 from datetime import datetime
 import tkinter as tk
 import numpy as np
@@ -16,6 +17,7 @@ import requests
 import sys
 import config
 import state
+from machine_sync_config import get_machine_sync_runtime_context
 from config import SCROLL_POS, PRE_EXIT_CLICK_DELAY, SCRIPT_DIR
 
 OVERLAY_NORMAL_GEOMETRY = "+20+20"
@@ -111,6 +113,8 @@ def setup_logger():
 
 logger = setup_logger()
 _OVERLAY_TASK_QUEUE = queue.Queue()
+_PUSH_MACHINE_LABEL_CACHE = None
+_PUSH_MACHINE_PREFIX_PATTERN = re.compile(r"^(?:【(?:1号电脑|2号电脑|3号电脑|本机)】)+")
 
 
 def flush_logger_handlers():
@@ -476,33 +480,86 @@ def get_current_elapsed():
     return state.total_running_time
 
 
-def _get_battle_report():
-    elapsed = int(get_current_elapsed())
-    h, m, s = elapsed // 3600, (elapsed % 3600) // 60, elapsed % 60
-    bal_str = str(state.current_balance)
-    return (
-        f"--------------------\n"
-        f"余额：{bal_str}\n"
-        f"抢购成功：{state.success_count}\n"
-        f"抢购失败：{state.fail_count}\n"
-        f"累计上架：{state.total_listed_count}\n"
-        f"运行时长：{h}小时 {m}分 {s}秒"
+def _normalize_machine_display_name(machine_display_name, machine_id):
+    normalized_display_name = str(machine_display_name or "").strip()
+    normalized_machine_id = str(machine_id or "").strip().lower()
+
+    if normalized_display_name in ("1号电脑", "2号电脑", "3号电脑"):
+        return normalized_display_name
+
+    machine_id_mapping = {
+        "pc1": "1号电脑",
+        "pc2": "2号电脑",
+        "pc3": "3号电脑",
+    }
+    if normalized_machine_id in machine_id_mapping:
+        return machine_id_mapping[normalized_machine_id]
+
+    display_name_match = re.search(r"([123])号电脑", normalized_display_name)
+    if display_name_match:
+        return f"{display_name_match.group(1)}号电脑"
+
+    return "本机"
+
+
+def get_push_machine_label():
+    global _PUSH_MACHINE_LABEL_CACHE
+    if _PUSH_MACHINE_LABEL_CACHE:
+        return _PUSH_MACHINE_LABEL_CACHE
+
+    runtime_context = get_machine_sync_runtime_context()
+    _PUSH_MACHINE_LABEL_CACHE = _normalize_machine_display_name(
+        runtime_context.get("machine_display_name"),
+        runtime_context.get("machine_id"),
     )
+    return _PUSH_MACHINE_LABEL_CACHE
+
+
+def _build_push_execution_slot_line():
+    raw_slot = state.current_execution_slot
+    try:
+        normalized_slot = int(raw_slot)
+        if normalized_slot > 0:
+            return f"执行位：{normalized_slot}"
+    except (TypeError, ValueError):
+        pass
+
+    slot_text = str(raw_slot or "").strip()
+    if slot_text.isdigit() and int(slot_text) > 0:
+        return f"执行位：{slot_text}"
+    return "执行位：未识别"
+
+
+def format_push_payload(title, content=""):
+    normalized_title = str(title or "").strip()
+    normalized_title = _PUSH_MACHINE_PREFIX_PATTERN.sub("", normalized_title)
+    normalized_title = f"【{get_push_machine_label()}】{normalized_title}" if normalized_title else f"【{get_push_machine_label()}】"
+
+    normalized_content = str(content or "").replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+    content_lines = normalized_content.split("\n") if normalized_content else []
+    execution_line_index = next(
+        (index for index, line in enumerate(content_lines) if str(line).strip().startswith("执行位：")),
+        None,
+    )
+
+    if execution_line_index is None:
+        content_lines.insert(0, _build_push_execution_slot_line())
+    else:
+        execution_line = content_lines.pop(execution_line_index)
+        content_lines.insert(0, execution_line)
+
+    return normalized_title, "\n".join(content_lines).strip("\n")
 
 
 def push_msg_sync(title, content=""):
-    report = _get_battle_report()
-    full_content = f"{content}\n\n{report}" if content else report
+    normalized_title, normalized_content = format_push_payload(title, content)
     token = "59653da98d3049adb1deb19660767621"
     url = "http://www.pushplus.plus/send"
-    data = {"token": token, "title": title, "content": full_content, "template": "txt"}
+    data = {"token": token, "title": normalized_title, "content": normalized_content, "template": "txt"}
     requests.post(url, json=data, timeout=3)
 
 
 def async_push_msg(title, content=""):
-    report = _get_battle_report()
-    full_content = f"{content}\n\n{report}" if content else report
-
     def send():
         try:
             push_msg_sync(title, content)
