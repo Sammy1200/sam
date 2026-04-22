@@ -5,6 +5,7 @@ import tkinter as tk
 import listing
 import state
 from local_switch_account_config import save_listing_target_price
+from machine_sync_config import get_machine_sync_runtime_context
 from overlay import enqueue_overlay_task
 from round_persistence import persist_minimal_item_balance_sync
 
@@ -59,6 +60,46 @@ def _destroy_editor():
     _editor_win = None
 
 
+def _format_editor_machine_label():
+    runtime_context = get_machine_sync_runtime_context()
+    machine_id = str(runtime_context.get("machine_id") or "").strip().lower()
+    machine_display_name = str(runtime_context.get("machine_display_name") or "").strip()
+
+    machine_id_to_pc = {
+        "pc1": "PC1",
+        "pc2": "PC2",
+        "pc3": "PC3",
+    }
+    if machine_id in machine_id_to_pc:
+        return machine_id_to_pc[machine_id]
+
+    for suffix in ("1", "2", "3"):
+        if machine_display_name == f"{suffix}号电脑":
+            return f"PC{suffix}"
+
+    fallback_machine_id = str(runtime_context.get("machine_id") or "").strip()
+    return machine_display_name or fallback_machine_id or "本机"
+
+
+def _format_editor_execution_slot():
+    raw_slot = state.current_execution_slot
+    try:
+        normalized_slot = int(raw_slot)
+        if normalized_slot > 0:
+            return str(normalized_slot)
+    except (TypeError, ValueError):
+        pass
+
+    slot_text = str(raw_slot or "").strip()
+    if slot_text.isdigit() and int(slot_text) > 0:
+        return slot_text
+    return "--"
+
+
+def _build_editor_title_text():
+    return f" {_format_editor_machine_label()} - {_format_editor_execution_slot()}"
+
+
 def _create_editor():
     global _editor_win
     _destroy_editor()
@@ -89,7 +130,7 @@ def _create_editor():
                          font=_FONT_TITLE, fg=_ACCENT, bg=_BG_HEADER)
     lbl_arrow.pack(side="left")
 
-    lbl_title = tk.Label(header, text=" 参数修改",
+    lbl_title = tk.Label(header, text=_build_editor_title_text(),
                          font=_FONT_TITLE, fg=_FG, bg=_BG_HEADER)
     lbl_title.pack(side="left")
 

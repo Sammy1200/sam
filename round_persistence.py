@@ -21,6 +21,7 @@ from account_db import (
     read_canonical_account_stats_record,
     read_preferred_canonical_account_stats_record_by_execution_slot,
     save_canonical_account_stats_record,
+    clear_canonical_account_round_listing_success_count,
     update_canonical_account_listing_pause_fields,
     update_canonical_account_status_fields,
     update_canonical_account_runtime_fields,
@@ -660,6 +661,35 @@ def persist_startup_listing_mode_account_snapshot(round_status, update_last_limi
     return result
 
 
+def persist_startup_listing_mode_listing_count_clear():
+    """启动页上架模式下号成功后，只清当前账号已写库的本轮上架成功数。"""
+    if state.temporary_purchase_mode:
+        return AccountWriteResult("skipped", "临时模式不写入 canonical SQLite")
+
+    target = _resolve_current_canonical_target()
+    nickname = str(target.get("nickname") or "").strip()
+    database_path = str(target.get("database_path") or "").strip()
+    table_name = target.get("table_name") or CANONICAL_ACCOUNT_STATS_TABLE
+    if state.account_read_status == "account_not_found" or not state.account_record_loaded or not nickname:
+        return AccountWriteResult("skipped", f"当前账号未加载 SQLite 记录: {nickname}")
+    if not database_path:
+        return AccountWriteResult("db_unavailable", "canonical database path is empty")
+
+    write_time = datetime.now()
+    result = clear_canonical_account_round_listing_success_count(
+        database_path,
+        nickname,
+        table_name=table_name,
+        updated_at=write_time,
+    )
+    if result.status == "success":
+        state.updated_at = write_time
+        logger.info("[账号数据] 启动页上架模式下号后已清空上架成功写库值：昵称=%s", nickname)
+    elif result.status != "skipped":
+        logger.warning("[账号数据] 启动页上架模式清空上架成功写库值失败：昵称=%s 原因=%s", nickname, result.reason)
+    return result
+
+
 def _persist_startup_listing_mode_pause_resume_snapshot(event_name):
     """启动页上架模式 F12 专用：只写库存、余额、本轮上架成功数。"""
     if state.temporary_purchase_mode:
@@ -792,6 +822,7 @@ def persist_resume_snapshot():
         reload_result = _reload_current_account_state_from_canonical()
         if reload_result.status != "success":
             logger.warning("[账号数据] F12 恢复后回灌当前账号数据失败：昵称=%s 原因=%s", nickname, reload_result.reason)
+        _schedule_remote_snapshot_event("F12恢复状态变更")
         logger.info("[账号数据] F12 恢复状态写库完成：昵称=%s 状态=%s", nickname, ROUND_STATUS_RUNNING)
     elif result.status == "skipped":
         logger.info("[账号数据] F12 恢复跳过写库：昵称=%s 原因=%s", nickname, result.reason)

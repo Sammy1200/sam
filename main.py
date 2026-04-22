@@ -405,6 +405,12 @@ def _format_timer_state():
     )
 
 
+def _log_and_schedule_ready_restore_success(reason, nickname):
+    print(f"[账号数据] {reason}，账号状态已自动恢复为“已准备”：{nickname}")
+    logger.info("[账号数据] %s，账号状态已自动恢复为“已准备”：%s", reason, nickname)
+    _schedule_remote_snapshot_event("冷却结束自动恢复已准备")
+
+
 def _restore_current_account_ready_status(reason):
     if state.temporary_purchase_mode:
         return None
@@ -447,8 +453,7 @@ def _restore_current_account_ready_status(reason):
     state.account_is_waiting = False
     state.account_read_error = ""
     state.overlay_status = "抢购中"
-    print(f"[账号数据] {reason}，账号状态已自动恢复为“已准备”。")
-    logger.info("[账号数据] %s，账号状态已自动恢复为“已准备”。", reason)
+    _log_and_schedule_ready_restore_success(reason, restored_record.nickname)
     return restore_result
 
 
@@ -741,8 +746,7 @@ def _load_current_account_context():
     )
     if restore_result.status == "success" and restored_record is not None:
         record = restored_record
-        print(f"[账号数据] 读取账号后检测到冷却已结束，已自动恢复为“已准备”：{record.nickname}")
-        logger.info("[账号数据] 读取账号后检测到冷却已结束，已自动恢复为“已准备”：%s", record.nickname)
+        _log_and_schedule_ready_restore_success("读取账号后检测到冷却已结束", record.nickname)
     elif restore_result.status not in ("skipped", "account_not_found"):
         print(f"[账号数据] 读取账号后自动恢复“已准备”失败：{restore_result.reason}")
         logger.warning("[账号数据] 读取账号后自动恢复“已准备”失败：%s", restore_result.reason)

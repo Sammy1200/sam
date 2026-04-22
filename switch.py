@@ -14,9 +14,11 @@ Public APIs:
   switch_account_for_temporary_target_slot(camera, target_execution_slot)
 """
 
+import ctypes
 import os
 import time
 import traceback
+from ctypes import wintypes
 
 import cv2
 import pyautogui
@@ -95,6 +97,91 @@ _SWITCH_WAIT_KEY_LABELS = {
 }
 _GOLD_STEP_SKIP_CLOSE = "skip_close"
 _GOLD_STEP_NEED_CLOSE = "need_close"
+
+
+def _schedule_status_change_snapshot(event_name):
+    try:
+        from remote_sync import schedule_local_snapshot_report
+    except Exception as exc:
+        logger.warning("[网页同步] 状态变更快照模块加载失败：event=%s error=%s", event_name, exc)
+        return
+
+    try:
+        result = schedule_local_snapshot_report(event_name)
+    except Exception as exc:
+        logger.warning("[网页同步] 状态变更快照触发失败：event=%s error=%s", event_name, exc)
+        return
+
+    status = str(result.get("status") or "").strip()
+    if status == "scheduled":
+        logger.info("[网页同步] 已安排状态变更最小快照：%s", event_name)
+    elif status == "error":
+        logger.warning("[网页同步] 状态变更最小快照失败：event=%s reason=%s", event_name, result.get("message"))
+
+
+def _get_window_text(hwnd):
+    length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+    buffer = ctypes.create_unicode_buffer(length + 1)
+    ctypes.windll.user32.GetWindowTextW(hwnd, buffer, length + 1)
+    return str(buffer.value or "").strip()
+
+
+def _find_wegame_window():
+    if os.name != "nt":
+        return None, ""
+
+    user32 = ctypes.windll.user32
+    matches = []
+    enum_windows_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    @enum_windows_proc
+    def _enum_proc(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+
+        title = _get_window_text(hwnd)
+        if "wegame" in title.lower():
+            matches.append((hwnd, title))
+        return True
+
+    user32.EnumWindows(_enum_proc, 0)
+    if not matches:
+        return None, ""
+
+    matches.sort(key=lambda item: (0 if item[1] == "WeGame" else 1, len(item[1])))
+    return matches[0]
+
+
+def _try_bring_wegame_to_front():
+    if os.name != "nt":
+        return False
+
+    hwnd, title = _find_wegame_window()
+    if hwnd is None:
+        logger.info("[切换流程] 未找到 WeGame 启动页窗口。")
+        return False
+
+    user32 = ctypes.windll.user32
+    sw_restore = 9
+    sw_showmaximized = 3
+    swp_nomove = 0x0002
+    swp_nosize = 0x0001
+    swp_showwindow = 0x0040
+
+    try:
+        logger.info("[切换流程] 尝试将 WeGame 窗口拉到前台：title=%s hwnd=%s", title, hwnd)
+        user32.ShowWindow(hwnd, sw_restore)
+        user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, swp_nomove | swp_nosize | swp_showwindow)
+        user32.SetWindowPos(hwnd, -2, 0, 0, 0, 0, swp_nomove | swp_nosize | swp_showwindow)
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        user32.ShowWindow(hwnd, sw_showmaximized)
+        safe_sleep(config.SWITCH_MAXIMIZE_WAIT_SECONDS)
+        logger.info("[切换流程] 已尝试将 WeGame 窗口拉到前台。")
+        return True
+    except Exception as exc:
+        logger.warning("[切换流程] 拉起 WeGame 窗口失败：%s", exc)
+        return False
 
 
 def _tpl(key):
@@ -224,6 +311,116 @@ def _confirm_white(camera):
     # 白点刚出现时页面可能还在轻微过渡，这里缩短为 0.5 秒复检，既保留二次确认又减少阻塞。
     safe_sleep(config.SWITCH_WHITE_CONFIRM_INTERVAL_SECONDS)
     return _pixels_white(camera)
+
+
+def _detect_launcher_state(camera):
+    """识别当前是否位于启动页，以及是否处于非全屏状态。"""
+    heping_center = _match_center(
+        camera,
+        "heping",
+        config.SWITCH_HEPING_REGION_PRIMARY,
+        threshold=config.SWITCH_UI_MATCH_THRESHOLD,
+    )
+    if heping_center is not None:
+        return "launcher_fullscreen", heping_center
+
+    heping_center = _match_center(
+        camera,
+        "heping",
+        config.SWITCH_HEPING_REGION_SECONDARY,
+        threshold=config.SWITCH_UI_MATCH_THRESHOLD,
+    )
+    if heping_center is not None:
+        return "launcher_windowed", heping_center
+
+    return "unknown", None
+
+
+def _click_launcher_heping_center(heping_center):
+    """已确认在启动页时，先点击 heping 中心点，再继续后续启动页点击任务。"""
+    if heping_center is None:
+        return False
+
+    print("[切换流程] 已识别到启动页，先点击 heping 中心点。")
+    logger.info("[切换流程] 已识别到启动页，先点击 heping 中心点。")
+    fast_click(heping_center)
+    safe_sleep(config.SWITCH_DETECTED_CLICK_DELAY_SECONDS)
+    return True
+
+
+def _restore_launcher_fullscreen_from_heping_center(heping_center):
+    """命中启动页非全屏模板后，先点击中心点，再恢复全屏。"""
+    if heping_center is None:
+        return False
+
+    print("[切换流程] 识别到启动页非全屏，点击中心点后恢复全屏。")
+    logger.info("[切换流程] 识别到启动页非全屏，点击中心点后恢复全屏。")
+    fast_click(heping_center)
+    safe_sleep(config.SWITCH_DETECTED_CLICK_DELAY_SECONDS)
+    pyautogui.hotkey("winleft", "up")
+    safe_sleep(config.SWITCH_MAXIMIZE_WAIT_SECONDS)
+    return True
+
+
+def _check_launcher_ready_with_heping_fix(camera):
+    """统一判断启动页状态；仅 heping 命中才视为已识别到启动页。"""
+    launcher_state, heping_center = _detect_launcher_state(camera)
+    if launcher_state == "launcher_fullscreen":
+        return True, launcher_state
+
+    if launcher_state == "launcher_windowed":
+        if not _restore_launcher_fullscreen_from_heping_center(heping_center):
+            return False, "windowed_no_center"
+        launcher_state, _ = _detect_launcher_state(camera)
+        if launcher_state == "launcher_fullscreen":
+            return True, f"restored_{launcher_state}"
+        return False, "restored_unknown"
+
+    return False, launcher_state
+
+
+def _wait_for_launcher_heping_ready(camera, timeout_seconds):
+    """等待启动页 heping 出现；若首次未识别到则尝试拉前台后重试。"""
+    end_time = time.time() + max(0.1, float(timeout_seconds))
+    while time.time() < end_time:
+        launcher_ready, launcher_source = _check_launcher_ready_with_heping_fix(camera)
+        if launcher_ready:
+            return True, launcher_source
+        safe_sleep(0.5)
+
+    logger.info("[切换流程] 未识别到启动页，尝试将 WeGame 拉到前台。")
+    if _try_bring_wegame_to_front():
+        for _ in range(3):
+            launcher_ready, launcher_source = _check_launcher_ready_with_heping_fix(camera)
+            if launcher_ready:
+                return True, launcher_source
+            safe_sleep(0.5)
+
+    return False, "launcher_not_detected"
+
+
+def _ensure_launcher_click_ready(camera):
+    """启动页点击统一前置守卫：先识别 heping，必要时拉前台，再点中心点。"""
+    launcher_state, heping_center = _detect_launcher_state(camera)
+    if launcher_state == "unknown":
+        logger.info("[切换流程] 启动页点击前未识别到 heping，尝试将 WeGame 拉到前台。")
+        if _try_bring_wegame_to_front():
+            launcher_state, heping_center = _detect_launcher_state(camera)
+
+    if launcher_state == "launcher_fullscreen":
+        if _click_launcher_heping_center(heping_center):
+            return True, ""
+        return False, "已识别到启动页，但未定位到 hepingjingying.png 中心点。"
+
+    if launcher_state == "launcher_windowed":
+        if not _restore_launcher_fullscreen_from_heping_center(heping_center):
+            return False, "识别到启动页非全屏，但未定位到 hepingjingying.png 中心点。"
+        launcher_state, _ = _detect_launcher_state(camera)
+        if launcher_state == "launcher_fullscreen":
+            return True, ""
+        return False, "识别到启动页非全屏，恢复全屏后仍未确认启动页。"
+
+    return False, "未识别到启动页（hepingjingying.png），拉前台重试后仍失败。"
 
 
 def _find_exact_rgb_point(camera, region, target_rgb, tolerance=0):
@@ -379,37 +576,23 @@ def _wait_for_boundary_start_qidong(camera):
         fixup_retry_count=config.SWITCH_BOUNDARY_START_QIDONG_FIXUP_RETRY_COUNT,
         fixup_retry_interval=config.SWITCH_BOUNDARY_START_QIDONG_FIXUP_RETRY_INTERVAL_SECONDS,
     )
-    for attempt in range(1, config.SWITCH_BOUNDARY_START_QIDONG_RETRY_COUNT + 1):
-        if _match(
-            camera,
-            "qd",
-            config.SWITCH_BOUNDARY_START_QIDONG_REGION,
-            threshold=config.SWITCH_UI_MATCH_THRESHOLD,
-        ):
-            print(f"[切换流程] 已在第 {attempt} 次识别到启动按钮。")
-            logger.info("[切换流程] 已在第 %s 次识别到启动按钮。", attempt)
-            return True
-        safe_sleep(config.SWITCH_BOUNDARY_START_QIDONG_RETRY_INTERVAL_SECONDS)
-
-    # 原等待上限内仍未看到启动按钮时，先尝试窗口最大化修复一次，再补 5 次识别，避免只是窗口状态导致误判失败。
-    print("[切换流程] 启动按钮未出现，尝试窗口最大化后重试。")
-    logger.info("[切换流程] 启动按钮未出现，尝试窗口最大化后重试。")
-    pyautogui.hotkey("winleft", "up")
-    for attempt in range(1, config.SWITCH_BOUNDARY_START_QIDONG_FIXUP_RETRY_COUNT + 1):
-        if _match(
-            camera,
-            "qd",
-            config.SWITCH_BOUNDARY_START_QIDONG_REGION,
-            threshold=config.SWITCH_UI_MATCH_THRESHOLD,
-        ):
-            print(f"[切换流程] 窗口修复后第 {attempt} 次识别到启动按钮。")
-            logger.info("[切换流程] 窗口修复后第 %s 次识别到启动按钮。", attempt)
-            return True
-        safe_sleep(config.SWITCH_BOUNDARY_START_QIDONG_FIXUP_RETRY_INTERVAL_SECONDS)
+    timeout_seconds = (
+        config.SWITCH_BOUNDARY_START_QIDONG_RETRY_COUNT
+        * config.SWITCH_BOUNDARY_START_QIDONG_RETRY_INTERVAL_SECONDS
+    )
+    launcher_ready, launcher_source = _wait_for_launcher_heping_ready(camera, timeout_seconds)
+    if launcher_ready:
+        if str(launcher_source).startswith("restored_"):
+            print("[切换流程] 修复全屏后已确认启动页。")
+            logger.info("[切换流程] 修复全屏后已确认启动页。")
+        else:
+            print("[切换流程] 已识别到启动页。")
+            logger.info("[切换流程] 已识别到启动页。")
+        return True
 
     return pause_thread6_failure(
         "返回启动页确认",
-        "未能在边界切换前确认回到启动页（qidong.png 未匹配）。",
+        "未能在边界切换前确认回到启动页（hepingjingying.png 未匹配）。",
     )
 
 
@@ -559,6 +742,49 @@ def _log_switch_waits(step_name, **kwargs):
     logger.info(message)
 
 
+def _wait_for_switch_user_entry_with_foreground_retry(camera):
+    """识别切换账号入口；首次失败时尝试拉前台后重试 1 次。"""
+    launcher_ready, detail = _ensure_launcher_click_ready(camera)
+    if not launcher_ready:
+        logger.error("[切换流程] 切换账号入口前置守卫失败：%s", detail)
+        return None, detail
+
+    logger.info("[切换流程] 切换账号入口模板：qiehuan.png")
+    print("[切换流程] 切换账号入口模板：qiehuan.png")
+
+    fast_click(config.SWITCH_ACCOUNT_LIST_BUTTON_POS)
+    safe_sleep(config.SWITCH_ACCOUNT_LIST_CLICK_WAIT_SECONDS)
+
+    center = _wait_for_match_center(
+        camera,
+        "qiehuan",
+        config.SWITCH_USER_TEMPLATE_REGION,
+        timeout=config.SWITCH_USER_ENTRY_MATCH_TIMEOUT_SECONDS,
+        threshold=config.SWITCH_UI_MATCH_THRESHOLD,
+    )
+    if center is not None:
+        return center, ""
+
+    logger.warning("[切换流程] 未匹配到切换账号入口，准备尝试拉前台后重试 1 次。")
+    print("[切换流程] 未匹配到切换账号入口，准备尝试拉前台后重试 1 次。")
+    _try_bring_wegame_to_front()
+    safe_sleep(1.0)
+
+    fast_click(config.SWITCH_ACCOUNT_LIST_BUTTON_POS)
+    safe_sleep(config.SWITCH_ACCOUNT_LIST_CLICK_WAIT_SECONDS)
+
+    retry_center = _wait_for_match_center(
+        camera,
+        "qiehuan",
+        config.SWITCH_USER_TEMPLATE_REGION,
+        timeout=config.SWITCH_USER_ENTRY_MATCH_TIMEOUT_SECONDS,
+        threshold=config.SWITCH_UI_MATCH_THRESHOLD,
+    )
+    if retry_center is not None:
+        return retry_center, ""
+    return None, "点击账号列表后未匹配到切换账号入口（qiehuan.png），拉前台重试后仍失败。"
+
+
 def _click_switch_user_and_wait_login(camera):
     """打开账号列表并进入切号登录页面。"""
     _log_switch_waits(
@@ -568,23 +794,11 @@ def _click_switch_user_and_wait_login(camera):
         login_click_wait=config.SWITCH_SWITCH_USER_CLICK_WAIT_SECONDS,
         login_timeout=config.SWITCH_LOGIN_PAGE_MATCH_TIMEOUT_SECONDS,
     )
-    fast_click(config.SWITCH_ACCOUNT_LIST_BUTTON_POS)
-    safe_sleep(config.SWITCH_ACCOUNT_LIST_CLICK_WAIT_SECONDS)
-
-    logger.info("[切换流程] 切换账号入口模板：qiehuan.png")
-    print("[切换流程] 切换账号入口模板：qiehuan.png")
-
-    center = _wait_for_match_center(
-        camera,
-        "qiehuan",
-        config.SWITCH_USER_TEMPLATE_REGION,
-        timeout=config.SWITCH_USER_ENTRY_MATCH_TIMEOUT_SECONDS,
-        threshold=config.SWITCH_UI_MATCH_THRESHOLD,
-    )
+    center, failure_detail = _wait_for_switch_user_entry_with_foreground_retry(camera)
     if center is None:
         pause_thread6_failure(
             "切换账号入口",
-            "点击账号列表后未匹配到切换账号入口（qiehuan.png）。",
+            failure_detail,
         )
         return None
 
@@ -643,35 +857,17 @@ def _confirm_account_switched(camera):
         heping_timeout=config.SWITCH_HEPING_MATCH_TIMEOUT_SECONDS,
         maximize_wait=config.SWITCH_MAXIMIZE_WAIT_SECONDS,
     )
-    if _wait_for(
+    launcher_ready, _launcher_source = _wait_for_launcher_heping_ready(
         camera,
-        "heping",
-        config.SWITCH_HEPING_REGION_PRIMARY,
-        timeout=config.SWITCH_HEPING_MATCH_TIMEOUT_SECONDS,
-        threshold=config.SWITCH_UI_MATCH_THRESHOLD,
-    ):
-        fast_click((45, 277))
-        safe_sleep(0.8)
-        return True
-
-    if _match(
-        camera,
-        "heping",
-        config.SWITCH_HEPING_REGION_SECONDARY,
-        threshold=config.SWITCH_UI_MATCH_THRESHOLD,
-    ):
-        pyautogui.hotkey("winleft", "up")
-        safe_sleep(config.SWITCH_MAXIMIZE_WAIT_SECONDS)
-        if _wait_for(
-            camera,
-            "heping",
-            config.SWITCH_HEPING_REGION_PRIMARY,
-            timeout=config.SWITCH_HEPING_MATCH_TIMEOUT_SECONDS,
-            threshold=config.SWITCH_UI_MATCH_THRESHOLD,
-        ):
+        config.SWITCH_HEPING_MATCH_TIMEOUT_SECONDS,
+    )
+    if launcher_ready:
+        guard_ok, guard_detail = _ensure_launcher_click_ready(camera)
+        if guard_ok:
             fast_click((45, 277))
             safe_sleep(0.8)
             return True
+        logger.error("[切换流程] 切号登录后的启动页前置守卫失败：%s", guard_detail)
 
     return pause_thread6_failure(
         "确认账号切换结果",
@@ -823,6 +1019,7 @@ def _sync_verified_slot_status_to_running(slot_number):
         table_name=table_name,
     )
     if result.status == "success":
+        _schedule_status_change_snapshot("昵称校验通过改运行中")
         logger.info(
             "[线程6] 昵称模板校验通过后已写入“运行中”：执行位=%s 昵称=%s",
             slot_number,
@@ -900,6 +1097,12 @@ def _step01_exit(camera):
 def _step02_server_list(camera, suppress_failure_output=False):
     """步骤2：打开大区列表。"""
     update_overlay_mini("换区中：打开大区列表")
+    launcher_ready, detail = _ensure_launcher_click_ready(camera)
+    if not launcher_ready:
+        if not suppress_failure_output:
+            async_push_msg("【切换流程】启动页识别失败", detail)
+        return False
+
     _log_switch_waits(
         "server list",
         open_wait=config.SWITCH_SERVER_LIST_OPEN_WAIT_SECONDS,
@@ -922,6 +1125,12 @@ def _step03_select(camera, idx, suppress_failure_output=False):
     if idx < 0 or idx >= len(config.SERVER_COORDS):
         if not suppress_failure_output:
             async_push_msg("【切换流程】目标大区无效", f"目标大区索引无效：{idx}。")
+        return False
+
+    launcher_ready, detail = _ensure_launcher_click_ready(camera)
+    if not launcher_ready:
+        if not suppress_failure_output:
+            async_push_msg("【切换流程】启动页识别失败", detail)
         return False
 
     _log_switch_waits(
@@ -949,6 +1158,12 @@ def _step03_select(camera, idx, suppress_failure_output=False):
 def _step04_launch(camera, suppress_failure_output=False):
     """步骤4：点击启动游戏。"""
     update_overlay_mini("启动中：启动游戏")
+    launcher_ready, detail = _ensure_launcher_click_ready(camera)
+    if not launcher_ready:
+        if not suppress_failure_output:
+            async_push_msg("【切换流程】启动页识别失败", detail)
+        return False
+
     center = _wait_for_match_center(camera, "qd", config.RGN_QD, timeout=15)
     if center is None:
         if not suppress_failure_output:
@@ -1095,10 +1310,14 @@ def _close_gold_panel(camera, pause_on_failure):
     """关闭金币面板并确认仍在古墓大厅。"""
     update_overlay_mini("进场中：关闭面板")
     for _ in range(config.SWITCH_CLOSE_PANEL_ESC_COUNT):
+        pyautogui.click(*config.SWITCH_RETURN_GUMU_CLOSE_POS)
+        time.sleep(config.SWITCH_CLOSE_PANEL_ESC_INTERVAL_SECONDS)
         pyautogui.press("escape")
         time.sleep(config.SWITCH_CLOSE_PANEL_ESC_INTERVAL_SECONDS)
     time.sleep(config.SWITCH_CLOSE_PANEL_AFTER_ESC_WAIT_SECONDS)
 
+    pyautogui.click(1890, 20)
+    time.sleep(config.SWITCH_CLOSE_PANEL_AFTER_ESC_WAIT_SECONDS)
     pyautogui.click(830, 690)
     time.sleep(config.SWITCH_CLOSE_PANEL_AFTER_CLICK_WAIT_SECONDS)
 
@@ -1542,18 +1761,9 @@ def switch_account_for_temporary_target_slot(camera, target_execution_slot):
 
 
 def _wait_for_launcher_ready_nonblocking(camera, timeout_seconds):
-    """非阻断确认启动页 qidong 按钮已出现。"""
-    end_time = time.time() + max(0.1, float(timeout_seconds))
-    while time.time() < end_time:
-        if _match(
-            camera,
-            "qd",
-            config.SWITCH_BOUNDARY_START_QIDONG_REGION,
-            threshold=config.SWITCH_UI_MATCH_THRESHOLD,
-        ):
-            return True
-        safe_sleep(0.5)
-    return False
+    """非阻断确认启动页 heping 已出现。"""
+    launcher_ready, _launcher_source = _wait_for_launcher_heping_ready(camera, timeout_seconds)
+    return launcher_ready
 
 
 def _switch_account_for_slot_nonblocking(camera, account_id):
@@ -1565,18 +1775,9 @@ def _switch_account_for_slot_nonblocking(camera, account_id):
         login_click_wait=config.SWITCH_SWITCH_USER_CLICK_WAIT_SECONDS,
         login_timeout=config.SWITCH_LOGIN_PAGE_MATCH_TIMEOUT_SECONDS,
     )
-    fast_click(config.SWITCH_ACCOUNT_LIST_BUTTON_POS)
-    safe_sleep(config.SWITCH_ACCOUNT_LIST_CLICK_WAIT_SECONDS)
-
-    switch_center = _wait_for_match_center(
-        camera,
-        "qiehuan",
-        config.SWITCH_USER_TEMPLATE_REGION,
-        timeout=config.SWITCH_USER_ENTRY_MATCH_TIMEOUT_SECONDS,
-        threshold=config.SWITCH_UI_MATCH_THRESHOLD,
-    )
+    switch_center, failure_detail = _wait_for_switch_user_entry_with_foreground_retry(camera)
     if switch_center is None:
-        return False, "点击账号列表后未匹配到切换账号入口。"
+        return False, failure_detail
 
     fast_click(switch_center)
     safe_sleep(config.SWITCH_SWITCH_USER_CLICK_WAIT_SECONDS)
@@ -1624,37 +1825,20 @@ def _switch_account_for_slot_nonblocking(camera, account_id):
         heping_timeout=config.SWITCH_HEPING_MATCH_TIMEOUT_SECONDS,
         maximize_wait=config.SWITCH_MAXIMIZE_WAIT_SECONDS,
     )
-    if _wait_for(
+    launcher_ready, _launcher_source = _wait_for_launcher_heping_ready(
         camera,
-        "heping",
-        config.SWITCH_HEPING_REGION_PRIMARY,
-        timeout=config.SWITCH_HEPING_MATCH_TIMEOUT_SECONDS,
-        threshold=config.SWITCH_UI_MATCH_THRESHOLD,
-    ):
-        fast_click((45, 277))
-        safe_sleep(0.8)
-        return True, ""
+        config.SWITCH_HEPING_MATCH_TIMEOUT_SECONDS,
+    )
+    if not launcher_ready:
+        return False, "账号登录后未匹配到和平精英页。"
 
-    if _match(
-        camera,
-        "heping",
-        config.SWITCH_HEPING_REGION_SECONDARY,
-        threshold=config.SWITCH_UI_MATCH_THRESHOLD,
-    ):
-        pyautogui.hotkey("winleft", "up")
-        safe_sleep(config.SWITCH_MAXIMIZE_WAIT_SECONDS)
-        if _wait_for(
-            camera,
-            "heping",
-            config.SWITCH_HEPING_REGION_PRIMARY,
-            timeout=config.SWITCH_HEPING_MATCH_TIMEOUT_SECONDS,
-            threshold=config.SWITCH_UI_MATCH_THRESHOLD,
-        ):
-            fast_click((45, 277))
-            safe_sleep(0.8)
-            return True, ""
+    guard_ok, guard_detail = _ensure_launcher_click_ready(camera)
+    if not guard_ok:
+        return False, guard_detail
 
-    return False, "账号登录后未匹配到和平精英页。"
+    fast_click((45, 277))
+    safe_sleep(0.8)
+    return True, ""
 
 
 def _verify_startup_listing_slot_nonblocking(camera, target_slot, server_coord_index):

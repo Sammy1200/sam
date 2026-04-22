@@ -2249,6 +2249,70 @@ def update_canonical_account_listing_pause_fields(
         conn.close()
 
 
+def clear_canonical_account_round_listing_success_count(
+    database_path,
+    nickname,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+    updated_at=None,
+):
+    """启动页上架模式下号成功后，只清当前账号的本轮上架成功数。"""
+    normalized_nickname = str(nickname or "").strip()
+    if not normalized_nickname:
+        return AccountWriteResult("nickname_missing", "当前昵称为空")
+    if not database_path or not os.path.isfile(database_path):
+        return AccountWriteResult("db_unavailable", f"数据库文件不存在: {database_path}")
+
+    normalized_updated_at = _serialize_datetime(updated_at or datetime.now())
+
+    try:
+        conn = sqlite3.connect(database_path)
+    except sqlite3.Error as exc:
+        return AccountWriteResult("db_unavailable", f"数据库不可用: {exc}")
+
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _canonical_table_exists(conn, table_name):
+            return AccountWriteResult("schema_not_found", f"canonical 表不存在: {table_name}")
+
+        row = conn.execute(
+            f"SELECT 1 "
+            f"FROM {_quote_identifier(table_name)} "
+            f"WHERE {_quote_identifier('nickname')} = ? "
+            "LIMIT 1",
+            (normalized_nickname,),
+        ).fetchone()
+        if row is None:
+            return AccountWriteResult(
+                "account_not_found",
+                f"未找到昵称为 {normalized_nickname} 的账号记录",
+            )
+
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.execute(
+            f"UPDATE {_quote_identifier(table_name)} "
+            f"SET {_quote_identifier('round_listing_success_count')} = ?, "
+            f"{_quote_identifier('updated_at')} = ? "
+            f"WHERE {_quote_identifier('nickname')} = ?",
+            (0, normalized_updated_at, normalized_nickname),
+        )
+        if cursor.rowcount <= 0:
+            conn.rollback()
+            return AccountWriteResult(
+                "account_not_found",
+                f"未找到昵称为 {normalized_nickname} 的账号记录",
+            )
+        conn.commit()
+        return AccountWriteResult("success", "", 0)
+    except sqlite3.Error as exc:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return AccountWriteResult("write_failed", f"写入失败: {exc}")
+    finally:
+        conn.close()
+
+
 def ensure_canonical_execution_slot_seed_records(
     database_path,
     table_name=CANONICAL_ACCOUNT_STATS_TABLE,

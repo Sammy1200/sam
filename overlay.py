@@ -546,13 +546,13 @@ def toggle_pause():
             destroy_param_editor()
         except Exception:
             pass
+        resume_persist_result = persist_resume_snapshot()
         state.last_resume_time = time.time()
         if state.overlay_root:
             try:
                 enqueue_overlay_task(state.overlay_root.deiconify)
             except Exception:
                 pass
-        resume_persist_result = persist_resume_snapshot()
         if resume_persist_result.status == "success":
             ui_print("脚本恢复（F12 暂停）")
         elif resume_persist_result.status == "skipped":

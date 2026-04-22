@@ -19,7 +19,9 @@ from account_db import (
 from listing import execute_startup_listing_batch
 from overlay import ui_print, update_score_text
 from purchase import parse_balance_text_to_value, recognize_latest_balance_at_trade
+from purchase import clear_live_listing_count_for_account_switch
 from round_persistence import (
+    persist_startup_listing_mode_listing_count_clear,
     persist_startup_listing_mode_account_snapshot,
     reset_round_runtime_state,
 )
@@ -358,14 +360,21 @@ def _resolve_batch_target(balance_value):
     return 0
 
 
-def _append_summary_entry(summary_entries, slot_number, reason_text, latest_balance_text):
+def _append_summary_entry(
+    summary_entries,
+    slot_number,
+    reason_text,
+    latest_balance_text,
+    listing_count,
+    item_inventory,
+):
     summary_entries.append(
         {
             "execution_slot": int(slot_number),
             "end_reason": str(reason_text or "").strip() or "未说明",
             "latest_balance_text": str(latest_balance_text or "").strip() or "未识别",
-            "listing_count": int(state.round_listing_success_count),
-            "item_inventory": int(state.baseline_item_count),
+            "listing_count": int(listing_count),
+            "item_inventory": int(item_inventory),
         }
     )
 
@@ -379,6 +388,8 @@ def _finalize_account(
     round_status_override=None,
 ):
     update_last_limit_time = bool(limit_account)
+    listing_count_snapshot = int(state.round_listing_success_count)
+    item_inventory_snapshot = int(state.baseline_item_count)
     if latest_balance_text:
         _apply_balance_to_state(latest_balance_text)
     if round_status_override is not None:
@@ -391,7 +402,14 @@ def _finalize_account(
     )
     if persist_result.status not in ("success", "skipped"):
         logger.warning("[上架模式] 执行位 %s 收尾写库失败：%s", slot_number, persist_result.reason)
-    _append_summary_entry(summary_entries, slot_number, reason_text, latest_balance_text)
+    _append_summary_entry(
+        summary_entries,
+        slot_number,
+        reason_text,
+        latest_balance_text,
+        listing_count_snapshot,
+        item_inventory_snapshot,
+    )
 
 
 def _push_final_summary(summary_entries, skipped_limited_slots=None):
@@ -602,6 +620,14 @@ def run_startup_listing_mode(camera):
                 )
                 logger.error("[上架模式] 执行位 %s 下号失败：%s", slot_number, exit_result["detail"])
                 return {"status": "failed", "detail": exit_result["detail"], "target_slot": slot_number}
+            clear_live_listing_count_for_account_switch("启动页上架模式下号成功后")
+            clear_persist_result = persist_startup_listing_mode_listing_count_clear()
+            if clear_persist_result.status not in ("success", "skipped"):
+                logger.warning(
+                    "[上架模式] 执行位 %s 下号后清空上架成功写库值失败：%s",
+                    slot_number,
+                    clear_persist_result.reason,
+                )
             already_at_launcher = True
     finally:
         state.startup_listing_mode_active = False

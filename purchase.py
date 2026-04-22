@@ -50,6 +50,7 @@ from utils import (
     fast_click,
     gc_checkpoint,
     get_current_elapsed,
+    logger,
     precise_sleep,
     safe_get_frame,
     smart_wait,
@@ -59,6 +60,49 @@ from vision import get_balance_recognition, get_price_decision, is_image_present
 
 def async_push_msg(title, content):
     shared_async_push_msg(title, content)
+
+
+def _refresh_live_round_score():
+    if state.overlay_root:
+        try:
+            state.overlay_root.after(0, update_score_text)
+        except:
+            pass
+
+
+def clear_live_listing_count_for_account_switch(reason):
+    """启动页上架模式下号成功后，立刻清空上架成功显示口径。"""
+    previous_listing_success = int(state.round_listing_success_count)
+    state.total_listed_count = 0
+    state.round_listing_success_count = 0
+    print(f"[清零] {reason}，上架成功已清零。原值={previous_listing_success}")
+    logger.info("[清零] %s，上架成功已清零。原值=%s", reason, previous_listing_success)
+    _refresh_live_round_score()
+
+
+def clear_live_round_triplet_for_account_switch(reason):
+    """正常模式命中切号状态时，立刻清空当前账号三项显示口径。"""
+    previous_purchase_success = int(state.round_purchase_success_count)
+    previous_listing_success = int(state.round_listing_success_count)
+    previous_purchase_fail = int(state.round_purchase_fail_count)
+    state.success_count = 0
+    state.total_listed_count = 0
+    state.fail_count = 0
+    state.round_purchase_success_count = 0
+    state.round_listing_success_count = 0
+    state.round_purchase_fail_count = 0
+    print(
+        f"[清零] {reason}，三项已清零。"
+        f"抢购成功={previous_purchase_success}，上架成功={previous_listing_success}，抢购失败={previous_purchase_fail}"
+    )
+    logger.info(
+        "[清零] %s，三项已清零。抢购成功=%s 上架成功=%s 抢购失败=%s",
+        reason,
+        previous_purchase_success,
+        previous_listing_success,
+        previous_purchase_fail,
+    )
+    _refresh_live_round_score()
 
 
 def reset_purchase_counters(reason):
@@ -73,11 +117,7 @@ def reset_purchase_counters(reason):
         setattr(state, counter_name, 0)
         print(f"[重置] {reason}，{counter_label}已清零。")
 
-    if state.overlay_root:
-        try:
-            state.overlay_root.after(0, update_score_text)
-        except:
-            pass
+    _refresh_live_round_score()
 
 
 def _update_balance_state_from_recognition(recognition):
@@ -130,6 +170,8 @@ def _finalize_balance_insufficient(balance_text, send_push=True):
     print(f"[余额不足] 当前余额：{balance_text}，已触发自动换号")
     if send_push:
         async_push_msg("【余额不足】准备换号换区", f"当前余额：{balance_text}，已触发自动换号。")
+    if not state.temporary_purchase_mode:
+        clear_live_round_triplet_for_account_switch("余额不足触发换号前")
     state.need_switch_server = True
     return False
 
@@ -317,6 +359,8 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                         state.overlay_status = "抢购时长已到"
                         ui_print("时间已到，进入主流程收尾。", save_log=True)
                         state.account_round_end_status = "抢购时长已到"
+                        if not state.temporary_purchase_mode:
+                            clear_live_round_triplet_for_account_switch("抢购时长已到触发换号前")
                         state.need_switch_server = True
                         return
 
@@ -440,6 +484,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                                 state.account_limit_reached_at = None
                                 state.account_round_end_status = "账号限制"
                                 state.overlay_status = "账号限制"
+                                clear_live_round_triplet_for_account_switch("账号限制触发换号前")
                                 state.need_switch_server = True
                                 return
                             if not check_balance_limit(frame, camera=camera, try_refresh_on_low=True):
