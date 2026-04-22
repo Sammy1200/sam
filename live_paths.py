@@ -1,4 +1,4 @@
-"""Resolve live data/config paths with an external root priority."""
+"""Resolve live data/config paths with an external root policy."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -50,28 +50,26 @@ def _resolve_existing_path(preferred_path, fallback_path, exists_func):
     )
 
 
-def resolve_account_stats_db_path():
-    return _resolve_existing_path(
-        LIVE_ACCOUNT_STATS_DB_PATH,
-        config.ACCOUNT_STATS_DB_PATH,
-        os.path.isfile,
+def _resolve_live_only_path(required_path):
+    required_abs = _normalize_path(required_path)
+    return ResolvedLivePath(
+        path=required_abs,
+        resolution_type="live_only",
+        preferred_path=required_abs,
+        fallback_path="",
     )
+
+
+def resolve_account_stats_db_path():
+    return _resolve_live_only_path(LIVE_ACCOUNT_STATS_DB_PATH)
 
 
 def resolve_local_switch_account_config_path():
-    return _resolve_existing_path(
-        LIVE_LOCAL_SWITCH_ACCOUNT_CONFIG_PATH,
-        config.LOCAL_SWITCH_ACCOUNT_CONFIG_PATH,
-        os.path.isfile,
-    )
+    return _resolve_live_only_path(LIVE_LOCAL_SWITCH_ACCOUNT_CONFIG_PATH)
 
 
 def resolve_local_web_sync_config_path():
-    return _resolve_existing_path(
-        LIVE_LOCAL_WEB_SYNC_CONFIG_PATH,
-        config.LOCAL_WEB_SYNC_CONFIG_PATH,
-        os.path.isfile,
-    )
+    return _resolve_live_only_path(LIVE_LOCAL_WEB_SYNC_CONFIG_PATH)
 
 
 def _normalize_optional_config_dir(raw_value, config_source_path):

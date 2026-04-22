@@ -7,9 +7,9 @@ import re
 import time
 import unicodedata
 import state
+from local_switch_account_config import load_purchase_price_rule_config
 from config import (
     MONITOR_PRICE, MONITOR_CAPACITY, MONITOR_BALANCE,
-    MIN_PRICE, MAX_PRICE,
     UPSCALE, STANDARD_W, STANDARD_H, TEMPLATE_DIR,
     BALANCE_TEMPLATE_DIR, BALANCE_TEMPLATE_MATCH_THRESHOLD, BALANCE_TEMPLATE_DUPLICATE_GAP,
     BALANCE_TEMPLATE_DOT_MATCH_THRESHOLD, BALANCE_TEMPLATE_UNIT_MATCH_THRESHOLD,
@@ -17,7 +17,6 @@ from config import (
     BALANCE_SEGMENT_MERGE_GAP, BALANCE_SEGMENT_MAX_GROUP_SIZE,
     BALANCE_DOT_MAX_WIDTH, BALANCE_DOT_MAX_HEIGHT, BALANCE_DOT_MAX_AREA,
     BALANCE_DOT_BASELINE_OFFSET_RATIO, BALANCE_DOT_MAX_NEIGHBOR_GAP, BALANCE_UNIT_MIN_WIDTH,
-    PRICE_DECISION_MAX_PRICE,
     LISTING_TIMER_REGION,
     LISTING_TIMER_UPSCALE, LISTING_TIMER_BLUR_SIZE, LISTING_TIMER_THRESHOLD_SHIFT,
     LISTING_TIMER_CLOSE_KERNEL_SIZE, LISTING_TIMER_MIN_COMPONENT_AREA,
@@ -48,6 +47,7 @@ _BALANCE_TEMPLATES = None
 _BALANCE_TEMPLATE_LOAD_ATTEMPTED = False
 _LISTING_TIMER_TEMPLATES = None
 _LISTING_TIMER_TEMPLATE_LOAD_ATTEMPTED = False
+PURCHASE_PRICE_RULE_CONFIG = load_purchase_price_rule_config()[0]
 
 
 def crop_frame(frame, monitor):
@@ -128,10 +128,6 @@ def get_number(frame, templates):
 
 PRICE_MATCH_THRESHOLD = 0.75
 PRICE_DUPLICATE_GAP = 5
-FAST_ACCEPT_FIRST_DIGITS = {"4", "5", "6", "7", "8", "9"}
-FAST_ACCEPT_SECOND_DIGITS = {"0", "1", "2", "3"}
-FAST_REJECT_FIRST_DIGITS = {"2"}
-FAST_REJECT_SECOND_DIGITS = {"5", "6", "7", "8", "9"}
 
 
 def _merge_digit_hits(detected):
@@ -178,27 +174,24 @@ def _get_price_prefix_decision(gray, templates):
         return None, None
 
     first_digit = digit_hits[0][1]
-    if first_digit in FAST_ACCEPT_FIRST_DIGITS:
+    two_digit_prefix = f"{digit_hits[0][1]}{digit_hits[1][1]}" if len(digit_hits) >= 2 else None
+
+    if two_digit_prefix:
+        if two_digit_prefix in PURCHASE_PRICE_RULE_CONFIG["direct_accept_prefixes_2digit"]:
+            return "accept", two_digit_prefix
+        if two_digit_prefix in PURCHASE_PRICE_RULE_CONFIG["direct_reject_prefixes_2digit"]:
+            return "reject", two_digit_prefix
+        if two_digit_prefix in PURCHASE_PRICE_RULE_CONFIG["full_check_prefixes_2digit"]:
+            return None, two_digit_prefix
+
+    if first_digit in PURCHASE_PRICE_RULE_CONFIG["direct_accept_prefixes_1digit"]:
         return "accept", first_digit
-    if first_digit in FAST_REJECT_FIRST_DIGITS:
+    if first_digit in PURCHASE_PRICE_RULE_CONFIG["direct_reject_prefixes_1digit"]:
         return "reject", first_digit
-    if first_digit == "3":
-        return None, None
-    if first_digit != "1":
-        return None, None
+    if first_digit in PURCHASE_PRICE_RULE_CONFIG["full_check_prefixes_1digit"]:
+        return None, first_digit
 
-    if len(digit_hits) < 2:
-        return None, None
-
-    second_digit = digit_hits[1][1]
-    prefix_text = f"{first_digit}{second_digit}"
-    if second_digit in FAST_ACCEPT_SECOND_DIGITS:
-        return "accept", prefix_text
-    if second_digit == "4":
-        return None, None
-    if second_digit in FAST_REJECT_SECOND_DIGITS:
-        return "reject", prefix_text
-    return None, None
+    return None, two_digit_prefix or first_digit
 
 
 def get_price_decision(frame, templates):
@@ -232,7 +225,11 @@ def get_price_decision(frame, templates):
             return "unknown", None, None
 
         price_text = str(price_value)
-        if MIN_PRICE < price_value < PRICE_DECISION_MAX_PRICE:
+        if (
+            PURCHASE_PRICE_RULE_CONFIG["min_exclusive"]
+            < price_value
+            < PURCHASE_PRICE_RULE_CONFIG["max_exclusive"]
+        ):
             decision = "accept"
         else:
             decision = "reject"

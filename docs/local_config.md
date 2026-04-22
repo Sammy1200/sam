@@ -8,13 +8,13 @@
 
 当前主线新增统一规则：
 - 本机 live 根目录固定为 `C:\py666`
-- 以下真实数据 / 真实配置优先从 `C:\py666` 读取：
+- 以下真实数据 / 真实配置只认 `C:\py666`：
   - `C:\py666\account_stats.sqlite3`
   - `C:\py666\local_switch_account_config.json`
   - `C:\py666\local_web_sync_config.json`
   - `C:\py666\nichen`
-- 若 `C:\py666` 中对应文件或目录缺失，才允许回退到项目根目录旧位置
-- 本次规则只收口“读取优先级”，不自动删除项目根目录旧文件
+- 其中 `account_stats.sqlite3`、`local_switch_account_config.json`、`local_web_sync_config.json` 缺失时，按当前正式口径直接报错，不再回退到项目根目录旧位置
+- 本次只把两个本机 JSON 与 SQLite 收口为唯一路径；昵称模板目录策略维持现状
 
 昵称模板目录的当前优先级固定为：
 - 先读 `C:\py666\nichen`
@@ -37,8 +37,37 @@
 
 当前边界：
 - 真实本机换号配置以 `local_switch_account_config.json` 为准
+- 当前正式口径只认 `C:\py666\local_switch_account_config.json`
 - 示例文件只用于说明字段结构，不代表当前机器真实运行值
 - 读取链路由 `local_switch_account_config.py` 承接时，也应继续遵守“真实文件优先、示例文件只做说明”的原则
+
+---
+
+# 本机抢购价格规则外置
+
+当前主线事实：
+- 抢购价格规则已收口到真实本机 `local_switch_account_config.json`
+- `local_web_sync_config.json` 不承接抢购价格规则
+
+含义：
+- 多台机器抢不同道具时，允许各自维护不同的本机抢购价格策略
+- 价格规则属于本机业务配置层，不应继续散落在 `config.py` 或 `vision.py` 的硬编码里
+- 修改价格规则后需重启脚本生效；当前正式口径不做运行中热更新
+
+当前边界：
+- 真实生效文件只认 `C:\py666\local_switch_account_config.json`
+- 示例文件只说明字段结构、注释写法和默认示例，不代表真实机器运行值
+- 抢购循环内只使用启动时已加载到内存的价格规则，不在循环里读取 JSON
+- 当前价格区间边界为“不含等于”；当前若配置为 `324999` 和 `2000001`，实际命中范围就是 `325000` 到 `2000000`
+
+推荐字段说明：
+- `purchase_price_min_exclusive`：完整价格下限，不含等于；只有识别到的完整价格 `>` 这个值时，才可能继续抢购
+- `purchase_price_max_exclusive`：完整价格上限，不含等于；只有识别到的完整价格 `<` 这个值时，才可能继续抢购
+- `purchase_price_direct_accept_prefixes`：支持 1 位或 2 位前缀数组；命中后直接抢，不再看完整价格；系统优先判断两位前缀，再判断一位前缀；这是高风险字段，改错会直接绕过完整价格上下限
+- `purchase_price_direct_reject_prefixes`：支持 1 位或 2 位前缀数组；命中后直接不抢，不再看完整价格；系统优先判断两位前缀，再判断一位前缀
+- `purchase_price_full_check_prefixes`：支持 1 位或 2 位前缀数组；命中后明确要求继续识别完整价格，再按上下限判断；系统优先判断两位前缀，再判断一位前缀
+- 若一位前缀在某动作列表中，而其覆盖到的两位前缀出现在另一动作列表中，程序会视为跨动作覆盖冲突并直接报错
+- 当前这套规则的安全写法示例：直接抢 `1/4/5/6/7/8/9`，完整价格判断 `3/20`，直接不抢 `21-29`
 
 ---
 
@@ -57,6 +86,7 @@
 - 1 号电脑通常负责展示与发起提交，可不开启 `receive_remote_writeback`
 - 2 号电脑如需接受来自 1 号电脑的最小写回，应在真实本机 `local_web_sync_config.json` 中显式开启 `receive_remote_writeback`
 - 当 `receive_remote_sync` 或 `receive_remote_writeback` 任一开启时，网页服务绑定地址应能被另一台机器访问
+- 当前正式口径只认 `C:\py666\local_web_sync_config.json`
 
 ---
 

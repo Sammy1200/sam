@@ -135,7 +135,9 @@ def load_machine_sync_config():
     source_path = resolved_source_path.path
     log_resolved_live_path("本机网页同步配置", resolved_source_path)
     if not os.path.exists(source_path):
-        raise FileNotFoundError("缺少本机网页同步配置文件 local_web_sync_config.json")
+        raise FileNotFoundError(
+            f"缺少本机网页同步配置文件：{source_path}。当前正式口径只认 C:\\py666 下的 local_web_sync_config.json"
+        )
 
     data = _read_json(source_path)
     if not isinstance(data, dict):

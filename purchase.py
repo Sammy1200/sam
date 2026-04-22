@@ -22,7 +22,6 @@ from config import (
     FIX_SHOP_POS1,
     FIX_SHOP_POS2,
     FRAME_MAX_AGE,
-    MIN_PRICE,
     MISMATCH_EXIT_DELAY,
     MONITOR_DIYICI,
     MONITOR_GOUMAI,
