@@ -828,25 +828,47 @@ def _input_and_verify_account(account_id):
         "account input verify",
         verify_wait=config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS,
     )
-    fast_click(config.SWITCH_ACCOUNT_INPUT_POS)
-    safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
-    hotkey(0x11, 0x41)
-    safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
-    type_digits(str(account_id))
-    safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
-    hotkey(0x11, 0x41)
-    safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
-    hotkey(0x11, 0x43)
-    safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
-
-    actual = _digits_only(get_clipboard_text())
-    expected = _digits_only(account_id)
-    if actual != expected:
-        return pause_thread6_failure(
-            "账号输入校验",
-            f"账号输入校验失败，期望账号 {expected}，实际剪贴板为 {actual or '空'}。",
-        )
+    verified, detail = _retry_account_input_verify(account_id)
+    if not verified:
+        return pause_thread6_failure("账号输入校验", detail)
     return True
+
+
+def _retry_account_input_verify(account_id):
+    """输入账号并校验；失败后重新点击输入框补重试。"""
+    expected = _digits_only(account_id)
+
+    for attempt in range(1, config.SWITCH_ACCOUNT_INPUT_RETRY_COUNT + 2):
+        fast_click(config.SWITCH_ACCOUNT_INPUT_POS)
+        safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
+        hotkey(0x11, 0x41)
+        safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
+        type_digits(str(account_id))
+        safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
+        hotkey(0x11, 0x41)
+        safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
+        hotkey(0x11, 0x43)
+        safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
+
+        actual = _digits_only(get_clipboard_text())
+        if actual == expected:
+            if attempt > 1:
+                logger.info("[切换流程] 账号输入校验在第 %s 次尝试后成功。", attempt)
+            return True, ""
+
+        if attempt <= config.SWITCH_ACCOUNT_INPUT_RETRY_COUNT:
+            logger.warning(
+                "[切换流程] 账号输入校验失败，准备重试 %s/%s：期望=%s 实际=%s",
+                attempt,
+                config.SWITCH_ACCOUNT_INPUT_RETRY_COUNT,
+                expected,
+                actual or "空",
+            )
+
+    return False, (
+        f"账号输入校验失败，已重新点击输入框重试 {config.SWITCH_ACCOUNT_INPUT_RETRY_COUNT} 次，"
+        f"期望账号 {expected}，实际剪贴板为 {actual or '空'}。"
+    )
 
 
 def _confirm_account_switched(camera):
@@ -1815,21 +1837,9 @@ def _switch_account_for_slot_nonblocking(camera, account_id):
         "account input verify",
         verify_wait=config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS,
     )
-    fast_click(config.SWITCH_ACCOUNT_INPUT_POS)
-    safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
-    hotkey(0x11, 0x41)
-    safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
-    type_digits(str(account_id))
-    safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
-    hotkey(0x11, 0x41)
-    safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
-    hotkey(0x11, 0x43)
-    safe_sleep(config.SWITCH_ACCOUNT_INPUT_VERIFY_WAIT_SECONDS)
-
-    actual = _digits_only(get_clipboard_text())
-    expected = _digits_only(account_id)
-    if actual != expected:
-        return False, f"账号输入校验失败，期望 {expected}，实际 {actual or '空'}。"
+    verified, detail = _retry_account_input_verify(account_id)
+    if not verified:
+        return False, detail
 
     _log_switch_waits(
         "denglu click",
