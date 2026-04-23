@@ -1366,6 +1366,7 @@ def main():
                     reset_runtime_before_listing=True,
                     reset_reason="启动后预上架前清空当前账号运行态",
                     purchase_reset_reason="启动后开始当前账号流程",
+                    force_balance_check_after_switch=True,
                 ):
                     return
             elif mode == "listing_launcher":

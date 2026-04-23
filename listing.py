@@ -10,6 +10,7 @@ import numpy as np
 
 import state
 from local_switch_account_config import load_listing_target_price
+from purchase import recognize_latest_balance_at_trade
 from config import (
     CLICK_1,
     CLICK_2,
@@ -363,6 +364,20 @@ def _should_skip_listing_by_last_valid_balance():
         last_valid_balance_value is not None
         and last_valid_balance_value > LISTING_SKIP_BALANCE_THRESHOLD
     ):
+        ui_print("余额超8亿跳上架", save_log=True)
+        return True
+    return False
+
+
+def _should_skip_listing_by_trade_balance_probe(camera_obj, force_balance_check_after_switch=False):
+    if not force_balance_check_after_switch:
+        return False
+
+    balance_info = recognize_latest_balance_at_trade(camera_obj)
+    if balance_info is None:
+        return False
+
+    if balance_info["value"] > LISTING_SKIP_BALANCE_THRESHOLD:
         ui_print("余额超8亿跳上架", save_log=True)
         return True
     return False
@@ -777,6 +792,11 @@ def execute_listing_routine(camera_obj, is_periodic=False, force_balance_check_a
             ui_print(f"实时库存同步失败：{sync_result.reason}", save_log=True)
 
     try:
+        if _should_skip_listing_by_trade_balance_probe(
+            camera_obj,
+            force_balance_check_after_switch=force_balance_check_after_switch,
+        ):
+            return
         if _should_skip_listing_by_last_valid_balance():
             return
         if _should_disable_listing_by_round_success_limit():

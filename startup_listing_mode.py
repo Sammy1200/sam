@@ -386,6 +386,7 @@ def _finalize_account(
     latest_balance_text,
     limit_account=False,
     round_status_override=None,
+    preserve_existing_status=False,
 ):
     update_last_limit_time = bool(limit_account)
     listing_count_snapshot = int(state.round_listing_success_count)
@@ -399,6 +400,7 @@ def _finalize_account(
     persist_result = persist_startup_listing_mode_account_snapshot(
         save_status,
         update_last_limit_time=update_last_limit_time,
+        preserve_existing_status=preserve_existing_status,
     )
     if persist_result.status not in ("success", "skipped"):
         logger.warning("[上架模式] 执行位 %s 收尾写库失败：%s", slot_number, persist_result.reason)
@@ -596,7 +598,7 @@ def run_startup_listing_mode(camera):
                                 "翻页到底",
                                 latest_balance_text,
                                 limit_account=False,
-                                round_status_override=loaded_record.round_status,
+                                preserve_existing_status=True,
                             )
                             break
 

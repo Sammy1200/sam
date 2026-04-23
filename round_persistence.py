@@ -602,7 +602,12 @@ def persist_item_balance_and_schedule_snapshot(event_name):
     return result
 
 
-def persist_startup_listing_mode_account_snapshot(round_status, update_last_limit_time=False, last_limit_time=None):
+def persist_startup_listing_mode_account_snapshot(
+    round_status,
+    update_last_limit_time=False,
+    last_limit_time=None,
+    preserve_existing_status=False,
+):
     """启动页上架模式专用：写回当前账号的上架轮次结果。"""
     if state.temporary_purchase_mode:
         return AccountWriteResult("skipped", "临时模式不写入 canonical SQLite")
@@ -620,7 +625,10 @@ def persist_startup_listing_mode_account_snapshot(round_status, update_last_limi
     if existing_record is None:
         return AccountWriteResult("account_not_found", f"sqlite record not found for nickname: {nickname}")
 
-    normalized_status = _normalize_round_status(round_status, True)
+    if preserve_existing_status:
+        normalized_status = str(existing_record.round_status or "").strip() or ROUND_STATUS_READY
+    else:
+        normalized_status = _normalize_round_status(round_status, True)
     write_time = datetime.now()
     normalized_limit_time = existing_record.last_limit_time
     if update_last_limit_time:
