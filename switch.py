@@ -1053,7 +1053,7 @@ def _detect_slot_nickname_once(camera, nickname_match_config):
 
 def detect_current_execution_slot_from_launcher(camera):
     """启动入口：进入选区页后，复用线程6昵称模板链路识别当前执行位。"""
-    update_overlay_mini("启动中：识别当前昵称")
+    set_overlay_mini("启动中：识别昵称")
     if not _step02_server_list(camera, suppress_failure_output=True):
         print("[启动] 未能进入启动器选区页，无法识别当前昵称。")
         logger.error("[启动] 未能进入启动器选区页，无法识别当前昵称。")
@@ -1185,9 +1185,28 @@ def _step05_space(camera, suppress_failure_output=False):
         timeout=config.SWITCH_SPACE_MATCH_TIMEOUT_SECONDS,
     )
     if center is None:
-        if not suppress_failure_output:
-            async_push_msg("【切换流程】未找到空格弹窗", "30 秒内未识别到空格弹窗。")
-        return False
+        logger.warning("[切换流程] 首次未识别到空格弹窗，准备按 10 秒间隔重试。")
+        for retry_index in range(1, config.SWITCH_SPACE_RETRY_COUNT + 1):
+            update_overlay_mini(f"空格重试{retry_index}")
+            safe_sleep(config.SWITCH_SPACE_RETRY_INTERVAL_SECONDS)
+            center = _wait_for_match_center(
+                camera,
+                "kg",
+                config.RGN_KG,
+                timeout=1.0,
+            )
+            if center is not None:
+                logger.info("[切换流程] 空格弹窗在第 %s 次补重试后识别成功。", retry_index)
+                break
+
+        if center is None:
+            if not suppress_failure_output:
+                async_push_msg(
+                    "【切换流程】未找到空格弹窗",
+                    f"首次识别失败后，已按 10 秒间隔重试 {config.SWITCH_SPACE_RETRY_COUNT} 次，仍未识别到空格弹窗。",
+                )
+            return False
+
     # 弹窗刚识别到时按钮可能还没完全可点，点击前后各留 1 秒，避免点空或页面还没吃到输入。
     time.sleep(config.SWITCH_SPACE_BEFORE_CLICK_WAIT_SECONDS)
     fast_click(center)
