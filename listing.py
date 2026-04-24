@@ -20,6 +20,7 @@ from config import (
     LISTING_ROUND_SUCCESS_LIMIT,
     LISTING_SCAN_MISS_THRESHOLD,
     LISTING_SKIP_BALANCE_THRESHOLD,
+    LISTING_SUBMIT_CONFIRM_CLICK_POS,
     MAX_LISTING_RETRY,
     MONITOR_TEXT_JIAOSHI,
     MONITOR_TEXT_SHANGJIA,
@@ -205,6 +206,7 @@ def _click_template_and_verify_disappear(
     monitor,
     template,
     threshold,
+    click_pos=None,
     appear_attempts=10,
     disappear_attempts=5,
     poll_interval=0.12,
@@ -224,7 +226,7 @@ def _click_template_and_verify_disappear(
         return {"status": "not_found"}
 
     safe_sleep(0.08)
-    fast_click(target_center)
+    fast_click(click_pos or target_center)
 
     for _ in range(disappear_attempts):
         safe_sleep(poll_interval)
@@ -262,6 +264,7 @@ def _confirm_listing_submit_success(camera_obj):
         LISTING_SUBMIT_VERIFY_REGION,
         submit_template,
         LISTING_SUBMIT_VERIFY_MATCH_THRESHOLD,
+        click_pos=LISTING_SUBMIT_CONFIRM_CLICK_POS,
     )
 
 
