@@ -938,7 +938,7 @@ def _verify_slot_nickname(camera, slot_number):
     )
 
 
-def _try_verify_slot_nickname_once(camera, slot_number):
+def _try_verify_slot_nickname_once(camera, slot_number, sync_running_status=True):
     """执行一次昵称模板匹配，返回是否成功和失败详情。"""
     update_overlay_mini(f"正在校验执行位 {slot_number} 的昵称")
     try:
@@ -966,7 +966,8 @@ def _try_verify_slot_nickname_once(camera, slot_number):
         ):
             print(f"[切换流程] 执行位 {slot_number} 的昵称模板校验通过：{template_path}")
             logger.info("[切换流程] 执行位 %s 的昵称模板校验通过：%s", slot_number, template_path)
-            _sync_verified_slot_status_to_running(slot_number)
+            if sync_running_status:
+                _sync_verified_slot_status_to_running(slot_number)
             return True, ""
         safe_sleep(0.5)
 
@@ -1872,7 +1873,11 @@ def _switch_account_for_slot_nonblocking(camera, account_id):
 
 def _verify_startup_listing_slot_nonblocking(camera, target_slot, server_coord_index):
     """启动页上架模式专用：昵称校验失败时重登同执行位账号后再重试。"""
-    verified, failure_detail = _try_verify_slot_nickname_once(camera, target_slot)
+    verified, failure_detail = _try_verify_slot_nickname_once(
+        camera,
+        target_slot,
+        sync_running_status=False,
+    )
     if verified:
         return True, ""
 
@@ -1890,7 +1895,11 @@ def _verify_startup_listing_slot_nonblocking(camera, target_slot, server_coord_i
         if not _step03_select(camera, server_coord_index, suppress_failure_output=True):
             return False, f"昵称模板重试 {retry_index}/2 时未能重新选择目标大区。"
 
-        verified, failure_detail = _try_verify_slot_nickname_once(camera, target_slot)
+        verified, failure_detail = _try_verify_slot_nickname_once(
+            camera,
+            target_slot,
+            sync_running_status=False,
+        )
         if verified:
             return True, ""
 

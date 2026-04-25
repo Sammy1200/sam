@@ -9,7 +9,7 @@ import unicodedata
 import state
 from local_switch_account_config import load_purchase_price_rule_config
 from config import (
-    MONITOR_PRICE, MONITOR_CAPACITY, MONITOR_BALANCE,
+    MONITOR_PRICE, MONITOR_PRICE_SECONDARY, MONITOR_CAPACITY, MONITOR_BALANCE,
     UPSCALE, STANDARD_W, STANDARD_H, TEMPLATE_DIR,
     BALANCE_TEMPLATE_DIR, BALANCE_TEMPLATE_MATCH_THRESHOLD, BALANCE_TEMPLATE_DUPLICATE_GAP,
     BALANCE_TEMPLATE_DOT_MATCH_THRESHOLD, BALANCE_TEMPLATE_UNIT_MATCH_THRESHOLD,
@@ -73,7 +73,7 @@ def is_image_present(frame, monitor, template, threshold=0.8):
         return False
 
 
-def get_number(frame, templates):
+def get_number(frame, templates, monitor=MONITOR_PRICE, source_key="primary"):
     try:
         pixel_color = frame[207, 1320]
         target_bgr = [51, 205, 255]
@@ -82,13 +82,10 @@ def get_number(frame, templates):
                       abs(int(pixel_color[2]) - target_bgr[2]))
         if color_diff > 45:
             return None
-        cropped = crop_frame(frame, MONITOR_PRICE)
+        cropped = crop_frame(frame, monitor)
         gray = cv2.cvtColor(cropped, cv2.COLOR_BGRA2GRAY)
-        # 价格区域完全不变时，直接复用上一帧识别结果，避免重复模板匹配。
-        roi_bytes = gray.tobytes()
-        # 价格区域完全不变时，直接复用上一帧识别结果，避免重复模板匹配。
-        roi_bytes = gray.tobytes()
-        roi_bytes = gray.tobytes()
+        # 同一区域完全不变时，直接复用上一帧识别结果，避免重复模板匹配。
+        roi_bytes = (source_key, gray.tobytes())
         if state.price_roi_cache_bytes == roi_bytes:
             return state.price_roi_cache_value
 
@@ -161,11 +158,12 @@ def _match_digit_hits(gray, templates, digit_order):
     return _merge_digit_hits(detected)
 
 
-def _cache_price_decision(roi_bytes, decision, price_value, price_text):
+def _cache_price_decision(roi_bytes, decision, price_value, price_text, source_key):
     state.price_decision_cache_bytes = roi_bytes
     state.price_decision_cache_decision = decision
     state.price_decision_cache_value = price_value
     state.price_decision_cache_text = price_text
+    state.price_decision_cache_source = source_key
 
 
 def _get_price_prefix_decision(gray, templates):
@@ -194,7 +192,7 @@ def _get_price_prefix_decision(gray, templates):
     return None, two_digit_prefix or first_digit
 
 
-def get_price_decision(frame, templates):
+def _get_price_decision_for_monitor(frame, templates, monitor, source_key):
     try:
         pixel_color = frame[207, 1320]
         target_bgr = [51, 205, 255]
@@ -202,27 +200,28 @@ def get_price_decision(frame, templates):
                       abs(int(pixel_color[1]) - target_bgr[1]) +
                       abs(int(pixel_color[2]) - target_bgr[2]))
         if color_diff > 45:
-            return "unknown", None, None
+            return "unknown", None, None, source_key
 
-        cropped = crop_frame(frame, MONITOR_PRICE)
+        cropped = crop_frame(frame, monitor)
         gray = cv2.cvtColor(cropped, cv2.COLOR_BGRA2GRAY)
-        roi_bytes = gray.tobytes()
+        roi_bytes = (source_key, gray.tobytes())
         if state.price_decision_cache_bytes == roi_bytes:
             return (
                 state.price_decision_cache_decision,
                 state.price_decision_cache_value,
                 state.price_decision_cache_text,
+                state.price_decision_cache_source,
             )
 
         prefix_decision, prefix_text = _get_price_prefix_decision(gray, templates)
         if prefix_decision is not None:
-            _cache_price_decision(roi_bytes, prefix_decision, None, prefix_text)
-            return prefix_decision, None, prefix_text
+            _cache_price_decision(roi_bytes, prefix_decision, None, prefix_text, source_key)
+            return prefix_decision, None, prefix_text, source_key
 
-        price_value = get_number(frame, templates)
+        price_value = get_number(frame, templates, monitor, source_key)
         if price_value is None:
-            _cache_price_decision(roi_bytes, "unknown", None, None)
-            return "unknown", None, None
+            _cache_price_decision(roi_bytes, "unknown", None, None, source_key)
+            return "unknown", None, None, source_key
 
         price_text = str(price_value)
         if (
@@ -233,10 +232,22 @@ def get_price_decision(frame, templates):
             decision = "accept"
         else:
             decision = "reject"
-        _cache_price_decision(roi_bytes, decision, price_value, price_text)
-        return decision, price_value, price_text
+        _cache_price_decision(roi_bytes, decision, price_value, price_text, source_key)
+        return decision, price_value, price_text, source_key
     except:
-        return "unknown", None, None
+        return "unknown", None, None, source_key
+
+
+def get_price_decision(frame, templates):
+    primary_result = _get_price_decision_for_monitor(frame, templates, MONITOR_PRICE, "primary")
+    if primary_result[0] == "accept":
+        return primary_result
+
+    secondary_result = _get_price_decision_for_monitor(frame, templates, MONITOR_PRICE_SECONDARY, "secondary")
+    if secondary_result[0] != "unknown":
+        return secondary_result
+
+    return primary_result
 
 
 def read_text_from_area(frame, monitor, is_number_mode=False):

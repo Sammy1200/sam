@@ -379,7 +379,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                     last_frame = frame
                     last_frame_time = time.time()
 
-                price_action, price_value, price_text = get_price_decision(frame, templates)
+                price_action, price_value, price_text, price_source = get_price_decision(frame, templates)
 
                 if price_action != "unknown":
                     state.limit_count = 0
@@ -388,6 +388,11 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                     price = price_text if price_value is not None else f"前缀识别 {price_text}"
 
                     if price_action == "accept":
+                        if price_source == "primary":
+                            window_click_end_time = time.perf_counter() + 0.008
+                            while time.perf_counter() < window_click_end_time:
+                                fast_click((1715, 180))
+                                precise_sleep(0.002)
                         buy_click_end_time = time.perf_counter() + 0.012
                         while time.perf_counter() < buy_click_end_time:
                             fast_click(BUY_POS)

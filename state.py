@@ -37,6 +37,7 @@ price_decision_cache_bytes = None
 price_decision_cache_decision = None
 price_decision_cache_value = None
 price_decision_cache_text = None
+price_decision_cache_source = None
 
 # --- runtime-loaded engines/templates ---
 ocr_engine = None

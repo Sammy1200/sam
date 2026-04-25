@@ -10,7 +10,8 @@ TEMPLATE_DIR = os.path.join(SCRIPT_DIR, "logo", "shangjia")
 BALANCE_TEMPLATE_DIR = os.path.join(SCRIPT_DIR, "logo", "yue")
 
 # --- 监控区域 ---
-MONITOR_PRICE = {"left": 1473, "top": 181, "width": 79, "height": 22}
+MONITOR_PRICE = {"left": 1750, "top": 181, "width": 82, "height": 22}
+MONITOR_PRICE_SECONDARY = {"left": 1473, "top": 181, "width": 79, "height": 22}
 MONITOR_SUCCESS = {"left": 780, "top": 190, "width": 370, "height": 143}
 MONITOR_SHOP = {"left": 1600, "top": 100, "width": 66, "height": 55}
 MONITOR_JIAOYIHANG = {"left": 1698, "top": 184, "width": 64, "height": 87}
