@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from html import escape
+import json
 import re
 
 import web_view_templates as base_templates
@@ -497,6 +498,81 @@ def _build_inline_save_scroll_script():
 """
 
 
+def _build_refresh_scroll_script():
+    return """
+<script>
+(function () {
+  var storagePrefix = "web-view-refresh-scroll:";
+
+  function getFormStorageKey(form) {
+    try {
+      var actionUrl = new URL(form.getAttribute("action") || window.location.pathname, window.location.href);
+      return storagePrefix + actionUrl.pathname;
+    } catch (error) {
+      return storagePrefix + window.location.pathname;
+    }
+  }
+
+  function preserveRefreshScroll(form) {
+    if (!form) return;
+    try {
+      window.sessionStorage.setItem(
+        getFormStorageKey(form),
+        JSON.stringify({
+          x: window.scrollX || window.pageXOffset || 0,
+          y: window.scrollY || window.pageYOffset || 0
+        })
+      );
+    } catch (error) {
+      // 浏览器禁用 sessionStorage 时，刷新仍按原流程提交。
+    }
+  }
+
+  function restoreRefreshScroll() {
+    var key = storagePrefix + window.location.pathname;
+    var rawValue = "";
+    try {
+      rawValue = window.sessionStorage.getItem(key) || "";
+      window.sessionStorage.removeItem(key);
+    } catch (error) {
+      rawValue = "";
+    }
+    if (!rawValue) return;
+
+    var payload;
+    try {
+      payload = JSON.parse(rawValue);
+    } catch (error) {
+      return;
+    }
+
+    var targetX = Math.max(0, Number(payload.x) || 0);
+    var targetY = Math.max(0, Number(payload.y) || 0);
+    function restore() {
+      window.scrollTo(targetX, targetY);
+    }
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", restore, { once: true });
+    } else {
+      restore();
+    }
+    window.requestAnimationFrame(restore);
+    window.setTimeout(restore, 0);
+  }
+
+  window.__preserveRefreshScroll = preserveRefreshScroll;
+  restoreRefreshScroll();
+  document.querySelectorAll('form[data-refresh-preserve-scroll="true"]').forEach(function (form) {
+    form.addEventListener("submit", function () {
+      preserveRefreshScroll(form);
+    });
+  });
+})();
+</script>
+"""
+
+
 def _build_flash_cleanup_script(edit_result):
     if not edit_result or str(edit_result.get("status") or "").strip() != "success":
         return ""
@@ -541,6 +617,54 @@ def _build_saved_button_state_script(edit_result):
     if (submitButton) {{
       submitButton.classList.add("is-saved");
     }}
+  }});
+}})();
+</script>
+"""
+
+
+def _build_refresh_button_state_script(refresh_result):
+    if not refresh_result or str(refresh_result.get("status") or "").strip() != "success":
+        return ""
+
+    scope = str(refresh_result.get("scope") or "").strip()
+    target_machine_id = str(refresh_result.get("target_machine_id") or "").strip()
+    if scope not in ("public_local_refresh", "remote_refresh"):
+        return ""
+    if scope == "remote_refresh" and not target_machine_id:
+        return ""
+
+    return f"""
+<script>
+(function () {{
+  var scope = {json.dumps(scope, ensure_ascii=False)};
+  var targetMachineId = {json.dumps(target_machine_id, ensure_ascii=False)};
+
+  function formValue(form, name) {{
+    var input = form.querySelector('input[name="' + name + '"]');
+    return input ? String(input.value || "").trim() : "";
+  }}
+
+  function isTargetRefreshForm(form) {{
+    if (scope === "public_local_refresh") {{
+      return formValue(form, "target_scope") === "local";
+    }}
+    if (scope === "remote_refresh") {{
+      return formValue(form, "target_machine_id") === targetMachineId;
+    }}
+    return false;
+  }}
+
+  document.querySelectorAll('form[data-refresh-preserve-scroll="true"]').forEach(function (form) {{
+    if (!isTargetRefreshForm(form)) {{
+      return;
+    }}
+    var button = form.querySelector(".section-refresh-button");
+    if (!button) {{
+      return;
+    }}
+    button.classList.add("is-saved");
+    button.textContent = "已刷新";
   }});
 }})();
 </script>
@@ -1109,7 +1233,9 @@ def render_index_page(
 {page_edit_result_html}
 {_build_restore_scroll_script(edit_result)}
 {_build_inline_save_scroll_script() if not read_only_mode and not using_demo_rows else ""}
+{_build_refresh_scroll_script()}
 {_build_saved_button_state_script(edit_result)}
+{_build_refresh_button_state_script(refresh_result)}
 {_build_flash_cleanup_script(edit_result)}
 {_render_local_relative_time_script() if (rows or remote_machine_sections) else ""}
 {_render_strip_year_display_script()}
@@ -1124,14 +1250,14 @@ def _build_section_refresh_action(form_action, hidden_inputs, button_label, meta
     button_attrs = (
         ' type="submit"'
         ' class="section-refresh-button"'
-        ' onclick="this.disabled=true;this.textContent=\'刷新中...\';this.form.submit();"'
+        ' onclick="window.__preserveRefreshScroll&&window.__preserveRefreshScroll(this.form);this.disabled=true;this.textContent=\'刷新中...\';this.form.submit();"'
     )
     if disabled:
         button_attrs += " disabled"
     meta_html = f'<div class="section-refresh-meta">{escape(str(meta_text))}</div>' if str(meta_text or "").strip() else ""
     return f"""
 <div class="section-action-cluster">
-  <form method="post" action="{escape(str(form_action), quote=True)}" class="section-refresh-form">
+  <form method="post" action="{escape(str(form_action), quote=True)}" class="section-refresh-form" data-refresh-preserve-scroll="true">
     {hidden_html}
     <button{button_attrs}>{escape(str(button_label))}</button>
   </form>
@@ -1155,6 +1281,9 @@ def _build_remote_section_refresh_action(section):
 
 
 def _render_remote_refresh_toolbar(section, refresh_result=None):
+    if _is_active_remote_refresh_section(section, refresh_result):
+        if str(refresh_result.get("status") or "").strip() == "success":
+            return ""
     return _render_remote_refresh_result(section, refresh_result)
 
 
@@ -1206,22 +1335,67 @@ def _build_public_local_section_refresh_action(view_rows_result=None):
 def _build_public_remote_section_refresh_action(section):
     machine_id = str(section.get("machine_id") or "").strip()
     last_refresh_time = _format_snapshot_relative_time(section.get("last_report_time"))
+    machine_label = str(section.get("machine_display_name") or section.get("machine_id") or "远端").strip()
+    machine_label = machine_label.replace("电脑", "").strip() or "远端"
     return _build_section_refresh_action(
         "/public-snapshot/refresh",
         (("target_scope", "remote"), ("target_machine_id", machine_id)),
         "\u5237\u65b0",
-        f"2\u53f7\u6700\u540e\u5feb\u7167\u65f6\u95f4\uff1a{last_refresh_time}",
+        f"{machine_label}\u6700\u540e\u5feb\u7167\u65f6\u95f4\uff1a{last_refresh_time}",
         disabled=not bool(machine_id),
     )
 
 
 def _render_public_local_refresh_toolbar(machine_display_name, refresh_result=None):
     del machine_display_name
+    if refresh_result and str(refresh_result.get("status") or "").strip() == "success":
+        return ""
     return _render_public_local_refresh_result(refresh_result)
 
 
 def _render_public_remote_refresh_toolbar(section, refresh_result=None):
-    return _render_remote_refresh_result(section, refresh_result)
+    return _render_remote_refresh_toolbar(section, refresh_result)
+
+
+def _render_public_remote_machine_section(section, grid_index, refresh_result=None):
+    row_items = _build_remote_account_list_rows(section)
+    summary_html = _build_linear_summary_cards(section.get("machine_daily_summaries"))
+    empty_message = str(section.get("message") or "暂无远端快照数据。")
+    empty_html = (
+        f'<p class="muted-text">{escape(empty_message)}</p>'
+        if not (section.get("rows") or [])
+        else ""
+    )
+    display_name = section.get("machine_display_name") or section.get("machine_id") or "远端电脑"
+    table_html = _render_table(
+        (
+            "\u6635\u79f0",
+            "\u9053\u5177\u5e93\u5b58",
+            "\u4f59\u989d\uff08\u4e07\uff09",
+            "\u53ef\u8fd0\u884c\u65f6\u95f4",
+            "\u51b7\u5374\u5269\u4f59\u65f6\u95f4",
+            "\u8d26\u53f7\u72b6\u6001",
+            "\u66f4\u65b0\u65f6\u95f4",
+        ),
+        row_items,
+    )
+    return f"""
+  <div class="section stage-panel stage-secondary">
+    {_render_linear_section_title(
+        display_name,
+        "",
+        eyebrow="Snapshot",
+        action_html=_build_public_remote_section_refresh_action(section),
+    )}
+    {_render_public_remote_refresh_toolbar(section, refresh_result)}
+    {summary_html}
+    {empty_html}
+    <div class="data-module data-module-public">
+      {_render_module_title(f"Snapshot Grid {grid_index:02d}", "Readonly remote snapshot table for comparison only.")}
+      {table_html}
+    </div>
+  </div>
+"""
 
 
 def render_public_snapshot_page(view_rows_result, remote_machine_sections=None, refresh_result=None):
@@ -1231,24 +1405,27 @@ def render_public_snapshot_page(view_rows_result, remote_machine_sections=None, 
     local_row_items = _build_public_local_snapshot_rows(rows)
 
     remote_machine_sections = list(remote_machine_sections or [])
-    remote_section = remote_machine_sections[0] if remote_machine_sections else {
-        "machine_id": "",
-        "machine_display_name": "2\u53f7\u7535\u8111",
-        "rows": [],
-        "machine_daily_summaries": [],
-        "message": "\u6682\u65e0 2\u53f7\u5feb\u7167\u6570\u636e\u3002",
-        "last_report_time": "",
-    }
-    remote_row_items = _build_remote_account_list_rows(remote_section)
-    remote_summary_html = _build_linear_summary_cards(remote_section.get("machine_daily_summaries"))
-    remote_empty_message = str(remote_section.get("message") or "\u6682\u65e0 2\u53f7\u5feb\u7167\u6570\u636e\u3002")
-    remote_display_name = remote_section.get("machine_display_name") or "2\u53f7\u7535\u8111"
-    return_home_label = "\u8fd4\u56de\u9996\u9875"
-    remote_empty_html = (
-        f'<p class="muted-text">{escape(remote_empty_message)}</p>'
-        if not (remote_section.get("rows") or [])
-        else ""
+    if not remote_machine_sections:
+        remote_machine_sections = [
+            {
+                "machine_id": "",
+                "machine_display_name": "2\u53f7\u7535\u8111",
+                "rows": [],
+                "machine_daily_summaries": [],
+                "message": "\u6682\u65e0 2\u53f7\u5feb\u7167\u6570\u636e\u3002",
+                "last_report_time": "",
+            }
+        ]
+    remote_sections_html = "".join(
+        _render_public_remote_machine_section(
+            section,
+            grid_index=index,
+            refresh_result=refresh_result,
+        )
+        for index, section in enumerate(remote_machine_sections, start=2)
     )
+    has_remote_rows = any(section.get("rows") for section in remote_machine_sections)
+    return_home_label = "\u8fd4\u56de\u9996\u9875"
 
     local_table_html = _render_table(
         (
@@ -1261,18 +1438,6 @@ def render_public_snapshot_page(view_rows_result, remote_machine_sections=None, 
             "\u66f4\u65b0\u65f6\u95f4",
         ),
         [row[1:] for row in local_row_items],
-    )
-    remote_table_html = _render_table(
-        (
-            "\u6635\u79f0",
-            "\u9053\u5177\u5e93\u5b58",
-            "\u4f59\u989d\uff08\u4e07\uff09",
-            "\u53ef\u8fd0\u884c\u65f6\u95f4",
-            "\u51b7\u5374\u5269\u4f59\u65f6\u95f4",
-            "\u8d26\u53f7\u72b6\u6001",
-            "\u66f4\u65b0\u65f6\u95f4",
-        ),
-        remote_row_items,
     )
 
     body_html = f"""
@@ -1292,27 +1457,15 @@ def render_public_snapshot_page(view_rows_result, remote_machine_sections=None, 
     </div>
   </div>
 
-  <div class="section stage-panel stage-secondary">
-    {_render_linear_section_title(
-        remote_display_name,
-        "",
-        eyebrow="Snapshot",
-        action_html=_build_public_remote_section_refresh_action(remote_section),
-    )}
-    {_render_public_remote_refresh_toolbar(remote_section, refresh_result)}
-    {remote_summary_html}
-    {remote_empty_html}
-    <div class="data-module data-module-public">
-      {_render_module_title("Snapshot Grid 02", "Readonly remote snapshot table for comparison only.")}
-      {remote_table_html}
-    </div>
-  </div>
+{remote_sections_html}
 
   <div class="detail-back-link">
     {_render_linear_page_action("/", return_home_label)}
   </div>
 
-  {_render_local_relative_time_script() if (rows or remote_section.get("rows")) else ""}
+  {_build_refresh_scroll_script()}
+  {_build_refresh_button_state_script(refresh_result)}
+  {_render_local_relative_time_script() if (rows or has_remote_rows) else ""}
   {_render_strip_year_display_script()}
 </div>
 """

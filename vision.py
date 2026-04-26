@@ -177,6 +177,8 @@ def _get_price_prefix_decision(gray, templates):
     if two_digit_prefix:
         if two_digit_prefix in PURCHASE_PRICE_RULE_CONFIG["direct_accept_prefixes_2digit"]:
             return "accept", two_digit_prefix
+        if two_digit_prefix in PURCHASE_PRICE_RULE_CONFIG["skip_item_click_prefixes_2digit"]:
+            return "accept_skip_item_click", two_digit_prefix
         if two_digit_prefix in PURCHASE_PRICE_RULE_CONFIG["direct_reject_prefixes_2digit"]:
             return "reject", two_digit_prefix
         if two_digit_prefix in PURCHASE_PRICE_RULE_CONFIG["full_check_prefixes_2digit"]:
@@ -184,6 +186,8 @@ def _get_price_prefix_decision(gray, templates):
 
     if first_digit in PURCHASE_PRICE_RULE_CONFIG["direct_accept_prefixes_1digit"]:
         return "accept", first_digit
+    if first_digit in PURCHASE_PRICE_RULE_CONFIG["skip_item_click_prefixes_1digit"]:
+        return "accept_skip_item_click", first_digit
     if first_digit in PURCHASE_PRICE_RULE_CONFIG["direct_reject_prefixes_1digit"]:
         return "reject", first_digit
     if first_digit in PURCHASE_PRICE_RULE_CONFIG["full_check_prefixes_1digit"]:
@@ -240,7 +244,7 @@ def _get_price_decision_for_monitor(frame, templates, monitor, source_key):
 
 def get_price_decision(frame, templates):
     primary_result = _get_price_decision_for_monitor(frame, templates, MONITOR_PRICE, "primary")
-    if primary_result[0] == "accept":
+    if primary_result[0] in ("accept", "accept_skip_item_click"):
         return primary_result
 
     secondary_result = _get_price_decision_for_monitor(frame, templates, MONITOR_PRICE_SECONDARY, "secondary")

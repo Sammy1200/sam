@@ -150,6 +150,10 @@ def _build_purchase_price_rule_config(data):
             data.get("purchase_price_direct_accept_prefixes"),
             "purchase_price_direct_accept_prefixes",
         ),
+        "skip_item_click_prefixes": _normalize_purchase_price_prefixes(
+            data.get("purchase_price_skip_item_click_prefixes"),
+            "purchase_price_skip_item_click_prefixes",
+        ),
         "direct_reject_prefixes": _normalize_purchase_price_prefixes(
             data.get("purchase_price_direct_reject_prefixes"),
             "purchase_price_direct_reject_prefixes",
@@ -163,11 +167,13 @@ def _build_purchase_price_rule_config(data):
     prefix_owner_map = {}
     action_prefix_map = {
         "purchase_price_direct_accept_prefixes": rule_config["direct_accept_prefixes"],
+        "purchase_price_skip_item_click_prefixes": rule_config["skip_item_click_prefixes"],
         "purchase_price_direct_reject_prefixes": rule_config["direct_reject_prefixes"],
         "purchase_price_full_check_prefixes": rule_config["full_check_prefixes"],
     }
     for config_key, field_name in (
         ("direct_accept_prefixes", "purchase_price_direct_accept_prefixes"),
+        ("skip_item_click_prefixes", "purchase_price_skip_item_click_prefixes"),
         ("direct_reject_prefixes", "purchase_price_direct_reject_prefixes"),
         ("full_check_prefixes", "purchase_price_full_check_prefixes"),
     ):
@@ -206,7 +212,12 @@ def _build_purchase_price_rule_config(data):
                         "会产生跨动作覆盖冲突，请保持动作一致或删除冗余配置"
                     )
 
-    for config_key in ("direct_accept_prefixes", "direct_reject_prefixes", "full_check_prefixes"):
+    for config_key in (
+        "direct_accept_prefixes",
+        "skip_item_click_prefixes",
+        "direct_reject_prefixes",
+        "full_check_prefixes",
+    ):
         one_digit_prefixes, two_digit_prefixes = _split_purchase_price_prefixes_by_length(rule_config[config_key])
         rule_config[f"{config_key}_1digit"] = frozenset(one_digit_prefixes)
         rule_config[f"{config_key}_2digit"] = frozenset(two_digit_prefixes)
@@ -239,6 +250,7 @@ def load_purchase_price_rule_config(force_reload=False):
             "[抢购价格规则] 已加载："
             f"完整价格>{rule_config['min_exclusive']} 且 <{rule_config['max_exclusive']}，"
             f"直接抢前缀={_format_prefixes_for_log(rule_config['direct_accept_prefixes'])}，"
+            f"跳过商品点击前缀={_format_prefixes_for_log(rule_config['skip_item_click_prefixes'])}，"
             f"直接不抢前缀={_format_prefixes_for_log(rule_config['direct_reject_prefixes'])}，"
             f"指定走完整价格前缀={_format_prefixes_for_log(rule_config['full_check_prefixes'])}，"
             f"来源={source_path}"

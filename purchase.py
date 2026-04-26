@@ -387,8 +387,9 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                     last_refresh = time.time()
                     price = price_text if price_value is not None else f"前缀识别 {price_text}"
 
-                    if price_action == "accept":
-                        if price_source == "primary":
+                    if price_action in ("accept", "accept_skip_item_click"):
+                        if price_source == "primary" and price_action != "accept_skip_item_click":
+                            # 点击商品
                             window_click_end_time = time.perf_counter() + 0.008
                             while time.perf_counter() < window_click_end_time:
                                 fast_click((1715, 180))
