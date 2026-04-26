@@ -13,6 +13,7 @@ from account_db import (
     ROUND_STATUS_BALANCE_LOW,
     ROUND_STATUS_LIMITED,
     ROUND_STATUS_MANUAL_PAUSE,
+    ROUND_STATUS_READY,
     ROUND_STATUS_RUNTIME_REACHED,
     ROUND_STATUS_RUNNING,
     ROUND_STATUS_UNKNOWN,
@@ -113,7 +114,12 @@ def _schedule_remote_snapshot_event(event_name, synchronous=False):
         logger.warning("[网页同步] 事件触发最小快照失败：event=%s reason=%s", event_name, result.get("message"))
 
 
-def reset_round_runtime_state(reason, reset_purchase_runtime=True, reset_round_counters=True):
+def reset_round_runtime_state(
+    reason,
+    reset_purchase_runtime=True,
+    reset_round_counters=True,
+    round_status=ROUND_STATUS_RUNNING,
+):
     """Reset per-round runtime stats after mandatory pre-listing."""
     if reset_round_counters:
         _clear_round_counters()
@@ -122,7 +128,7 @@ def reset_round_runtime_state(reason, reset_purchase_runtime=True, reset_round_c
     state.listing_periodic_disabled = False
     state.listing_periodic_disabled_reason = ""
     state.listing_periodic_skip_logged = False
-    state.round_status = ROUND_STATUS_RUNNING
+    state.round_status = round_status
     state.last_resume_time = None
     state.purchase_timer_active = False
     state.account_round_end_status = ""
@@ -441,6 +447,8 @@ def _normalize_round_status(raw_status, is_final):
         return ROUND_STATUS_BALANCE_LOW
     if normalized == "\u62a2\u8d2d\u65f6\u957f\u5df2\u5230":
         return ROUND_STATUS_RUNTIME_REACHED
+    if normalized == ROUND_STATUS_READY:
+        return ROUND_STATUS_READY
     if normalized in ("\u624b\u52a8\u7ed3\u675f", "\u4eba\u5de5\u6682\u505c"):
         return ROUND_STATUS_MANUAL_PAUSE
     if normalized == "\u672a\u77e5\u5f02\u5e38":

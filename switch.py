@@ -87,6 +87,7 @@ _SWITCH_WAIT_KEY_LABELS = {
     "entry_timeout": "入口识别超时秒数",
     "login_click_wait": "登录点击后等待秒数",
     "login_timeout": "登录页识别超时秒数",
+    "login_retry_count": "登录页重试次数",
     "verify_wait": "校验等待秒数",
     "heping_timeout": "和平精英页识别超时秒数",
     "maximize_wait": "窗口最大化等待秒数",
@@ -793,6 +794,7 @@ def _click_switch_user_and_wait_login(camera):
         entry_timeout=config.SWITCH_USER_ENTRY_MATCH_TIMEOUT_SECONDS,
         login_click_wait=config.SWITCH_SWITCH_USER_CLICK_WAIT_SECONDS,
         login_timeout=config.SWITCH_LOGIN_PAGE_MATCH_TIMEOUT_SECONDS,
+        login_retry_count=config.SWITCH_LOGIN_PAGE_RETRY_COUNT,
     )
     center, failure_detail = _wait_for_switch_user_entry_with_foreground_retry(camera)
     if center is None:
@@ -805,13 +807,7 @@ def _click_switch_user_and_wait_login(camera):
     fast_click(center)
     safe_sleep(config.SWITCH_SWITCH_USER_CLICK_WAIT_SECONDS)
 
-    login_center = _wait_for_match_center(
-        camera,
-        "denglu",
-        config.SWITCH_LOGIN_TEMPLATE_REGION,
-        timeout=config.SWITCH_LOGIN_PAGE_MATCH_TIMEOUT_SECONDS,
-        threshold=config.SWITCH_UI_MATCH_THRESHOLD,
-    )
+    login_center = _wait_for_login_page_with_retries(camera)
     if login_center is None:
         pause_thread6_failure(
             "进入登录页",
@@ -820,6 +816,32 @@ def _click_switch_user_and_wait_login(camera):
         return None
 
     return login_center
+
+
+def _wait_for_login_page_with_retries(camera):
+    """等待登录页出现；首次失败后继续重试指定次数。"""
+    max_attempts = config.SWITCH_LOGIN_PAGE_RETRY_COUNT + 1
+    for attempt_index in range(1, max_attempts + 1):
+        login_center = _wait_for_match_center(
+            camera,
+            "denglu",
+            config.SWITCH_LOGIN_TEMPLATE_REGION,
+            timeout=config.SWITCH_LOGIN_PAGE_MATCH_TIMEOUT_SECONDS,
+            threshold=config.SWITCH_UI_MATCH_THRESHOLD,
+        )
+        if login_center is not None:
+            return login_center
+
+        if attempt_index < max_attempts:
+            retry_index = attempt_index
+            message = (
+                f"[切换流程] 登录页未匹配到，准备重试 "
+                f"{retry_index}/{config.SWITCH_LOGIN_PAGE_RETRY_COUNT}。"
+            )
+            print(message)
+            logger.warning(message)
+
+    return None
 
 
 def _input_and_verify_account(account_id):
@@ -1816,6 +1838,7 @@ def _switch_account_for_slot_nonblocking(camera, account_id):
         entry_timeout=config.SWITCH_USER_ENTRY_MATCH_TIMEOUT_SECONDS,
         login_click_wait=config.SWITCH_SWITCH_USER_CLICK_WAIT_SECONDS,
         login_timeout=config.SWITCH_LOGIN_PAGE_MATCH_TIMEOUT_SECONDS,
+        login_retry_count=config.SWITCH_LOGIN_PAGE_RETRY_COUNT,
     )
     switch_center, failure_detail = _wait_for_switch_user_entry_with_foreground_retry(camera)
     if switch_center is None:
@@ -1824,13 +1847,7 @@ def _switch_account_for_slot_nonblocking(camera, account_id):
     fast_click(switch_center)
     safe_sleep(config.SWITCH_SWITCH_USER_CLICK_WAIT_SECONDS)
 
-    login_center = _wait_for_match_center(
-        camera,
-        "denglu",
-        config.SWITCH_LOGIN_TEMPLATE_REGION,
-        timeout=config.SWITCH_LOGIN_PAGE_MATCH_TIMEOUT_SECONDS,
-        threshold=config.SWITCH_UI_MATCH_THRESHOLD,
-    )
+    login_center = _wait_for_login_page_with_retries(camera)
     if login_center is None:
         return False, "点击切换账号入口后未匹配到登录页。"
 

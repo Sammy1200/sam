@@ -831,7 +831,14 @@ def execute_listing_routine(camera_obj, is_periodic=False, force_balance_check_a
         current_capacity = capacity_result
         while True:
             original_current, original_total = current_capacity
-            remaining = original_total - original_current
+            round_remaining = LISTING_ROUND_SUCCESS_LIMIT - state.round_listing_success_count
+            if round_remaining <= 0:
+                _disable_periodic_listing(f"[上架限制]本轮上架已达 {LISTING_ROUND_SUCCESS_LIMIT}")
+                ui_print("本轮已达上限", save_log=True)
+                break
+
+            capacity_remaining = original_total - original_current
+            remaining = min(capacity_remaining, round_remaining)
             if remaining <= 0:
                 ui_print("容量满看时", save_log=True)
                 recovery_result = _handle_capacity_full_recovery(camera_obj, current_capacity)

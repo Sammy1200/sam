@@ -269,6 +269,7 @@ def _prepare_listing_account_context(slot_number):
         f"启动页上架模式进入执行位 {slot_number}",
         reset_purchase_runtime=False,
         reset_round_counters=True,
+        round_status=ROUND_STATUS_READY,
     )
     state.current_nickname = record.nickname
     state.current_execution_slot = int(record.current_execution_slot or slot_number)
