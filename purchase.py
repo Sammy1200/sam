@@ -19,6 +19,8 @@ from config import (
     FIX_SHOP_POS1,
     FIX_SHOP_POS2,
     FRAME_MAX_AGE,
+    LISTING_PAGE_VERIFY_MATCH_THRESHOLD,
+    LISTING_PAGE_VERIFY_REGION,
     MISMATCH_EXIT_DELAY,
     MONITOR_DIYICI,
     MONITOR_GOUMAI,
@@ -52,10 +54,33 @@ from utils import (
     get_current_elapsed,
     logger,
     precise_sleep,
+    safe_imread,
     safe_get_frame,
     smart_wait,
 )
 from vision import get_balance_recognition, get_price_decision, is_image_present
+
+
+_LISTING_PAGE_TEMPLATE = None
+
+
+def _load_listing_page_template():
+    global _LISTING_PAGE_TEMPLATE
+    if _LISTING_PAGE_TEMPLATE is None:
+        _LISTING_PAGE_TEMPLATE = safe_imread(("logo", "shangjia", "shangjiaye1.png"), 0)
+    return _LISTING_PAGE_TEMPLATE
+
+
+def _is_listing_page(frame):
+    listing_page_template = _load_listing_page_template()
+    if listing_page_template is None:
+        return False
+    return is_image_present(
+        frame,
+        LISTING_PAGE_VERIFY_REGION,
+        listing_page_template,
+        threshold=LISTING_PAGE_VERIFY_MATCH_THRESHOLD,
+    )
 
 
 def async_push_msg(title, content):
@@ -509,6 +534,8 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                                 if is_image_present(frame, MONITOR_DIYICI, temp_diyici, threshold=0.6):
                                     fast_click(DIYICI_CLICK_POS)
                                 elif is_image_present(frame, MONITOR_GOUMAI, temp_goumai, threshold=0.6):
+                                    click_exit()
+                                elif _is_listing_page(frame):
                                     click_exit()
                                 elif (is_image_present(frame, MONITOR_JIAOYIHANG, state.temp_jiaoyi, threshold=0.6) and
                                       not is_image_present(frame, MONITOR_SHOP, temp_shop, threshold=0.6)):

@@ -19,6 +19,7 @@ import vision
 
 
 SAMPLE_NAME_RE = re.compile(r"^(?P<answer>.+?)_(?P<index>\d+)_(?P<kind>roi|full)\.png$", re.IGNORECASE)
+PLAIN_SAMPLE_NAME_RE = re.compile(r"^(?P<answer>.+?)\.png$", re.IGNORECASE)
 
 
 @dataclass
@@ -49,11 +50,22 @@ def load_balance_samples(sample_dir: Path) -> list[BalanceSample]:
     grouped = {}
     for path in sorted(sample_dir.glob("*.png")):
         match = SAMPLE_NAME_RE.match(path.name)
-        if not match:
+        if match:
+            answer = match.group("answer")
+            index = match.group("index")
+            kind = match.group("kind").lower()
+        else:
+            plain_match = PLAIN_SAMPLE_NAME_RE.match(path.name)
+            if not plain_match:
+                continue
+            answer = plain_match.group("answer")
+            index = "plain"
+            kind = "full"
+            if answer.lower().endswith(("_roi", "_full")):
+                continue
+
+        if kind not in ("roi", "full"):
             continue
-        answer = match.group("answer")
-        index = match.group("index")
-        kind = match.group("kind").lower()
         key = (_strip_unit(answer), index)
         entry = grouped.setdefault(key, {"answers": set(), "files": {}})
         entry["answers"].add(answer)

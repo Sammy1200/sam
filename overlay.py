@@ -7,6 +7,7 @@ import os
 import threading
 import time
 import tkinter as tk
+import unicodedata
 from datetime import datetime
 
 import state
@@ -58,6 +59,7 @@ OVERLAY_SCORE_TEXT_PAD_Y = 1
 OVERLAY_SCORE_TITLE_PAD_X = (4, 0)
 OVERLAY_SCORE_VALUE_GAP = (6, 3)
 OVERLAY_SCORE_VALUE_GAP_FIRST_ROW = (6, 3)
+OVERLAY_SCORE_ROLLING_LINE_MAX_WIDTH = 30
 OVERLAY_LOG_PANEL_BG = "#15110d"
 OVERLAY_LOG_PANEL_BORDER = "#241b15"
 OVERLAY_LOG_TEXT_FG = "#9ab284"
@@ -133,6 +135,33 @@ def _get_current_inventory():
 def _format_overlay_value(value, fallback="--"):
     text = str(value or "").strip()
     return text or fallback
+
+
+def _score_text_display_width(text):
+    width = 0
+    for char in str(text or ""):
+        width += 2 if unicodedata.east_asian_width(char) in ("F", "W") else 1
+    return width
+
+
+def _trim_score_text_to_width(text, max_width=OVERLAY_SCORE_ROLLING_LINE_MAX_WIDTH):
+    result = []
+    width = 0
+    for char in str(text or ""):
+        char_width = 2 if unicodedata.east_asian_width(char) in ("F", "W") else 1
+        if width + char_width > max_width:
+            break
+        result.append(char)
+        width += char_width
+    return "".join(result)
+
+
+def _format_score_rolling_line(full_text, short_text):
+    if _score_text_display_width(full_text) <= OVERLAY_SCORE_ROLLING_LINE_MAX_WIDTH:
+        return full_text
+    if _score_text_display_width(short_text) <= OVERLAY_SCORE_ROLLING_LINE_MAX_WIDTH:
+        return short_text
+    return _trim_score_text_to_width(short_text)
 
 
 def _build_score_item(
@@ -393,15 +422,26 @@ def update_score_text():
     }
     try:
         if state.score_var is not None:
+            rolling_lines = [
+                _format_score_rolling_line(
+                    f"执行位 {slot_text}  时间剩余 {remaining_text}",
+                    f"位{slot_text} 时{remaining_text}",
+                ),
+                _format_score_rolling_line(
+                    f"上架成功 {state.round_listing_success_count}  道具库存 {current_inventory}",
+                    f"上架{state.round_listing_success_count} 库存{current_inventory}",
+                ),
+                _format_score_rolling_line(
+                    f"抢购成功 {state.round_purchase_success_count}  抢购失败 {state.round_purchase_fail_count}",
+                    f"抢成{state.round_purchase_success_count} 抢失{state.round_purchase_fail_count}",
+                ),
+                _format_score_rolling_line(
+                    f"余额 {balance_text}",
+                    f"余{balance_text}",
+                ),
+            ]
             state.score_var.set(
-                "\n".join(
-                    [
-                        f"执行位 {slot_text}  时间剩余 {remaining_text}",
-                        f"上架成功 {state.round_listing_success_count}  道具库存 {current_inventory}",
-                        f"抢购成功 {state.round_purchase_success_count}  抢购失败 {state.round_purchase_fail_count}",
-                        f"余额 {balance_text}",
-                    ]
-                )
+                "\n".join(rolling_lines)
             )
         _set_score_panel_values(root, values)
         _apply_log_panel_style(root)
@@ -470,6 +510,46 @@ def start_overlay():
     _overlay_shutdown_requested = False
     _start_pause_hotkey_listener()
     threading.Thread(target=create_overlay, daemon=True).start()
+
+
+def hide_overlay_until_hidden(timeout=3.0):
+    """隐藏启动时的大悬浮窗，并等待 Tk 线程确认完成。"""
+    deadline = time.time() + float(timeout)
+    root = state.overlay_root
+    while root is None and time.time() < deadline:
+        time.sleep(0.05)
+        root = state.overlay_root
+
+    if root is None:
+        return False
+
+    done_event = threading.Event()
+    result = {"ok": False}
+
+    def _hide_root():
+        current_root = state.overlay_root
+        if current_root is None:
+            done_event.set()
+            return
+        try:
+            current_root.withdraw()
+            current_root.update_idletasks()
+            current_root.update()
+            result["ok"] = True
+        except Exception:
+            result["ok"] = False
+        finally:
+            done_event.set()
+
+    try:
+        enqueue_overlay_task(_hide_root)
+    except Exception:
+        return False
+
+    remaining = max(0.0, deadline - time.time())
+    if not done_event.wait(remaining):
+        return False
+    return bool(result["ok"])
 
 
 def ui_print(msg, is_replace=False, save_log=False, show_console=True):

@@ -20,6 +20,8 @@ from config import (
     LISTING_ROUND_SUCCESS_LIMIT,
     LISTING_SCAN_MISS_THRESHOLD,
     LISTING_SKIP_BALANCE_THRESHOLD,
+    LISTING_PAGE_VERIFY_MATCH_THRESHOLD,
+    LISTING_PAGE_VERIFY_REGION,
     LISTING_SUBMIT_CONFIRM_CLICK_POS,
     MAX_LISTING_RETRY,
     MONITOR_TEXT_JIAOSHI,
@@ -74,10 +76,12 @@ from vision import (
     wait_for_ocr_text,
     crop_frame,
 )
+from switch import is_at_gumu, navigate_to_trade, try_return_to_gumu
 
 LISTING_TARGET_PRICE = load_listing_target_price()[0]
 _UNLIST_CONFIRM_TEMPLATE = None
 _LISTING_SUBMIT_TEMPLATE = None
+_LISTING_PAGE_TEMPLATE = None
 STARTUP_LISTING_CAPACITY_POLL_SECONDS = 10.0
 STARTUP_LISTING_FAIL_LIMIT = 5
 
@@ -143,6 +147,22 @@ def _load_listing_submit_template():
     return _LISTING_SUBMIT_TEMPLATE
 
 
+def _load_listing_page_template():
+    global _LISTING_PAGE_TEMPLATE
+    if _LISTING_PAGE_TEMPLATE is not None:
+        return _LISTING_PAGE_TEMPLATE
+
+    template_path = os.path.join(TEMPLATE_DIR, "shangjiaye1.png")
+    if not os.path.isfile(template_path):
+        return None
+
+    raw = cv2.imdecode(np.fromfile(template_path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+    if raw is None:
+        return None
+    _LISTING_PAGE_TEMPLATE = _to_gray_image(raw)
+    return _LISTING_PAGE_TEMPLATE
+
+
 def _find_template_center(frame, monitor, template, threshold):
     if frame is None or template is None:
         return None
@@ -168,6 +188,16 @@ def _find_template_center(frame, monitor, template, threshold):
     center_x = monitor["left"] + max_loc[0] + template_width // 2
     center_y = monitor["top"] + max_loc[1] + template_height // 2
     return center_x, center_y
+
+
+def _is_listing_page_frame(frame):
+    listing_page_template = _load_listing_page_template()
+    return _find_template_center(
+        frame,
+        LISTING_PAGE_VERIFY_REGION,
+        listing_page_template,
+        LISTING_PAGE_VERIFY_MATCH_THRESHOLD,
+    ) is not None
 
 
 def _get_available_listing_slots(capacity_result):
@@ -266,6 +296,43 @@ def _confirm_listing_submit_success(camera_obj):
         LISTING_SUBMIT_VERIFY_MATCH_THRESHOLD,
         click_pos=LISTING_SUBMIT_CONFIRM_CLICK_POS,
     )
+
+
+def _retry_listing_submit_success(camera_obj, retry_count=3):
+    submit_template = _load_listing_submit_template()
+    last_result = {"status": "not_started"}
+    for attempt in range(1, int(retry_count) + 1):
+        last_result = _click_template_and_verify_disappear(
+            camera_obj,
+            LISTING_SUBMIT_VERIFY_REGION,
+            submit_template,
+            LISTING_SUBMIT_VERIFY_MATCH_THRESHOLD,
+            click_pos=LISTING_SUBMIT_CONFIRM_CLICK_POS,
+            appear_attempts=1,
+        )
+        if last_result.get("status") == "success":
+            return {"status": "success", "attempt": attempt}
+        ui_print(f"提交补点{attempt}/3", save_log=True)
+    return last_result
+
+
+def _recover_listing_scene_after_submit_retry(camera_obj):
+    frame = safe_get_frame(camera_obj)
+    if frame is not None and _is_listing_page_frame(frame):
+        ui_print("仍在上架页", save_log=True)
+        return {"status": "listing_page"}
+
+    if is_at_gumu(camera_obj):
+        ui_print("回交易行", save_log=True)
+        if navigate_to_trade(camera_obj):
+            return {"status": "trade"}
+        return {"status": "failed"}
+
+    if try_return_to_gumu(camera_obj, retry_count=3):
+        ui_print("回交易行", save_log=True)
+        if navigate_to_trade(camera_obj):
+            return {"status": "trade"}
+    return {"status": "failed"}
 
 
 def _confirm_unlist_success(camera_obj):
@@ -394,10 +461,13 @@ def _should_disable_listing_by_round_success_limit():
 
 
 def check_and_click_tishi(camera_obj):
+    if state.TEMP_TISHI is None:
+        return False
+
     safe_sleep(0.6)
     frame = safe_get_frame(camera_obj)
     if frame is None:
-        return
+        return False
 
     cropped = crop_frame(frame, MONITOR_TISHI)
     gray = cv2.cvtColor(cropped, cv2.COLOR_BGRA2GRAY)
@@ -411,6 +481,8 @@ def check_and_click_tishi(camera_obj):
         safe_sleep(0.08)
         fast_click((abs_x, abs_y))
         safe_sleep(0.5)
+        return True
+    return False
 
 
 def input_price_with_verify():
@@ -680,6 +752,21 @@ def execute_startup_listing_batch(camera_obj, target_success_count):
 
             submit_result = _confirm_listing_submit_success(camera_obj)
             if submit_result.get("status") != "success":
+                if not first_popup_checked:
+                    first_popup_checked = True
+                    if check_and_click_tishi(camera_obj):
+                        safe_sleep(0.5)
+                        refreshed_capacity = _refresh_capacity_after_listing_success(camera_obj, current_capacity)
+                        if refreshed_capacity is not None:
+                            current_capacity = refreshed_capacity
+                        batch_listed += 1
+                        state.total_listed_count += 1
+                        state.round_listing_success_count += 1
+                        _sync_listing_success_for_current_account()
+                        fail_strike = 0
+                        ui_print(f"上架{batch_listed}", save_log=True)
+                        continue
+
                 fail_strike += 1
                 ui_print(f"失败{fail_strike}/5", save_log=True)
                 if fail_strike >= STARTUP_LISTING_FAIL_LIMIT:
@@ -794,6 +881,25 @@ def execute_listing_routine(camera_obj, is_periodic=False, force_balance_check_a
         if sync_result.status not in ("success", "skipped"):
             ui_print(f"实时库存同步失败：{sync_result.reason}", save_log=True)
 
+    def _record_listing_success(current_capacity, cycle_listed, total_listed, remaining):
+        nonlocal first_popup_checked
+        safe_sleep(0.5)
+        if not first_popup_checked:
+            check_and_click_tishi(camera_obj)
+            first_popup_checked = True
+
+        refreshed_capacity = _refresh_capacity_after_listing_success(camera_obj, current_capacity)
+        if refreshed_capacity is not None:
+            current_capacity = refreshed_capacity
+
+        cycle_listed += 1
+        total_listed += 1
+        state.total_listed_count += 1
+        state.round_listing_success_count += 1
+        _sync_listing_success()
+        ui_print(f"上架验证通过 {cycle_listed}/{remaining}")
+        return current_capacity, cycle_listed, total_listed
+
     try:
         if _should_skip_listing_by_trade_balance_probe(
             camera_obj,
@@ -893,26 +999,48 @@ def execute_listing_routine(camera_obj, is_periodic=False, force_balance_check_a
                     if popup_found and input_price_with_verify():
                         submit_result = _confirm_listing_submit_success(camera_obj)
                         if submit_result.get("status") == "success":
-                            safe_sleep(0.5)
-                            if not first_popup_checked:
-                                check_and_click_tishi(camera_obj)
-                                first_popup_checked = True
-
-                            refreshed_capacity = _refresh_capacity_after_listing_success(camera_obj, current_capacity)
-                            if refreshed_capacity is not None:
-                                current_capacity = refreshed_capacity
-
-                            cycle_listed += 1
-                            total_listed += 1
-                            state.total_listed_count += 1
-                            state.round_listing_success_count += 1
-                            _sync_listing_success()
+                            current_capacity, cycle_listed, total_listed = _record_listing_success(
+                                current_capacity,
+                                cycle_listed,
+                                total_listed,
+                                remaining,
+                            )
                             fail_strike = 0
-                            ui_print(f"上架验证通过 {cycle_listed}/{remaining}")
                             continue
+
+                        if not first_popup_checked:
+                            first_popup_checked = True
+                            if check_and_click_tishi(camera_obj):
+                                current_capacity, cycle_listed, total_listed = _record_listing_success(
+                                    current_capacity,
+                                    cycle_listed,
+                                    total_listed,
+                                    remaining,
+                                )
+                                fail_strike = 0
+                                continue
 
                         fail_strike += 1
                         ui_print(f"上架验证失败，重试 {fail_strike}/{MAX_LISTING_RETRY}")
+                        retry_submit_result = _retry_listing_submit_success(camera_obj, MAX_LISTING_RETRY)
+                        if retry_submit_result.get("status") == "success":
+                            current_capacity, cycle_listed, total_listed = _record_listing_success(
+                                current_capacity,
+                                cycle_listed,
+                                total_listed,
+                                remaining,
+                            )
+                            fail_strike = 0
+                            continue
+
+                        scene_result = _recover_listing_scene_after_submit_retry(camera_obj)
+                        if scene_result.get("status") == "trade":
+                            if not _open_listing_panel(camera_obj):
+                                break
+                            refreshed_capacity = _read_capacity_with_retry(camera_obj)
+                            if refreshed_capacity is None:
+                                break
+                            current_capacity = refreshed_capacity
                         continue
 
                         safe_sleep(0.08)

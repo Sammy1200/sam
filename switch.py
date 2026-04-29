@@ -1499,6 +1499,50 @@ def startup_from_server_list(camera, server_index):
     return _run_startup_from_launcher(camera, server_index, skip_open_server_list=True)
 
 
+def startup_temporary_from_qidong(camera):
+    """临时模式：从已可见 qidong.png 的启动页直接进场到交易行。"""
+    set_overlay_mini("临时启动中")
+    steps = [
+        ("启动游戏", lambda: _step04_launch(camera)),
+        ("处理空格弹窗", lambda: _step05_space(camera)),
+        ("清理广告和弹窗", lambda: _step06_ads(camera)),
+        ("进入古墓大厅", lambda: _step07_gumu(camera)),
+    ]
+
+    for name, fn in steps:
+        logger.info("[临时模式] %s开始。", name)
+        if not fn():
+            logger.error("[临时模式] %s失败。", name)
+            restore_overlay()
+            return False
+        logger.info("[临时模式] %s完成。", name)
+
+    logger.info("[临时模式] 领取金币开始。")
+    gold_step_result = _step08_gold(camera)
+    if not gold_step_result:
+        logger.error("[临时模式] 领取金币失败。")
+        restore_overlay()
+        return False
+    logger.info("[临时模式] 领取金币完成。")
+
+    if gold_step_result == _GOLD_STEP_NEED_CLOSE:
+        logger.info("[临时模式] 关闭面板开始。")
+        if not _step09_close(camera):
+            logger.error("[临时模式] 关闭面板失败。")
+            restore_overlay()
+            return False
+        logger.info("[临时模式] 关闭面板完成。")
+
+    logger.info("[临时模式] 返回交易行开始。")
+    if not _step10_trade(camera):
+        logger.error("[临时模式] 返回交易行失败。")
+        restore_overlay()
+        return False
+    logger.info("[临时模式] 已回到交易行。")
+    restore_overlay()
+    return True
+
+
 def full_switch_server(camera, server_index):
     """运行中换区：先退出游戏，再复用启动器流程。"""
     set_overlay_mini("换区准备中")

@@ -818,7 +818,6 @@ def _get_balance_candidates(blocks, index, baseline_bottom, max_block_height, pa
             if (
                 is_dot_candidate
                 and dot_score >= params["dot_threshold"]
-                and dot_score >= best_digit_score - 0.05
             ):
                 candidates.append((end_index + 1, ".", dot_score))
 

@@ -9,6 +9,7 @@ from account_db import (
     CANONICAL_ACCOUNT_STATS_TABLE,
     ROUND_STATUS_LIMITED,
     ROUND_STATUS_READY,
+    ROUND_STATUS_UNKNOWN,
     ensure_canonical_account_stats_table,
     ensure_canonical_execution_slot_seed_records,
     ensure_local_canonical_account_stats_store,
@@ -106,7 +107,7 @@ def _build_cooldown_seconds_candidate(row):
         return None
 
 
-def _select_normal_mode_handoff_target():
+def select_normal_mode_handoff_target():
     rows_result = get_account_view_rows()
     rows = rows_result.get("rows") or []
     rows_by_slot = {}
@@ -277,6 +278,8 @@ def _prepare_listing_account_context(slot_number):
     state.last_valid_balance = str(record.current_balance or "").strip()
     state.round_current_balance = ""
     state.round_status = ROUND_STATUS_READY
+    # 启动页上架模式由专用写库函数收尾，避免外层抢购异常兜底覆盖账号状态。
+    state.account_round_finalized = True
     state.overlay_status = "上架模式"
     if state.overlay_root:
         try:
@@ -474,7 +477,7 @@ def run_startup_listing_mode(camera):
         while True:
             candidate = _find_next_candidate(processed_slots, skipped_limited_slots)
             if candidate is None:
-                handoff_target = _select_normal_mode_handoff_target()
+                handoff_target = select_normal_mode_handoff_target()
                 _push_final_summary(summary_entries, skipped_limited_slots)
                 logger.info(
                     "[上架模式] 无剩余候选执行位，准备切回正常模式：slot=%s mode=%s value=%s",
@@ -556,13 +559,27 @@ def run_startup_listing_mode(camera):
                 latest_balance_value = latest_balance_info["value"]
                 if latest_balance_value is None:
                     processed_slots.add(slot_number)
-                    _finalize_account(summary_entries, slot_number, "余额未识别", latest_balance_text, limit_account=False)
+                    _finalize_account(
+                        summary_entries,
+                        slot_number,
+                        "余额未识别",
+                        latest_balance_text,
+                        limit_account=False,
+                        round_status_override=ROUND_STATUS_UNKNOWN,
+                    )
                 else:
                     while True:
                         batch_target = _resolve_batch_target(latest_balance_value)
                         if batch_target <= 0:
                             processed_slots.add(slot_number)
-                            _finalize_account(summary_entries, slot_number, "余额超5亿", latest_balance_text, limit_account=False)
+                            _finalize_account(
+                                summary_entries,
+                                slot_number,
+                                "余额超5亿",
+                                latest_balance_text,
+                                limit_account=False,
+                                preserve_existing_status=True,
+                            )
                             break
 
                         ui_print(f"批次{batch_target}", save_log=True)
@@ -579,11 +596,19 @@ def run_startup_listing_mode(camera):
                         latest_balance_text = latest_balance_info["text"]
                         latest_balance_value = latest_balance_info["value"]
 
+                        if latest_balance_value is not None and latest_balance_value > STARTUP_LISTING_BALANCE_THRESHOLD:
+                            processed_slots.add(slot_number)
+                            _finalize_account(
+                                summary_entries,
+                                slot_number,
+                                "余额超5亿",
+                                latest_balance_text,
+                                limit_account=False,
+                                preserve_existing_status=True,
+                            )
+                            break
+
                         if batch_result["status"] == "target_reached":
-                            if latest_balance_value is not None and latest_balance_value > STARTUP_LISTING_BALANCE_THRESHOLD:
-                                processed_slots.add(slot_number)
-                                _finalize_account(summary_entries, slot_number, "余额超5亿", latest_balance_text, limit_account=False)
-                                break
                             continue
 
                         if batch_result["status"] == "fail_limit":
@@ -604,7 +629,14 @@ def run_startup_listing_mode(camera):
                             break
 
                         processed_slots.add(slot_number)
-                        _finalize_account(summary_entries, slot_number, batch_result["reason"], latest_balance_text, limit_account=False)
+                        _finalize_account(
+                            summary_entries,
+                            slot_number,
+                            batch_result["reason"],
+                            latest_balance_text,
+                            limit_account=False,
+                            round_status_override=ROUND_STATUS_UNKNOWN,
+                        )
                         break
             except Exception as exc:
                 logger.exception("[上架模式] 执行位 %s 处理异常：%s", slot_number, exc)

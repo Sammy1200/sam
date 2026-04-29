@@ -109,10 +109,10 @@ from round_persistence import (
 from utils import safe_sleep, safe_get_frame, safe_imread, fast_click, gc_checkpoint
 from utils import async_push_msg, logger
 from vision import is_image_present, load_digit_templates
-from overlay import shutdown_overlay, start_overlay, ui_print, update_score_text
+from overlay import hide_overlay_until_hidden, shutdown_overlay, start_overlay, ui_print, update_score_text
 from listing import execute_listing_routine
 from purchase import recognize_latest_balance_at_trade, run_purchase_loop, reset_purchase_counters
-from startup_listing_mode import run_startup_listing_mode
+from startup_listing_mode import run_startup_listing_mode, select_normal_mode_handoff_target
 from switch import (
     detect_current_execution_slot_from_launcher,
     enter_startup_listing_target_slot,
@@ -121,6 +121,7 @@ from switch import (
     resolve_execution_slot_transition,
     switch_account_for_temporary_target_slot,
     switch_server_within_account_after_slot_boundary,
+    startup_temporary_from_qidong,
     startup_from_server_list,
     switch_account_after_slot_boundary,
 )
@@ -270,24 +271,19 @@ def _prompt_main_mode():
         print("\n" + "=" * 40)
         print(" 请选择启动方式：")
         print(" [回车] 从启动器开始（自动识别昵称 -> 自动解析大区 -> 进游戏 -> 交易行）")
-        print(" [2] 已在交易行，临时抢购模式")
+        print(" [2] 启动页临时抢购模式")
         print("=" * 40)
         choice = input("直接回车或输入选项: ").strip()
         if choice == "":
             return "launcher"
         if choice == "2":
-            return choice
+            return "temporary_launcher"
         print("请输入回车或 2。")
 
 
 # Legacy: 命令行模式选择入口，已被 launcher_gui.show_launcher() 替代
 def _prompt_temporary_target_execution_slot():
-    while True:
-        raw = input(f"请输入临时模式结束后切换到的目标执行位(1-{int(config.EXECUTION_SLOT_COUNT)}): ").strip()
-        slot_number = _parse_slot_from_nickname_hint(raw)
-        if slot_number is not None:
-            return slot_number
-        print(f"请输入 1 到 {int(config.EXECUTION_SLOT_COUNT)} 之间的执行位编号。")
+    return None
 
 
 def _prompt_server_index():
@@ -500,11 +496,11 @@ def _set_account_state_defaults():
     state.startup_listing_mode_active = False
 
 
-def _prepare_temporary_purchase_context(target_execution_slot):
+def _prepare_temporary_purchase_context():
     """线程10B：临时模式只初始化运行态，不读取账号库。"""
     _set_account_state_defaults()
     state.temporary_purchase_mode = True
-    state.temporary_target_execution_slot = int(target_execution_slot)
+    state.temporary_target_execution_slot = None
     state.need_switch_server = False
     state.current_nickname = "临时模式"
     state.current_execution_slot = None
@@ -514,9 +510,9 @@ def _prepare_temporary_purchase_context(target_execution_slot):
     state.overlay_status = "临时抢购中"
     reset_round_runtime_state("进入临时抢购模式")
     reset_purchase_counters("进入临时抢购模式")
-    ui_print(f"临时抢购模式，目标执行位：{target_execution_slot}，库存基线从 0 开始", save_log=True)
-    print(f"[临时模式] 已启动，目标执行位={target_execution_slot}，库存基线=0")
-    logger.info("[临时模式] 已启动，目标执行位=%s，库存基线=%s", target_execution_slot, 0)
+    ui_print("临时抢购模式，库存基线从 0 开始", save_log=True)
+    print("[临时模式] 已启动，库存基线=0")
+    logger.info("[临时模式] 已启动，库存基线=%s", 0)
 
 
 def _ensure_temporary_target_switch_store_context():
@@ -963,9 +959,10 @@ def _should_dispatch_temporary_target_switch():
 
 
 def _handle_temporary_target_execution_slot_dispatch(camera):
-    target_slot = state.temporary_target_execution_slot
+    handoff_target = select_normal_mode_handoff_target()
+    target_slot = handoff_target.get("target_slot")
     if target_slot is None:
-        pause_thread6_failure("解析临时模式目标执行位", "临时模式结束时未设置目标执行位。")
+        pause_thread6_failure("解析临时模式目标执行位", "临时模式结束时未能自动选择目标执行位。")
         return "abort"
 
     if not _ensure_temporary_target_switch_store_context():
@@ -973,17 +970,20 @@ def _handle_temporary_target_execution_slot_dispatch(camera):
         return "abort"
 
     ui_print(
-        f"临时模式结束，命中 {state.account_round_end_status}，准备切换到目标执行位 {target_slot}。",
+        f"临时模式结束，命中 {state.account_round_end_status}，自动切到执行位 {target_slot}。",
         save_log=True,
     )
     print(
         f"[临时模式] 命中结束条件：{state.account_round_end_status}，"
-        f"准备切换到目标执行位 {target_slot}。"
+        f"自动选择目标执行位={target_slot}，"
+        f"选择模式={handoff_target.get('selection_mode')}，选择值={handoff_target.get('selection_value')}。"
     )
     logger.info(
-        "[临时模式] 命中结束条件：%s，准备切换到目标执行位 %s。",
+        "[临时模式] 命中结束条件：%s，自动选择目标执行位 %s，选择模式=%s，选择值=%s。",
         state.account_round_end_status,
         target_slot,
+        handoff_target.get("selection_mode"),
+        handoff_target.get("selection_value"),
     )
 
     if not switch_account_for_temporary_target_slot(camera, target_slot) and not state.switch_flow_paused:
@@ -1281,6 +1281,10 @@ def main():
     mode, _temp_slot = show_launcher()
     start_overlay()
     try:
+        if not hide_overlay_until_hidden():
+            ui_print("悬浮窗隐藏失败", save_log=True)
+            return
+
         if os.name == 'nt':
             try:
                 handle = ctypes.windll.kernel32.GetCurrentProcess()
@@ -1380,11 +1384,13 @@ def main():
                         return
                 elif listing_mode_result.get("status") != "completed":
                     return
-            else:
-                target_execution_slot = _temp_slot
+            elif mode == "temporary_launcher":
                 ui_print("临时抢购模式在 1 秒后启动...")
                 safe_sleep(1.0)
-                _prepare_temporary_purchase_context(target_execution_slot)
+                if not startup_temporary_from_qidong(camera):
+                    _pause_after_launcher_start_failure()
+                    return
+                _prepare_temporary_purchase_context()
                 ui_print("开始执行预上架流程...")
                 execute_listing_routine(camera)
                 run_purchase_loop(
@@ -1404,6 +1410,9 @@ def main():
                     pass
                 else:
                     return
+            else:
+                ui_print(f"未知启动模式：{mode}", save_log=True)
+                return
 
             while True:
                 state.need_switch_server = False
