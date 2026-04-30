@@ -22,6 +22,14 @@
     {
       "machine_id": "pc2",
       "machine_display_name": "2号电脑"
+    },
+    {
+      "machine_id": "pc3",
+      "machine_display_name": "3号电脑"
+    },
+    {
+      "machine_id": "pc4",
+      "machine_display_name": "4号电脑"
     }
   ],
   "_comment_execution_slot_overrides": "2号电脑固定执行位/昵称/区服映射可填在这里；1号电脑可留空。",
