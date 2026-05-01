@@ -124,6 +124,7 @@ from switch import (
     startup_temporary_from_qidong,
     startup_from_server_list,
     switch_account_after_slot_boundary,
+    wait_for_verified_slot_cooldown_before_launch,
 )
 # 保留原有的定时配置流程。
 def setup_schedule():
@@ -1360,6 +1361,12 @@ def main():
         try:
             if mode == "launcher":
                 if not _prepare_default_launcher_start(camera):
+                    _pause_after_launcher_start_failure()
+                    return
+                if not wait_for_verified_slot_cooldown_before_launch(
+                    state.current_execution_slot,
+                    sync_running_status_after_wait=False,
+                ):
                     _pause_after_launcher_start_failure()
                     return
                 if not startup_from_server_list(camera, state.current_server_index):

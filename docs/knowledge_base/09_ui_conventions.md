@@ -44,6 +44,7 @@
 3. 子面板（如 param_editor）是 `Toplevel`，跟随 overlay 生命周期
 4. F12 暂停时 `show_param_editor()`，恢复时 `destroy_param_editor()`
 5. 子面板默认收起，减少遮挡
+6. F12 参数窗的自动恢复倒计时显示在标题条，格式固定为 `恢复 HH:MM:SS`
 
 ---
 

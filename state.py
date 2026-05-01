@@ -10,6 +10,8 @@ target_stop_seconds = 0
 temporary_purchase_mode = False
 temporary_target_execution_slot = None
 startup_listing_mode_active = False
+pause_auto_resume_deadline = None
+pause_auto_resume_token = 0
 
 # --- 现有流程兼容计数器（后续线程再与线程 2 正式字段对接） ---
 success_count = 0

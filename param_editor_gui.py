@@ -1,12 +1,13 @@
 """param_editor_gui.py  F12 暂停态参数修改面板（收起/展开）"""
 
 import tkinter as tk
+from datetime import datetime
 
 import listing
 import state
 from local_switch_account_config import save_listing_target_price
 from machine_sync_config import get_machine_sync_runtime_context
-from overlay import enqueue_overlay_task
+from overlay import enqueue_overlay_task, schedule_pause_auto_resume
 from round_persistence import persist_minimal_item_balance_sync
 
 # ── 模块级引用 ──
@@ -69,11 +70,12 @@ def _format_editor_machine_label():
         "pc1": "PC1",
         "pc2": "PC2",
         "pc3": "PC3",
+        "pc4": "PC4",
     }
     if machine_id in machine_id_to_pc:
         return machine_id_to_pc[machine_id]
 
-    for suffix in ("1", "2", "3"):
+    for suffix in ("1", "2", "3", "4"):
         if machine_display_name == f"{suffix}号电脑":
             return f"PC{suffix}"
 
@@ -100,6 +102,13 @@ def _build_editor_title_text():
     return f" {_format_editor_machine_label()} - {_format_editor_execution_slot()}"
 
 
+def _format_duration(seconds):
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
 def _create_editor():
     global _editor_win
     _destroy_editor()
@@ -118,6 +127,8 @@ def _create_editor():
     # ── 状态 ──
     expanded = [False]
     msg_var = tk.StringVar(value="")
+    title_base_text = _build_editor_title_text()
+    title_var = tk.StringVar(value=title_base_text)
 
     # ══════════════════════════════════
     #  标题行（始终可见，点击切换展开）
@@ -130,7 +141,7 @@ def _create_editor():
                          font=_FONT_TITLE, fg=_ACCENT, bg=_BG_HEADER)
     lbl_arrow.pack(side="left")
 
-    lbl_title = tk.Label(header, text=_build_editor_title_text(),
+    lbl_title = tk.Label(header, textvariable=title_var,
                          font=_FONT_TITLE, fg=_FG, bg=_BG_HEADER)
     lbl_title.pack(side="left")
 
@@ -185,6 +196,27 @@ def _create_editor():
                          padx=6, pady=1)
     stock_btn.pack(side="left")
 
+    # ── F12 自动恢复倒计时行 ──
+    resume_row = tk.Frame(body, bg=_BG)
+    resume_row.pack(fill="x", pady=(0, 4))
+
+    resume_lbl = tk.Label(resume_row, text="恢复:",
+                          font=_FONT_LABEL, fg=_FG_DIM, bg=_BG,
+                          width=14, anchor="w")
+    resume_lbl.pack(side="left")
+
+    resume_entry = tk.Entry(resume_row, font=_FONT_ENTRY, width=10,
+                            bg=_ENTRY_BG, fg=_ENTRY_FG,
+                            insertbackground=_ENTRY_FG, relief="flat",
+                            highlightthickness=1, highlightcolor=_ACCENT,
+                            highlightbackground=_BORDER)
+    resume_entry.pack(side="left", padx=(4, 6), ipady=3)
+
+    resume_btn = tk.Label(resume_row, text=" 应用 ", font=_FONT_BTN,
+                          fg=_FG, bg=_ACCENT, cursor="hand2",
+                          padx=6, pady=1)
+    resume_btn.pack(side="left")
+
     # ── 消息行 ──
     msg_label = tk.Label(body, textvariable=msg_var,
                          font=_FONT_MSG, fg=_SUCCESS, bg=_BG, anchor="w")
@@ -218,7 +250,7 @@ def _create_editor():
     def _hover_out(e):
         e.widget.configure(bg=_ACCENT)
 
-    for btn in (price_btn, stock_btn):
+    for btn in (price_btn, stock_btn, resume_btn):
         btn.bind("<Enter>", _hover_in)
         btn.bind("<Leave>", _hover_out)
 
@@ -228,6 +260,33 @@ def _create_editor():
     def _show_msg(text, color=_SUCCESS):
         msg_var.set(text)
         msg_label.configure(fg=color)
+
+    def _collapse_body():
+        body.pack_forget()
+        arrow_var.set("▶")
+        expanded[0] = False
+        win.update_idletasks()
+
+    def _refresh_resume_countdown():
+        try:
+            if not win.winfo_exists():
+                return
+        except Exception:
+            return
+
+        deadline = getattr(state, "pause_auto_resume_deadline", None)
+        if deadline is None or not state.IS_PAUSED:
+            title_var.set(title_base_text)
+            return
+
+        remaining_seconds = (deadline - datetime.now()).total_seconds()
+        if remaining_seconds <= 0:
+            title_var.set(f"{title_base_text}  恢复 00:00:00")
+            return
+
+        display_seconds = max(1, int(remaining_seconds + 0.999))
+        title_var.set(f"{title_base_text}  恢复 {_format_duration(display_seconds)}")
+        win.after(1000, _refresh_resume_countdown)
 
     # ══════════════════════════════════
     #  价格修改
@@ -276,3 +335,32 @@ def _create_editor():
     stock_btn.bind("<Button-1>", _do_save_stock)
     stock_entry.bind("<Return>", _do_save_stock)
     stock_entry.bind("<KP_Enter>", _do_save_stock)
+
+    # ══════════════════════════════════
+    #  F12 暂停后倒计时恢复
+    # ══════════════════════════════════
+    def _do_apply_auto_resume(event=None):
+        raw = resume_entry.get().strip()
+        if not raw:
+            _show_msg("✗ 请输入分钟", _ERROR)
+            return
+        if not raw.isdigit():
+            _show_msg("✗ 分钟必须是整数", _ERROR)
+            return
+        minutes = int(raw)
+        if minutes <= 0:
+            _show_msg("✗ 分钟必须大于0", _ERROR)
+            return
+
+        result = schedule_pause_auto_resume(minutes)
+        if result.get("status") != "success":
+            _show_msg(f"✗ {result.get('message') or '设置失败'}", _ERROR)
+            return
+
+        _show_msg("✓ 已设置恢复")
+        _collapse_body()
+        _refresh_resume_countdown()
+
+    resume_btn.bind("<Button-1>", _do_apply_auto_resume)
+    resume_entry.bind("<Return>", _do_apply_auto_resume)
+    resume_entry.bind("<KP_Enter>", _do_apply_auto_resume)

@@ -12,6 +12,7 @@ Public APIs:
   switch_server_within_account_after_slot_boundary(camera)
   switch_account_after_slot_boundary(camera)
   switch_account_for_temporary_target_slot(camera, target_execution_slot)
+  wait_for_verified_slot_cooldown_before_launch(slot_number, ...)
 """
 
 import ctypes
@@ -19,6 +20,7 @@ import os
 import time
 import traceback
 from ctypes import wintypes
+from datetime import datetime, timedelta
 
 import cv2
 import pyautogui
@@ -28,7 +30,9 @@ import state
 from account_db import (
     CANONICAL_ACCOUNT_STATS_TABLE,
     ROUND_STATUS_RUNNING,
+    find_canonical_account_stats_store,
     read_preferred_canonical_account_stats_record_by_execution_slot,
+    restore_ready_account_status_if_needed,
     update_canonical_account_status_fields,
 )
 from local_switch_account_config import (
@@ -118,6 +122,157 @@ def _schedule_status_change_snapshot(event_name):
         logger.info("[网页同步] 已安排状态变更最小快照：%s", event_name)
     elif status == "error":
         logger.warning("[网页同步] 状态变更最小快照失败：event=%s reason=%s", event_name, result.get("message"))
+
+
+def _format_cooldown_duration(seconds):
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _resolve_canonical_store_for_switch():
+    database_path = str(state.account_db_path or "").strip()
+    table_name = str(state.account_db_table_name or "").strip() or CANONICAL_ACCOUNT_STATS_TABLE
+    if database_path:
+        return database_path, table_name
+
+    database_path, table_name = find_canonical_account_stats_store()
+    if database_path:
+        state.account_db_path = database_path
+        state.account_db_table_name = table_name or CANONICAL_ACCOUNT_STATS_TABLE
+        return state.account_db_path, state.account_db_table_name
+
+    return "", table_name
+
+
+def _freeze_switch_cooldown_timer():
+    was_active = bool(getattr(state, "purchase_timer_active", False))
+    if was_active and not state.IS_PAUSED and state.last_resume_time is not None:
+        state.total_running_time += time.time() - state.last_resume_time
+    state.last_resume_time = None
+    state.purchase_timer_active = False
+    return was_active
+
+
+def _apply_verified_slot_record_to_state(record, allow_start_time=None, allow_purchase=True):
+    if record is None:
+        return
+    state.current_nickname = record.nickname
+    state.baseline_item_count = record.baseline_item_count
+    state.last_limit_time = record.last_limit_time
+    state.last_account_end_time = record.last_account_end_time
+    state.updated_at = record.updated_at
+    if record.current_execution_slot is not None:
+        state.current_execution_slot = record.current_execution_slot
+    state.round_status = record.round_status
+    state.account_record_loaded = True
+    state.account_allow_purchase = bool(allow_purchase)
+    state.account_allow_start_time = allow_start_time or datetime.now()
+    state.account_read_status = "ready" if allow_purchase else "waiting_limit_time"
+    state.account_is_waiting = not allow_purchase
+    state.account_read_error = ""
+    state.overlay_status = "抢购中" if allow_purchase else "等待抢购时间"
+
+
+def wait_for_verified_slot_cooldown_before_launch(
+    slot_number,
+    sync_running_status_after_wait=False,
+):
+    """昵称校验后、点击启动游戏前，若目标账号仍冷却则停留选区页等待。"""
+    database_path, table_name = _resolve_canonical_store_for_switch()
+    if not database_path:
+        logger.warning("[冷却等待] 未找到 canonical 数据库，跳过执行位 %s 的启动前冷却等待。", slot_number)
+        if sync_running_status_after_wait:
+            _sync_verified_slot_status_to_running(slot_number)
+        return True
+
+    record = read_preferred_canonical_account_stats_record_by_execution_slot(
+        database_path,
+        slot_number,
+        table_name,
+    )
+    if record is None:
+        logger.warning("[冷却等待] 执行位 %s 未解析到账号记录，跳过启动前冷却等待。", slot_number)
+        if sync_running_status_after_wait:
+            _sync_verified_slot_status_to_running(slot_number)
+        return True
+
+    state.account_db_path = database_path
+    state.account_db_table_name = table_name
+    now = datetime.now()
+    allow_start_time = now
+    if record.last_limit_time is not None:
+        allow_start_time = record.last_limit_time + timedelta(
+            seconds=config.ACCOUNT_LIMIT_COOLDOWN_SECONDS
+        )
+
+    if record.last_limit_time is None or now >= allow_start_time:
+        restored_record, restore_result = restore_ready_account_status_if_needed(
+            database_path,
+            record.nickname,
+            table_name,
+            now=now,
+        )
+        if restore_result.status == "success" and restored_record is not None:
+            record = restored_record
+            _schedule_status_change_snapshot("启动前冷却结束自动恢复已准备")
+            logger.info("[冷却等待] 执行位 %s 冷却已结束，账号状态已恢复为“已准备”。", slot_number)
+        elif restore_result.status not in ("skipped", "account_not_found"):
+            logger.warning("[冷却等待] 执行位 %s 自动恢复“已准备”失败：%s", slot_number, restore_result.reason)
+        _apply_verified_slot_record_to_state(record, allow_start_time=datetime.now(), allow_purchase=True)
+        if sync_running_status_after_wait:
+            _sync_verified_slot_status_to_running(slot_number)
+        return True
+
+    _freeze_switch_cooldown_timer()
+    state.account_allow_purchase = False
+    state.account_allow_start_time = allow_start_time
+    state.account_read_status = "waiting_limit_time"
+    state.account_is_waiting = True
+    state.overlay_status = "等待抢购时间"
+    _apply_verified_slot_record_to_state(record, allow_start_time=allow_start_time, allow_purchase=False)
+
+    print(
+        f"[冷却等待] 执行位 {slot_number} 昵称 {record.nickname} 冷却未结束，"
+        f"停留选区页等待至 {allow_start_time.strftime('%Y-%m-%d %H:%M:%S')}。"
+    )
+    logger.info(
+        "[冷却等待] 执行位 %s 昵称 %s 冷却未结束，停留选区页等待至 %s。",
+        slot_number,
+        record.nickname,
+        allow_start_time.strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
+    while True:
+        remaining_seconds = (allow_start_time - datetime.now()).total_seconds()
+        if remaining_seconds <= 0:
+            break
+        display_seconds = max(1, int(remaining_seconds + 0.999))
+        update_overlay_mini(f"冷却 {_format_cooldown_duration(display_seconds)}")
+        time.sleep(0.5 if state.IS_PAUSED else min(1.0, max(0.1, remaining_seconds)))
+
+    restored_record, restore_result = restore_ready_account_status_if_needed(
+        database_path,
+        record.nickname,
+        table_name,
+        now=datetime.now(),
+    )
+    if restore_result.status == "success" and restored_record is not None:
+        record = restored_record
+        _schedule_status_change_snapshot("启动前冷却等待结束")
+    elif restored_record is not None:
+        record = restored_record
+    elif restore_result.status not in ("skipped", "account_not_found"):
+        logger.warning("[冷却等待] 等待结束后恢复“已准备”失败：%s", restore_result.reason)
+
+    _apply_verified_slot_record_to_state(record, allow_start_time=datetime.now(), allow_purchase=True)
+    update_overlay_mini("冷却结束")
+    if sync_running_status_after_wait:
+        _sync_verified_slot_status_to_running(slot_number)
+    print(f"[冷却等待] 执行位 {slot_number} 冷却结束，继续启动游戏。")
+    logger.info("[冷却等待] 执行位 %s 冷却结束，继续启动游戏。", slot_number)
+    return True
 
 
 def _get_window_text(hwnd):
@@ -996,9 +1151,18 @@ def _try_verify_slot_nickname_once(camera, slot_number, sync_running_status=True
     return False, f"执行位 {slot_number} 的昵称模板校验失败：{template_path}。"
 
 
-def _retry_slot_nickname_verification_from_server_select(camera, target_slot, server_coord_index):
+def _retry_slot_nickname_verification_from_server_select(
+    camera,
+    target_slot,
+    server_coord_index,
+    sync_running_status=True,
+):
     """线程 6 专用：昵称校验失败后，重登同执行位账号再回选区重试。"""
-    verified, failure_detail = _try_verify_slot_nickname_once(camera, target_slot)
+    verified, failure_detail = _try_verify_slot_nickname_once(
+        camera,
+        target_slot,
+        sync_running_status=sync_running_status,
+    )
     if verified:
         return True
 
@@ -1027,7 +1191,11 @@ def _retry_slot_nickname_verification_from_server_select(camera, target_slot, se
                 f"昵称模板重试 {retry_index}/2 时未能重新选择目标大区。",
             )
 
-        verified, failure_detail = _try_verify_slot_nickname_once(camera, target_slot)
+        verified, failure_detail = _try_verify_slot_nickname_once(
+            camera,
+            target_slot,
+            sync_running_status=sync_running_status,
+        )
         if verified:
             print(f"[切换流程] 执行位 {target_slot} 的昵称模板在第 {retry_index} 次重登重试后校验通过。")
             logger.info(
@@ -1042,12 +1210,11 @@ def _retry_slot_nickname_verification_from_server_select(camera, target_slot, se
 
 def _sync_verified_slot_status_to_running(slot_number):
     """昵称模板校验成功后，把目标执行位账号状态补写为运行中。"""
-    database_path = str(state.account_db_path or "").strip()
+    database_path, table_name = _resolve_canonical_store_for_switch()
     if not database_path:
         logger.warning("[线程6] 昵称模板校验通过后未写入“运行中”：canonical 数据库路径为空。")
         return
 
-    table_name = state.account_db_table_name or CANONICAL_ACCOUNT_STATS_TABLE
     record = read_preferred_canonical_account_stats_record_by_execution_slot(
         database_path,
         slot_number,
@@ -1673,6 +1840,17 @@ def switch_server_within_account_after_slot_boundary(camera, transition=None):
                 camera,
                 target["next_slot"],
                 target["server_coord_index"],
+                sync_running_status=False,
+            ),
+        ):
+            return False
+
+        if not _run_thread6_step(
+            "启动前冷却等待",
+            f"执行位 {target['next_slot']} 冷却等待失败。",
+            lambda: wait_for_verified_slot_cooldown_before_launch(
+                target["next_slot"],
+                sync_running_status_after_wait=True,
             ),
         ):
             return False
@@ -1757,6 +1935,17 @@ def switch_account_after_slot_boundary(camera):
                 camera,
                 target["next_slot"],
                 target["server_coord_index"],
+                sync_running_status=False,
+            ),
+        ):
+            return False
+
+        if not _run_thread6_step(
+            "启动前冷却等待",
+            f"执行位 {target['next_slot']} 冷却等待失败。",
+            lambda: wait_for_verified_slot_cooldown_before_launch(
+                target["next_slot"],
+                sync_running_status_after_wait=True,
             ),
         ):
             return False

@@ -8,7 +8,7 @@ import threading
 import time
 import tkinter as tk
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import state
 from round_persistence import (
@@ -70,6 +70,7 @@ OVERLAY_LOG_TEXT_PAD_Y = 7
 _pause_hotkey_listener_started = False
 _overlay_shutdown_requested = False
 _overlay_closed_event = threading.Event()
+_pause_auto_resume_lock = threading.Lock()
 
 
 def fit_overlay_to_content(position_override=None):
@@ -598,6 +599,58 @@ def ui_print(msg, is_replace=False, save_log=False, show_console=True):
         pass
 
 
+def cancel_pause_auto_resume():
+    """取消 F12 暂停后的自动恢复倒计时。"""
+    with _pause_auto_resume_lock:
+        state.pause_auto_resume_token += 1
+        state.pause_auto_resume_deadline = None
+
+
+def schedule_pause_auto_resume(minutes):
+    """按分钟安排一次暂停态自动恢复。"""
+    try:
+        normalized_minutes = int(minutes)
+    except (TypeError, ValueError):
+        return {"status": "error", "message": "恢复时间必须是正整数"}
+    if normalized_minutes <= 0:
+        return {"status": "error", "message": "恢复时间必须大于0"}
+
+    deadline = datetime.now() + timedelta(minutes=normalized_minutes)
+    with _pause_auto_resume_lock:
+        state.pause_auto_resume_token += 1
+        token = state.pause_auto_resume_token
+        state.pause_auto_resume_deadline = deadline
+
+    def _auto_resume_worker():
+        while True:
+            with _pause_auto_resume_lock:
+                if token != state.pause_auto_resume_token:
+                    return
+                current_deadline = state.pause_auto_resume_deadline
+            if current_deadline is None:
+                return
+            remaining = (current_deadline - datetime.now()).total_seconds()
+            if remaining <= 0:
+                break
+            time.sleep(min(1.0, max(0.1, remaining)))
+
+        with _pause_auto_resume_lock:
+            if token != state.pause_auto_resume_token:
+                return
+            state.pause_auto_resume_deadline = None
+
+        if state.IS_PAUSED:
+            toggle_pause()
+
+    thread = threading.Thread(
+        target=_auto_resume_worker,
+        name="pause-auto-resume",
+        daemon=True,
+    )
+    thread.start()
+    return {"status": "success", "deadline": deadline, "token": token}
+
+
 def toggle_pause():
     state.IS_PAUSED = not state.IS_PAUSED
     if state.IS_PAUSED:
@@ -621,6 +674,7 @@ def toggle_pause():
         except Exception:
             pass
     else:
+        cancel_pause_auto_resume()
         try:
             from param_editor_gui import destroy_param_editor
             destroy_param_editor()
