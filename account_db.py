@@ -11,6 +11,8 @@ from config import (
     EXECUTION_SLOT_COUNT,
     EXECUTION_SLOT_NICKNAMES,
     SCRIPT_DIR,
+    TEMPORARY_ACCOUNT_DISPLAY_SLOT,
+    TEMPORARY_ACCOUNT_NICKNAME,
     THREAD6_RUNTIME_DB_PATH,
 )
 from live_paths import log_resolved_live_path, resolve_account_stats_db_path
@@ -420,6 +422,20 @@ class RuntimeExecutionState:
     updated_at: datetime | None = None
 
 
+@dataclass
+class TemporaryAccountSnapshot:
+    nickname: str = TEMPORARY_ACCOUNT_NICKNAME
+    current_execution_slot: int = TEMPORARY_ACCOUNT_DISPLAY_SLOT
+    baseline_item_count: int = 0
+    round_purchase_success_count: int = 0
+    round_listing_success_count: int = 0
+    round_purchase_fail_count: int = 0
+    current_balance: str = ""
+    purchase_running_seconds: int = 0
+    round_status: str = ""
+    updated_at: datetime | None = None
+
+
 def _normalize_name(value):
     if value is None:
         return ""
@@ -622,6 +638,26 @@ def _ensure_runtime_state_table(conn):
     )
 
 
+def _ensure_temporary_account_snapshot_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS temporary_account_snapshot (
+            snapshot_key TEXT PRIMARY KEY,
+            nickname TEXT NOT NULL DEFAULT '',
+            current_execution_slot INTEGER NOT NULL DEFAULT 0,
+            baseline_item_count INTEGER NOT NULL DEFAULT 0,
+            round_purchase_success_count INTEGER NOT NULL DEFAULT 0,
+            round_listing_success_count INTEGER NOT NULL DEFAULT 0,
+            round_purchase_fail_count INTEGER NOT NULL DEFAULT 0,
+            current_balance TEXT NOT NULL DEFAULT '',
+            purchase_running_seconds INTEGER NOT NULL DEFAULT 0,
+            round_status TEXT NOT NULL DEFAULT '',
+            updated_at TEXT
+        )
+        """
+    )
+
+
 def read_runtime_execution_state():
     if not THREAD6_RUNTIME_DB_PATH or not os.path.isfile(THREAD6_RUNTIME_DB_PATH):
         return RuntimeExecutionState(slot_nicknames={})
@@ -666,6 +702,131 @@ def read_runtime_execution_state():
         return RuntimeExecutionState(slot_nicknames={})
     finally:
         conn.close()
+
+
+def read_temporary_account_snapshot():
+    if not THREAD6_RUNTIME_DB_PATH or not os.path.isfile(THREAD6_RUNTIME_DB_PATH):
+        return None
+
+    try:
+        conn = sqlite3.connect(f"file:{THREAD6_RUNTIME_DB_PATH}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+
+    try:
+        row = conn.execute(
+            """
+            SELECT
+                nickname,
+                current_execution_slot,
+                baseline_item_count,
+                round_purchase_success_count,
+                round_listing_success_count,
+                round_purchase_fail_count,
+                current_balance,
+                purchase_running_seconds,
+                round_status,
+                updated_at
+            FROM temporary_account_snapshot
+            WHERE snapshot_key = 'default'
+            LIMIT 1
+            """
+        ).fetchone()
+        if row is None:
+            return None
+
+        return TemporaryAccountSnapshot(
+            nickname=str(row[0] or TEMPORARY_ACCOUNT_NICKNAME).strip() or TEMPORARY_ACCOUNT_NICKNAME,
+            current_execution_slot=_parse_int(row[1]) or TEMPORARY_ACCOUNT_DISPLAY_SLOT,
+            baseline_item_count=max(0, _parse_int(row[2])),
+            round_purchase_success_count=max(0, _parse_int(row[3])),
+            round_listing_success_count=max(0, _parse_int(row[4])),
+            round_purchase_fail_count=max(0, _parse_int(row[5])),
+            current_balance=str(row[6] or "").strip(),
+            purchase_running_seconds=max(0, _parse_int(row[7])),
+            round_status=str(row[8] or "").strip(),
+            updated_at=_parse_datetime(row[9]),
+        )
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
+def save_temporary_account_snapshot(snapshot):
+    os.makedirs(os.path.dirname(THREAD6_RUNTIME_DB_PATH), exist_ok=True)
+
+    try:
+        conn = sqlite3.connect(THREAD6_RUNTIME_DB_PATH)
+    except sqlite3.Error as exc:
+        return AccountWriteResult("db_unavailable", str(exc))
+
+    try:
+        _ensure_temporary_account_snapshot_table(conn)
+        write_time = snapshot.updated_at or datetime.now()
+        payload = (
+            str(snapshot.nickname or TEMPORARY_ACCOUNT_NICKNAME).strip() or TEMPORARY_ACCOUNT_NICKNAME,
+            int(snapshot.current_execution_slot or TEMPORARY_ACCOUNT_DISPLAY_SLOT),
+            max(0, int(snapshot.baseline_item_count or 0)),
+            max(0, int(snapshot.round_purchase_success_count or 0)),
+            max(0, int(snapshot.round_listing_success_count or 0)),
+            max(0, int(snapshot.round_purchase_fail_count or 0)),
+            str(snapshot.current_balance or "").strip(),
+            max(0, int(snapshot.purchase_running_seconds or 0)),
+            str(snapshot.round_status or "").strip(),
+            _serialize_datetime(write_time),
+        )
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """
+            INSERT INTO temporary_account_snapshot (
+                snapshot_key,
+                nickname,
+                current_execution_slot,
+                baseline_item_count,
+                round_purchase_success_count,
+                round_listing_success_count,
+                round_purchase_fail_count,
+                current_balance,
+                purchase_running_seconds,
+                round_status,
+                updated_at
+            ) VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(snapshot_key) DO UPDATE SET
+                nickname = excluded.nickname,
+                current_execution_slot = excluded.current_execution_slot,
+                baseline_item_count = excluded.baseline_item_count,
+                round_purchase_success_count = excluded.round_purchase_success_count,
+                round_listing_success_count = excluded.round_listing_success_count,
+                round_purchase_fail_count = excluded.round_purchase_fail_count,
+                current_balance = excluded.current_balance,
+                purchase_running_seconds = excluded.purchase_running_seconds,
+                round_status = excluded.round_status,
+                updated_at = excluded.updated_at
+            """,
+            payload,
+        )
+        conn.commit()
+        return AccountWriteResult("success", "")
+    except sqlite3.Error as exc:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return AccountWriteResult("write_failed", str(exc))
+    finally:
+        conn.close()
+
+
+def reset_temporary_account_snapshot():
+    return save_temporary_account_snapshot(
+        TemporaryAccountSnapshot(
+            nickname=TEMPORARY_ACCOUNT_NICKNAME,
+            current_execution_slot=TEMPORARY_ACCOUNT_DISPLAY_SLOT,
+            round_status=ROUND_STATUS_RUNNING,
+            updated_at=datetime.now(),
+        )
+    )
 
 
 def write_runtime_execution_state(

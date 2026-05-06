@@ -5,6 +5,7 @@ import time
 import state
 from account_db import (
     AccountStatsRecord,
+    TemporaryAccountSnapshot,
     AccountWriteResult,
     CANONICAL_ACCOUNT_STATS_TABLE,
     MACHINE_DAILY_SUMMARY_EVENT_LISTING_SUCCESS,
@@ -21,14 +22,16 @@ from account_db import (
     increment_machine_daily_summary_event,
     read_canonical_account_stats_record,
     read_preferred_canonical_account_stats_record_by_execution_slot,
+    reset_temporary_account_snapshot,
     save_canonical_account_stats_record,
+    save_temporary_account_snapshot,
     clear_canonical_account_round_listing_success_count,
     update_canonical_account_listing_pause_fields,
     update_canonical_account_status_fields,
     update_canonical_account_runtime_fields,
     update_canonical_account_item_balance_fields,
 )
-from config import ACCOUNT_LIMIT_COOLDOWN_SECONDS, ACCOUNT_MAX_PURCHASE_SECONDS
+from config import ACCOUNT_LIMIT_COOLDOWN_SECONDS, ACCOUNT_MAX_PURCHASE_SECONDS, TEMPORARY_ACCOUNT_NICKNAME
 from machine_sync_config import get_machine_sync_runtime_context
 from utils import get_current_elapsed, logger
 
@@ -242,6 +245,55 @@ def _record_machine_daily_summary_event(event_name, occurred_at=None):
     return result
 
 
+def _resolve_temporary_round_status():
+    status_aliases = {
+        "临时抢购中": ROUND_STATUS_RUNNING,
+        "抢购中": ROUND_STATUS_RUNNING,
+        "临时账号限制": ROUND_STATUS_LIMITED,
+    }
+    for value in (
+        state.account_round_end_status,
+        state.round_status,
+        state.overlay_status,
+    ):
+        text = str(value or "").strip()
+        if text:
+            return status_aliases.get(text, text)
+    return ROUND_STATUS_RUNNING
+
+
+def reset_temporary_account_snapshot_for_new_round():
+    result = reset_temporary_account_snapshot()
+    if result.status not in ("success", "skipped"):
+        logger.warning("[临时号] 重置辅助快照失败：%s", result.reason)
+    return result
+
+
+def persist_temporary_account_snapshot(event_name=None, trigger_remote_snapshot=False):
+    if not state.temporary_purchase_mode:
+        return AccountWriteResult("skipped", "非临时模式")
+
+    snapshot = TemporaryAccountSnapshot(
+        nickname=TEMPORARY_ACCOUNT_NICKNAME,
+        baseline_item_count=max(0, int(state.baseline_item_count)),
+        round_purchase_success_count=max(0, int(state.round_purchase_success_count)),
+        round_listing_success_count=max(0, int(state.round_listing_success_count)),
+        round_purchase_fail_count=max(0, int(state.round_purchase_fail_count)),
+        current_balance=_get_effective_balance(),
+        purchase_running_seconds=max(0, int(get_current_elapsed())),
+        round_status=_resolve_temporary_round_status(),
+        updated_at=datetime.now(),
+    )
+    result = save_temporary_account_snapshot(snapshot)
+    if result.status != "success":
+        logger.warning("[临时号] 辅助快照写入失败：%s", result.reason)
+        return result
+
+    if trigger_remote_snapshot:
+        _schedule_remote_snapshot_event(event_name or "临时号辅助快照")
+    return result
+
+
 def record_daily_purchase_success():
     return _record_machine_daily_summary_event(MACHINE_DAILY_SUMMARY_EVENT_PURCHASE_SUCCESS)
 
@@ -389,7 +441,7 @@ def get_runtime_window_remaining_seconds():
 
 
 def persist_account_limit_reached_if_needed():
-    """\u5728\u8fbe\u5230 2 \u5c0f\u65f6 50 \u5206\u9608\u503c\u65f6\u7acb\u5373\u843d\u5e93 last_limit_time\u3002"""
+    """\u5728\u8fbe\u5230 2 \u5c0f\u65f6 45 \u5206\u9608\u503c\u65f6\u7acb\u5373\u843d\u5e93 last_limit_time\u3002"""
     previous_limit_time = state.account_limit_reached_at
     reached_time = refresh_account_limit_reached_at()
     if reached_time is None or previous_limit_time is not None:
@@ -404,7 +456,7 @@ def persist_account_limit_reached_if_needed():
 
 
 def refresh_account_limit_reached_at():
-    """Record the exact wall-clock moment when purchase runtime reaches 2h50m."""
+    """Record the exact wall-clock moment when purchase runtime reaches 2h45m."""
     if state.account_limit_reached_at is not None:
         return state.account_limit_reached_at
 

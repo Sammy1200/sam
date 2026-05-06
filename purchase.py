@@ -36,6 +36,7 @@ from overlay import toggle_pause, ui_print, update_score_text
 from round_persistence import (
     ensure_active_runtime_window_state,
     persist_account_limit_reached_if_needed,
+    persist_temporary_account_snapshot,
     persist_minimal_item_balance_sync,
     record_daily_purchase_fail,
     record_daily_purchase_success,
@@ -93,6 +94,15 @@ def _refresh_live_round_score():
             state.overlay_root.after(0, update_score_text)
         except:
             pass
+
+
+def _sync_temporary_snapshot(reason, trigger_remote_snapshot=False):
+    if not state.temporary_purchase_mode:
+        return
+    persist_temporary_account_snapshot(
+        reason,
+        trigger_remote_snapshot=trigger_remote_snapshot,
+    )
 
 
 def clear_live_listing_count_for_account_switch(reason):
@@ -197,6 +207,8 @@ def _finalize_balance_insufficient(balance_text, send_push=True):
         async_push_msg("【余额不足】准备换号换区", f"当前余额：{balance_text}，已触发自动换号。")
     if not state.temporary_purchase_mode:
         clear_live_round_triplet_for_account_switch("余额不足触发换号前")
+    else:
+        _sync_temporary_snapshot("临时模式余额不足", trigger_remote_snapshot=True)
     state.need_switch_server = True
     return False
 
@@ -317,7 +329,11 @@ def wait_and_recognize_balance(wait_time, camera):
     elapsed = time.time() - start_total
     remaining = wait_time - elapsed
     if remaining > 0:
-        return smart_wait(remaining)
+        wait_result = smart_wait(remaining)
+        if wait_result:
+            _sync_temporary_snapshot("临时模式余额刷新")
+        return wait_result
+    _sync_temporary_snapshot("临时模式余额刷新")
     return True
 
 
@@ -342,6 +358,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
     last_idle_push_time = time.time()
     last_success_time = time.time()
     last_runtime_state_check = 0.0
+    last_temporary_snapshot_sync = 0.0
     runtime_reached_continue_mode = False
 
     gc.disable()
@@ -368,6 +385,9 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                     ensure_active_runtime_window_state()
                     persist_account_limit_reached_if_needed()
                     last_runtime_state_check = current_time
+                if state.temporary_purchase_mode and current_time - last_temporary_snapshot_sync >= 5.0:
+                    _sync_temporary_snapshot("临时模式运行中")
+                    last_temporary_snapshot_sync = current_time
 
                 if not runtime_reached_continue_mode and get_current_elapsed() >= ACCOUNT_MAX_PURCHASE_SECONDS:
                     persist_account_limit_reached_if_needed()
@@ -386,6 +406,8 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                         state.account_round_end_status = "抢购时长已到"
                         if not state.temporary_purchase_mode:
                             clear_live_round_triplet_for_account_switch("抢购时长已到触发换号前")
+                        else:
+                            _sync_temporary_snapshot("临时模式抢购时长已到", trigger_remote_snapshot=True)
                         state.need_switch_server = True
                         return
 
@@ -510,6 +532,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                                     state.account_limit_reached_at = None
                                     state.account_round_end_status = "账号限制"
                                     state.overlay_status = "临时账号限制"
+                                    _sync_temporary_snapshot("临时模式账号限制", trigger_remote_snapshot=True)
                                     state.need_switch_server = True
                                     return
                                 state.account_limit_reached_at = None

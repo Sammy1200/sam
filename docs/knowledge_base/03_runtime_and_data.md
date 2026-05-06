@@ -66,11 +66,11 @@ canonical SQLite 是当前系统的唯一真实数据源。
 - 不要把 `updated_at` 当成“最后下号时间”
 - 不要把 `last_account_end_time` 当成“最近任何字段改动时间”
 
-## 2 小时 50 分与 24 小时窗口规则
+## 2 小时 45 分与 24 小时窗口规则
 
-### 2 小时 50 分
+### 2 小时 45 分
 
-当前代码常量 `ACCOUNT_MAX_PURCHASE_SECONDS` 等于 2 小时 50 分。
+当前代码常量 `ACCOUNT_MAX_PURCHASE_SECONDS` 等于 2 小时 45 分。
 
 它的语义是：
 
@@ -196,6 +196,7 @@ canonical SQLite 是当前系统的唯一真实数据源。
 下面这些值是辅助快照，不应替代 canonical：
 
 - `thread6_runtime.sqlite3` 中的当前执行位与当前昵称
+- `thread6_runtime.sqlite3` 中的 `临时号` 辅助快照；它只用于查看页和公网 Snapshot 栏目展示，不写入 canonical `account_stats`
 - `remote_sync_mirror.sqlite3` 中的远端镜像行
 - 网页上的相对时间、剩余时间、健康摘要
 
@@ -219,7 +220,7 @@ canonical SQLite 是当前系统的唯一真实数据源。
 - `余额不足`
   当前有效余额低于阈值，触发本轮结束与调度。
 - `抢购时长已到`
-  当前账号已达到 2 小时 50 分活跃抢购上限。
+  当前账号已达到 2 小时 45 分活跃抢购上限。
 - `已准备`
   正式状态值，表示账号已恢复到可重新进入流程的准备态。
 - `未知异常`
@@ -242,7 +243,7 @@ canonical SQLite 是当前系统的唯一真实数据源。
 
 网页手动改成 `已准备` 时，也要同步满足：
 
-- 可运行时间恢复为 2 小时 50 分
+- 可运行时间恢复为 2 小时 45 分
 - 冷却剩余时间归零
 
 下一份建议阅读： [04_operations_and_acceptance.md](04_operations_and_acceptance.md)

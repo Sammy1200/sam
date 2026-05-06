@@ -31,6 +31,7 @@ from utils import (
 
 DEFAULT_OVERLAY_STATUS_TEXT = "状态待更新"
 F12_VK = 0x7B
+F9_VK = 0x78
 OVERLAY_SCORE_PANEL_BG = "#15110d"
 OVERLAY_SCORE_MAIN_BG = "#15110d"
 OVERLAY_SCORE_MAIN_BORDER = "#19130f"
@@ -651,6 +652,66 @@ def schedule_pause_auto_resume(minutes):
     return {"status": "success", "deadline": deadline, "token": token}
 
 
+def _destroy_counter_window_task():
+    try:
+        from jishujiaoben.floating_counter import destroy_counter
+        destroy_counter()
+    except Exception:
+        pass
+
+
+def _run_overlay_task_sync(callback, timeout=2.0):
+    if state.overlay_root is None:
+        return False
+
+    done_event = threading.Event()
+
+    def _runner():
+        try:
+            callback()
+        finally:
+            done_event.set()
+
+    try:
+        enqueue_overlay_task(_runner)
+    except Exception:
+        return False
+
+    return done_event.wait(timeout)
+
+
+def _close_counter_window_before_resume():
+    _run_overlay_task_sync(_destroy_counter_window_task, timeout=2.0)
+
+
+def _toggle_counter_window_task():
+    root = state.overlay_root
+    if root is None or not state.IS_PAUSED:
+        return
+    try:
+        from jishujiaoben.floating_counter import toggle_counter
+        result = toggle_counter(root)
+    except Exception:
+        ui_print("计数窗失败", save_log=True)
+        return
+
+    if result == "opened":
+        ui_print("计数窗已开")
+    elif result == "closed":
+        ui_print("计数窗已关")
+    else:
+        ui_print("计数窗失败", save_log=True)
+
+
+def _handle_counter_hotkey():
+    if not state.IS_PAUSED:
+        return
+    try:
+        enqueue_overlay_task(_toggle_counter_window_task)
+    except Exception:
+        pass
+
+
 def toggle_pause():
     state.IS_PAUSED = not state.IS_PAUSED
     if state.IS_PAUSED:
@@ -674,6 +735,7 @@ def toggle_pause():
         except Exception:
             pass
     else:
+        _close_counter_window_before_resume()
         cancel_pause_auto_resume()
         try:
             from param_editor_gui import destroy_param_editor
@@ -696,14 +758,19 @@ def toggle_pause():
 
 
 def _pause_hotkey_loop():
-    """使用轮询监听 F12，避免全局键盘钩子影响输入法和文字输入。"""
-    last_down = False
+    """使用轮询监听 F12/F9，避免全局键盘钩子影响输入法和文字输入。"""
+    last_f12_down = False
+    last_f9_down = False
     while not _overlay_shutdown_requested:
         try:
-            is_down = bool(ctypes.windll.user32.GetAsyncKeyState(F12_VK) & 0x8000)
-            if is_down and not last_down:
+            is_f12_down = bool(ctypes.windll.user32.GetAsyncKeyState(F12_VK) & 0x8000)
+            is_f9_down = bool(ctypes.windll.user32.GetAsyncKeyState(F9_VK) & 0x8000)
+            if is_f12_down and not last_f12_down:
                 toggle_pause()
-            last_down = is_down
+            if is_f9_down and not last_f9_down:
+                _handle_counter_hotkey()
+            last_f12_down = is_f12_down
+            last_f9_down = is_f9_down
         except Exception:
             pass
         time.sleep(0.05)
@@ -733,6 +800,7 @@ def shutdown_overlay(wait_timeout=1.5):
         current_root = state.overlay_root
         if current_root is None:
             return
+        _destroy_counter_window_task()
         try:
             current_root.quit()
         except Exception:

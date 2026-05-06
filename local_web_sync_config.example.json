@@ -7,7 +7,7 @@
   "sync_enabled": false,
   "_comment_aggregator_host": "可只填写汇总节点的 Tailscale 设备名或 Tailscale 100.x 地址，例如 pc1 或 100.101.102.103。",
   "aggregator_host": "",
-  "_comment_aggregator_url": "也可直接填写完整地址前缀，例如 http://pc1:8091、http://pc1.tailabcd.ts.net:8091 或 http://100.101.102.103:8091。aggregator_url 优先级高于 aggregator_host。不要在这里手工追加 /remote-sync/report。",
+  "_comment_aggregator_url": "也可直接填写完整地址前缀，例如 http://pc1:8391、http://pc1.tailabcd.ts.net:8391 或 http://100.101.102.103:8391。aggregator_url 优先级高于 aggregator_host。不要在这里手工追加 /remote-sync/report。",
   "aggregator_url": "",
   "_comment_receive_remote_sync": "是否允许本机接收远端最小账号快照。1号电脑通常为 true，2号电脑通常为 false。",
   "receive_remote_sync": true,

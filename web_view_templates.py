@@ -32,14 +32,20 @@ def _render_table(headers, rows, column_classes=None, table_class=""):
         header_parts.append(f"<th{class_attr}>{escape(str(header))}</th>")
     header_html = "".join(header_parts)
     body_parts = []
-    for row in rows:
+    for raw_row in rows:
+        row = raw_row
+        row_class = ""
+        if isinstance(raw_row, dict) and "cells" in raw_row:
+            row = raw_row.get("cells") or ()
+            row_class = str(raw_row.get("row_class") or "").strip()
+        row_class_attr = f' class="{escape(row_class, quote=True)}"' if row_class else ""
         cells = []
         for index, cell in enumerate(row):
             column_class = column_classes[index] if index < len(column_classes) else ""
             class_attr = f' class="{escape(column_class, quote=True)}"' if column_class else ""
             cells.append(f"<td{class_attr}>{cell}</td>")
         cell_html = "".join(cells)
-        body_parts.append(f"<tr>{cell_html}</tr>")
+        body_parts.append(f"<tr{row_class_attr}>{cell_html}</tr>")
     body_html = "".join(body_parts) if body_parts else (
         f"<tr><td colspan=\"{len(headers)}\">暂无数据</td></tr>"
     )
@@ -1334,6 +1340,40 @@ def _base_page(title, body_html):
     .page-shell-home .stage-primary .data-table tbody tr:hover td {
       background: rgba(255,255,255,0.024);
     }
+    .page-shell-home .stage-primary .data-table tbody tr.temporary-account-row td {
+      min-height: 66px;
+      background:
+        linear-gradient(180deg, rgba(113,112,255,0.105), rgba(113,112,255,0.045)),
+        rgba(255,255,255,0.012);
+      border-top: 1px solid rgba(145,151,255,0.14);
+      border-bottom-color: rgba(145,151,255,0.16);
+    }
+    .page-shell-home .stage-primary .data-table tbody tr.temporary-account-row:hover td {
+      background:
+        linear-gradient(180deg, rgba(113,112,255,0.14), rgba(113,112,255,0.058)),
+        rgba(255,255,255,0.018);
+    }
+    .page-shell-home .stage-primary .temporary-account-row .readonly-value,
+    .page-shell-home .stage-primary .temporary-account-row .display-field,
+    .page-shell-home .stage-primary .temporary-action-field {
+      min-height: 40px;
+      box-sizing: border-box;
+    }
+    .page-shell-home .stage-primary .temporary-account-row .display-field,
+    .page-shell-home .stage-primary .temporary-action-field {
+      border: 1px solid rgba(145,151,255,0.14);
+      background: rgba(145,151,255,0.045);
+      border-radius: var(--radius-sm);
+    }
+    .page-shell-home .stage-primary .temporary-action-field {
+      display: flex;
+      align-items: center;
+      width: 100%;
+      padding: 8px 10px;
+      color: var(--text-secondary);
+      font-size: 14px;
+      font-weight: 510;
+    }
     .page-shell-home .stage-primary .data-table td.col-name,
     .page-shell-home .stage-primary .data-table td.col-runtime,
     .page-shell-home .stage-primary .data-table td.col-cooldown {
@@ -1429,6 +1469,20 @@ def _base_page(title, body_html):
     .page-shell-public .data-module-public .data-table tbody tr:hover td,
     .page-shell-home .stage-secondary .data-module-public .data-table tbody tr:hover td {
       background: rgba(255,255,255,0.024);
+    }
+    .page-shell-public .data-module-public .data-table tbody tr.temporary-account-row td,
+    .page-shell-home .stage-secondary .data-module-public .data-table tbody tr.temporary-account-row td {
+      background:
+        linear-gradient(180deg, rgba(113,112,255,0.09), rgba(113,112,255,0.036)),
+        rgba(255,255,255,0.012);
+      border-top: 1px solid rgba(145,151,255,0.12);
+      border-bottom-color: rgba(145,151,255,0.15);
+    }
+    .page-shell-public .data-module-public .data-table tbody tr.temporary-account-row:hover td,
+    .page-shell-home .stage-secondary .data-module-public .data-table tbody tr.temporary-account-row:hover td {
+      background:
+        linear-gradient(180deg, rgba(113,112,255,0.12), rgba(113,112,255,0.048)),
+        rgba(255,255,255,0.018);
     }
     .page-shell-public .summary-card {
       padding: 15px 18px 13px;

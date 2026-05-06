@@ -19,12 +19,14 @@ from account_db import (
     ROUND_STATUS_MANUAL_PAUSE,
     ROUND_STATUS_READY,
     ROUND_STATUS_RUNTIME_REACHED,
+    ROUND_STATUS_RUNNING,
     ROUND_STATUS_VALUES,
     find_canonical_account_stats_store,
     normalize_round_status_value,
     read_canonical_account_stats_record,
     read_machine_daily_summary_records,
     read_runtime_execution_state,
+    read_temporary_account_snapshot,
     restore_ready_account_status_if_needed,
     save_canonical_account_stats_record,
 )
@@ -32,6 +34,8 @@ from config import (
     ACCOUNT_MAX_PURCHASE_SECONDS,
     ACCOUNT_LIMIT_COOLDOWN_SECONDS,
     EXECUTION_SLOT_COUNT,
+    TEMPORARY_ACCOUNT_DISPLAY_SLOT,
+    TEMPORARY_ACCOUNT_NICKNAME,
     THREAD6_RUNTIME_DB_PATH,
 )
 
@@ -476,6 +480,77 @@ def _account_stats_record_to_view_record(record, now):
     return view_record
 
 
+def _is_temporary_view_row(row):
+    return bool((row or {}).get("is_temporary_account"))
+
+
+def _temporary_snapshot_to_view_record(snapshot, now):
+    if snapshot is None:
+        return None
+
+    updated_at = _parse_datetime(snapshot.updated_at) or now
+    running_seconds = max(0, _parse_int(snapshot.purchase_running_seconds))
+    capped_running_seconds = min(ACCOUNT_MAX_PURCHASE_SECONDS, running_seconds)
+    remaining_seconds = max(0, ACCOUNT_MAX_PURCHASE_SECONDS - capped_running_seconds)
+    status_aliases = {
+        "临时抢购中": ROUND_STATUS_RUNNING,
+        "抢购中": ROUND_STATUS_RUNNING,
+        "临时账号限制": ROUND_STATUS_LIMITED,
+    }
+    status = status_aliases.get(str(snapshot.round_status or "").strip(), str(snapshot.round_status or "").strip())
+    status = status or ROUND_STATUS_RUNNING
+    if status == ROUND_STATUS_RUNTIME_REACHED:
+        remaining_seconds = 0
+        capped_running_seconds = ACCOUNT_MAX_PURCHASE_SECONDS
+
+    view_record = {
+        "nickname": str(snapshot.nickname or TEMPORARY_ACCOUNT_NICKNAME).strip() or TEMPORARY_ACCOUNT_NICKNAME,
+        "is_temporary_account": True,
+        "is_read_only": True,
+        "current_execution_slot": _parse_int(snapshot.current_execution_slot) or TEMPORARY_ACCOUNT_DISPLAY_SLOT,
+        "baseline_item_count": max(0, _parse_int(snapshot.baseline_item_count)),
+        "round_purchase_success_count": max(0, _parse_int(snapshot.round_purchase_success_count)),
+        "round_listing_success_count": max(0, _parse_int(snapshot.round_listing_success_count)),
+        "round_purchase_fail_count": max(0, _parse_int(snapshot.round_purchase_fail_count)),
+        "current_balance": str(snapshot.current_balance or "").strip(),
+        "purchase_running_seconds": running_seconds,
+        "runtime_window_start_time": None,
+        "round_status": status,
+        "last_limit_time": None,
+        "last_account_end_time": None,
+        "updated_at": _serialize_datetime(updated_at),
+        "updated_at_relative": _format_updated_at_relative(updated_at, now),
+        "allow_start_time": None,
+        "allow_purchase": remaining_seconds > 0,
+        "cooldown_remaining_seconds": 0,
+        "effective_runtime_window_start_time": None,
+        "runtime_window_total_seconds": ACCOUNT_MAX_PURCHASE_SECONDS,
+        "runtime_window_total_text": _format_duration_text(ACCOUNT_MAX_PURCHASE_SECONDS),
+        "runtime_window_used_seconds": capped_running_seconds,
+        "runtime_window_used_text": _format_duration_text(capped_running_seconds),
+        "runtime_window_remaining_seconds": remaining_seconds,
+        "runtime_window_remaining_text": _format_duration_text(remaining_seconds),
+        "runtime_window_source": "temporary_snapshot",
+        "runtime_window_has_rolled": False,
+    }
+    view_record["item_quantity"] = view_record["baseline_item_count"]
+    view_record["inventory_quantity"] = view_record["baseline_item_count"]
+    view_record["current_balance_wan"] = _format_balance_for_wan_input(view_record["current_balance"])
+    if _is_forced_limit_status(status):
+        view_record["allow_purchase"] = False
+        view_record["runtime_window_remaining_seconds"] = 0
+        view_record["runtime_window_remaining_text"] = _format_duration_text(0)
+    return view_record
+
+
+def _append_temporary_snapshot_row(view_rows, generated_at):
+    snapshot = read_temporary_account_snapshot()
+    temporary_record = _temporary_snapshot_to_view_record(snapshot, generated_at)
+    if temporary_record is not None:
+        view_rows.append(temporary_record)
+    return view_rows
+
+
 def _is_missing_value(value):
     if value is None:
         return True
@@ -503,6 +578,8 @@ def _build_record_health(record):
 def _build_duplicate_slot_health(rows):
     slot_map = {}
     for row in rows:
+        if _is_temporary_view_row(row):
+            continue
         slot_value = row.get("current_execution_slot")
         if slot_value is None:
             continue
@@ -530,6 +607,7 @@ def _build_expected_slot_health(rows):
         {
             row.get("current_execution_slot")
             for row in rows
+            if not _is_temporary_view_row(row)
             if row.get("current_execution_slot") is not None
         }
     )
@@ -560,6 +638,8 @@ def _build_execution_slot_summary(health):
 def _build_missing_field_health(rows):
     issues = []
     for row in rows:
+        if _is_temporary_view_row(row):
+            continue
         missing_fields = _collect_missing_fields(row)
         if not missing_fields:
             continue
@@ -583,11 +663,15 @@ def _find_runtime_match(rows, runtime_snapshot):
 
     if runtime_nickname:
         for row in rows:
+            if _is_temporary_view_row(row):
+                continue
             if str(row.get("nickname") or "").strip() == runtime_nickname:
                 return row
 
     if runtime_slot is not None:
         for row in rows:
+            if _is_temporary_view_row(row):
+                continue
             if row.get("current_execution_slot") == runtime_slot:
                 return row
 
@@ -864,12 +948,13 @@ def get_account_view_rows():
     runtime_snapshot = get_runtime_snapshot()
     real_record_count = _count_canonical_records(database_path, table_name)
     if not database_path or not os.path.isfile(database_path):
-        result = _build_canonical_result("", table_name, [], generated_at)
+        view_rows = _append_temporary_snapshot_row([], generated_at)
+        result = _build_canonical_result("", table_name, view_rows, generated_at)
         result["health"] = {
-            **_build_duplicate_slot_health([]),
-            **_build_expected_slot_health([]),
-            **_build_missing_field_health([]),
-            **_build_runtime_snapshot_health([], runtime_snapshot),
+            **_build_duplicate_slot_health(view_rows),
+            **_build_expected_slot_health(view_rows),
+            **_build_missing_field_health(view_rows),
+            **_build_runtime_snapshot_health(view_rows, runtime_snapshot),
         }
         result["execution_slot_summary"] = _build_execution_slot_summary(result["health"])
         result["source_summary"] = _build_source_summary("", table_name, runtime_snapshot)
@@ -900,6 +985,7 @@ def get_account_view_rows():
                 generated_at,
             )
             view_rows.append(_account_stats_record_to_view_record(canonical_record, generated_at))
+        _append_temporary_snapshot_row(view_rows, generated_at)
         result = _build_canonical_result(database_path, table_name, view_rows, generated_at)
         result["health"] = {
             **_build_duplicate_slot_health(view_rows),
@@ -1049,6 +1135,9 @@ def update_account_view_record(
 
     if not normalized_nickname:
         result["message"] = "缺少账号昵称，无法提交修改。"
+        return result
+    if normalized_nickname == TEMPORARY_ACCOUNT_NICKNAME:
+        result["message"] = "临时号来自辅助快照，只读显示，不写入主 SQLite。"
         return result
 
     resolved_source = _resolve_account_view_canonical_store()

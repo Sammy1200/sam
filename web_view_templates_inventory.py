@@ -226,7 +226,7 @@ def _build_demo_account_rows():
             "updated_at_relative": "5小时前",
             "allow_purchase": True,
             "cooldown_remaining_seconds": 0,
-            "runtime_window_remaining_text": "2小时50分钟",
+            "runtime_window_remaining_text": "2小时45分钟",
         },
         {
             "current_execution_slot": 2,
@@ -685,15 +685,22 @@ def _render_local_read_only_cells(row):
     )
     balance_cell = _format_balance_wan_display(row.get("current_balance_wan"))
     status_cell = _format_value(row.get("round_status"))
-    nickname = str(row.get("nickname") or "").strip()
-    if nickname:
-        action_cell = f'<a href="{escape(f"/account?nickname={nickname}", quote=True)}">查看详情</a>'
+    if row.get("is_temporary_account"):
+        status_cell = _render_home_display_field(status_cell, "meta")
+        action_cell = '<div class="temporary-action-field"><span>临时快照</span></div>'
     else:
-        action_cell = '<span class="muted-text">缺少昵称，无法查看详情</span>'
+        nickname = str(row.get("nickname") or "").strip()
+        if nickname:
+            action_cell = f'<a href="{escape(f"/account?nickname={nickname}", quote=True)}">查看详情</a>'
+        else:
+            action_cell = '<span class="muted-text">缺少昵称，无法查看详情</span>'
     return inventory_cell, balance_cell, status_cell, action_cell
 
 
 def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
+    if row.get("is_temporary_account"):
+        return _render_local_read_only_cells(row)
+
     nickname = str(row.get("nickname") or "").strip()
     if not nickname:
         muted_html = '<span class="muted-text">缺少昵称，暂不可编辑</span>'
@@ -775,19 +782,21 @@ def _build_account_list_rows(rows, edit_meta=None, edit_result=None, read_only_m
                 edit_result=edit_result,
             )
 
-        row_items.append(
-            (
-                _format_value(row.get("current_execution_slot")),
-                _format_value(row.get("nickname")),
-                inventory_cell,
-                balance_cell,
-                _format_runtime_remaining_text(row.get("runtime_window_remaining_text")),
-                status_cell,
-                _format_value(row.get("allow_purchase")),
-                _format_cooldown_remaining_time(row.get("cooldown_remaining_seconds")),
-                action_cell,
-            )
+        cells = (
+            _format_value(row.get("current_execution_slot")),
+            _format_value(row.get("nickname")),
+            inventory_cell,
+            balance_cell,
+            _format_runtime_remaining_text(row.get("runtime_window_remaining_text")),
+            status_cell,
+            _format_value(row.get("allow_purchase")),
+            _format_cooldown_remaining_time(row.get("cooldown_remaining_seconds")),
+            action_cell,
         )
+        if row.get("is_temporary_account"):
+            row_items.append({"cells": cells, "row_class": "temporary-account-row"})
+        else:
+            row_items.append(cells)
     return row_items, using_demo_rows
 
 
@@ -819,17 +828,19 @@ def _build_remote_account_list_rows(section):
     row_items = []
     for row in section.get("rows") or []:
         status_text = str(row.get("round_status") or "").strip()
-        row_items.append(
-            (
-                _format_value(row.get("nickname")),
-                _format_value(row.get("baseline_item_count")),
-                _format_balance_wan_display(row.get("current_balance_wan")),
-                _render_remote_countdown_cell(row, "runtime_window_remaining_seconds"),
-                _render_remote_countdown_cell(row, "cooldown_remaining_seconds"),
-                _format_value("时长已到" if status_text == "抢购时长已到" else status_text),
-                _render_remote_updated_at_cell(row),
-            )
+        cells = (
+            _format_value(row.get("nickname")),
+            _format_value(row.get("baseline_item_count")),
+            _format_balance_wan_display(row.get("current_balance_wan")),
+            _render_remote_countdown_cell(row, "runtime_window_remaining_seconds"),
+            _render_remote_countdown_cell(row, "cooldown_remaining_seconds"),
+            _format_value("时长已到" if status_text == "抢购时长已到" else status_text),
+            _render_remote_updated_at_cell(row),
         )
+        if str(row.get("nickname") or "").strip() == "临时号":
+            row_items.append({"cells": cells, "row_class": "temporary-account-row"})
+        else:
+            row_items.append(cells)
     return row_items
 
 
@@ -837,21 +848,23 @@ def _build_public_local_snapshot_rows(rows):
     row_items = []
     for row in rows or []:
         status_text = str(row.get("round_status") or "").strip()
-        row_items.append(
-            (
-                _format_value(row.get("current_execution_slot")),
-                _format_value(row.get("nickname")),
-                _format_value(row.get("baseline_item_count") or row.get("inventory_quantity")),
-                _format_balance_wan_display(row.get("current_balance_wan")),
-                _format_runtime_remaining_text(row.get("runtime_window_remaining_text")),
-                _format_cooldown_remaining_time(row.get("cooldown_remaining_seconds")),
-                _format_value("时长已到" if status_text == "抢购时长已到" else status_text),
-                _render_local_relative_time(
-                    row.get("updated_at_relative") or "-",
-                    row.get("updated_at"),
-                ),
-            )
+        cells = (
+            _format_value(row.get("current_execution_slot")),
+            _format_value(row.get("nickname")),
+            _format_value(row.get("baseline_item_count") or row.get("inventory_quantity")),
+            _format_balance_wan_display(row.get("current_balance_wan")),
+            _format_runtime_remaining_text(row.get("runtime_window_remaining_text")),
+            _format_cooldown_remaining_time(row.get("cooldown_remaining_seconds")),
+            _format_value("时长已到" if status_text == "抢购时长已到" else status_text),
+            _render_local_relative_time(
+                row.get("updated_at_relative") or "-",
+                row.get("updated_at"),
+            ),
         )
+        if row.get("is_temporary_account"):
+            row_items.append({"cells": cells, "row_class": "temporary-account-row"})
+        else:
+            row_items.append(cells)
     return row_items
 
 
@@ -1145,6 +1158,25 @@ def _render_home_display_field(value, tone="default"):
     return f'<div class="display-field{tone_class}">{value}</div>'
 
 
+def _table_row_cells(row):
+    if isinstance(row, dict) and "cells" in row:
+        return tuple(row.get("cells") or ())
+    return tuple(row or ())
+
+
+def _table_row_class(row):
+    if isinstance(row, dict):
+        return str(row.get("row_class") or "").strip()
+    return ""
+
+
+def _with_optional_row_class(cells, row_class):
+    row_class = str(row_class or "").strip()
+    if not row_class:
+        return cells
+    return {"cells": cells, "row_class": row_class}
+
+
 def _format_snapshot_relative_time(value):
     text = str(value or "").strip()
     if not text:
@@ -1192,18 +1224,23 @@ def render_index_page(
         "col-cooldown",
         "col-action",
     )
-    display_row_items = [
-        (
-            _render_home_display_field(row[1], "name"),
-            row[2],
-            row[3],
-            _render_home_display_field(row[4], "meta"),
-            row[5],
-            _render_home_display_field(row[7], "meta"),
-            row[8],
+    display_row_items = []
+    for raw_row in row_items:
+        row = _table_row_cells(raw_row)
+        display_row_items.append(
+            _with_optional_row_class(
+                (
+                    _render_home_display_field(row[1], "name"),
+                    row[2],
+                    row[3],
+                    _render_home_display_field(row[4], "meta"),
+                    row[5],
+                    _render_home_display_field(row[7], "meta"),
+                    row[8],
+                ),
+                _table_row_class(raw_row),
+            )
         )
-        for row in row_items
-    ]
     local_machine_display_name = view_rows_result.get("machine_display_name") or "本机"
     local_summary_html = _build_linear_summary_cards(view_rows_result.get("machine_daily_summaries"))
     remote_machine_sections = list(remote_machine_sections or [])
@@ -1437,7 +1474,10 @@ def render_public_snapshot_page(view_rows_result, remote_machine_sections=None, 
             "\u8d26\u53f7\u72b6\u6001",
             "\u66f4\u65b0\u65f6\u95f4",
         ),
-        [row[1:] for row in local_row_items],
+        [
+            _with_optional_row_class(_table_row_cells(row)[1:], _table_row_class(row))
+            for row in local_row_items
+        ],
     )
 
     body_html = f"""

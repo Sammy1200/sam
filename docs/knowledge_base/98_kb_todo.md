@@ -57,7 +57,7 @@
 - F12 后数据回弹 -> 查恢复回灌链路
 - 悬浮窗时间不对 -> 查 `overlay` 显示口径 / `purchase` 退出链路
 - 2号电脑不同步 -> 查 canonical 主库 / web sync 配置 / Tailscale
-- 网页打不开 -> 查 `web_bind_host` / `8091` / Tailscale 地址
+- 网页打不开 -> 查 `web_bind_host` / `8391` / Tailscale 地址
 - 2号电脑昵称识别不到 -> 查 `nickname_template_dir` / 模板目录 / 识别区域
 
 补这份的原因：

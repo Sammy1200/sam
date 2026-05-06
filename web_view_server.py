@@ -468,7 +468,14 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
 
 def run_server(host=None, port=PORT):
     bind_host = host or resolve_web_bind_host() or WEB_VIEW_HOST
-    server = ThreadingHTTPServer((bind_host, port), ReadOnlyViewHandler)
+    try:
+        server = ThreadingHTTPServer((bind_host, port), ReadOnlyViewHandler)
+    except OSError as exc:
+        if bind_host == WEB_VIEW_HOST:
+            raise
+        print(f"[网页查看页] 绑定 {bind_host}:{port} 失败：{exc}，回退到 {WEB_VIEW_HOST}:{port}")
+        server = ThreadingHTTPServer((WEB_VIEW_HOST, port), ReadOnlyViewHandler)
+        bind_host = WEB_VIEW_HOST
     print(f"[网页查看页] 服务已启动：bind={bind_host} local=http://127.0.0.1:{port}")
     try:
         server.serve_forever()

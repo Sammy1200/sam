@@ -100,9 +100,11 @@ from account_db import (
 )
 from round_persistence import (
     persist_item_balance_and_schedule_snapshot,
+    persist_temporary_account_snapshot,
     persist_final_round_snapshot,
     refresh_account_limit_reached_at,
     reset_round_runtime_state,
+    reset_temporary_account_snapshot_for_new_round,
     restore_runtime_window_state,
     resolve_shutdown_final_status,
 )
@@ -503,7 +505,7 @@ def _prepare_temporary_purchase_context():
     state.temporary_purchase_mode = True
     state.temporary_target_execution_slot = None
     state.need_switch_server = False
-    state.current_nickname = "临时模式"
+    state.current_nickname = "临时号"
     state.current_execution_slot = None
     state.baseline_item_count = 0
     state.account_allow_purchase = True
@@ -511,6 +513,8 @@ def _prepare_temporary_purchase_context():
     state.overlay_status = "临时抢购中"
     reset_round_runtime_state("进入临时抢购模式")
     reset_purchase_counters("进入临时抢购模式")
+    reset_temporary_account_snapshot_for_new_round()
+    persist_temporary_account_snapshot("临时模式启动", trigger_remote_snapshot=True)
     ui_print("临时抢购模式，库存基线从 0 开始", save_log=True)
     print("[临时模式] 已启动，库存基线=0")
     logger.info("[临时模式] 已启动，库存基线=%s", 0)
@@ -986,6 +990,7 @@ def _handle_temporary_target_execution_slot_dispatch(camera):
         handoff_target.get("selection_mode"),
         handoff_target.get("selection_value"),
     )
+    persist_temporary_account_snapshot("临时模式结束", trigger_remote_snapshot=True)
 
     if not switch_account_for_temporary_target_slot(camera, target_slot) and not state.switch_flow_paused:
         pause_thread6_failure("临时模式定向切换链路", "链路返回失败，但未命中步骤级或链路级失败出口。")
@@ -1102,13 +1107,24 @@ def _probe_web_view_service(timeout=0.5):
         body_text = exc.read().decode("utf-8", errors="ignore")
         if _is_web_view_service_response_valid(body_text):
             return True, f"网页服务已可访问，HTTP {exc.code}"
-        return False, f"8091 已有其他 HTTP 服务响应，HTTP {exc.code}"
+        return False, f"{config.WEB_VIEW_PORT} 已有其他 HTTP 服务响应，HTTP {exc.code}"
     except Exception as exc:
         return False, f"网页服务不可访问：{exc}"
 
     if _is_web_view_service_response_valid(body_text):
         return True, "网页服务已可访问"
-    return False, "8091 已有其他 HTTP 服务响应"
+    return False, f"{config.WEB_VIEW_PORT} 已有其他 HTTP 服务响应"
+
+
+def _read_text_tail(path, max_chars=1000):
+    try:
+        if not path or not os.path.isfile(path):
+            return ""
+        with open(path, "r", encoding="utf-8", errors="ignore") as file:
+            text = file.read()
+    except Exception:
+        return ""
+    return text.strip()[-max_chars:]
 
 
 def _start_web_view_server_in_background():
@@ -1127,17 +1143,28 @@ def _start_web_view_server_in_background():
         startupinfo.wShowWindow = 0
         creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+    log_dir = os.path.join(config.SCRIPT_DIR, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stdout_log_path = os.path.join(log_dir, f"web_view_server_{log_stamp}.out.log")
+    stderr_log_path = os.path.join(log_dir, f"web_view_server_{log_stamp}.err.log")
+
     try:
-        process = subprocess.Popen(
-            [sys.executable, script_path],
-            cwd=config.SCRIPT_DIR,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            startupinfo=startupinfo,
-            creationflags=creationflags,
-            close_fds=True,
-        )
+        with open(stdout_log_path, "w", encoding="utf-8") as stdout_log, open(
+            stderr_log_path,
+            "w",
+            encoding="utf-8",
+        ) as stderr_log:
+            process = subprocess.Popen(
+                [sys.executable, script_path],
+                cwd=config.SCRIPT_DIR,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_log,
+                stderr=stderr_log,
+                startupinfo=startupinfo,
+                creationflags=creationflags,
+                close_fds=True,
+            )
     except Exception as exc:
         message = f"[网页服务] 后台静默启动失败：{exc}"
         print(message)
@@ -1150,7 +1177,11 @@ def _start_web_view_server_in_background():
     for _ in range(6):
         time.sleep(0.3)
         if process.poll() is not None:
-            message = f"[网页服务] 子进程已退出，返回码={process.returncode}"
+            error_detail = _read_text_tail(stderr_log_path)
+            if error_detail:
+                message = f"[网页服务] 子进程已退出，返回码={process.returncode}，错误={error_detail}"
+            else:
+                message = f"[网页服务] 子进程已退出，返回码={process.returncode}"
             print(message)
             logger.error(message)
             return False
@@ -1160,8 +1191,8 @@ def _start_web_view_server_in_background():
             print(f"[网页服务] 后台静默启动完成：{reason}")
             return True
         if "其他 HTTP 服务" in reason:
-            logger.warning("[网页服务] 8091 端口冲突：%s", reason)
-            print(f"[网页服务] 8091 端口冲突：{reason}")
+            logger.warning("[网页服务] %s 端口冲突：%s", config.WEB_VIEW_PORT, reason)
+            print(f"[网页服务] {config.WEB_VIEW_PORT} 端口冲突：{reason}")
             return False
 
     message = "[网页服务] 已尝试后台静默启动，但暂未确认可访问，主程序继续运行。"
