@@ -126,6 +126,7 @@ def _create_editor():
 
     # ── 状态 ──
     expanded = [False]
+    is_brutal_mode = bool(getattr(state, "brutal_purchase_mode", False))
     msg_var = tk.StringVar(value="")
     title_base_text = _build_editor_title_text()
     title_var = tk.StringVar(value=title_base_text)
@@ -196,6 +197,10 @@ def _create_editor():
                          padx=6, pady=1)
     stock_btn.pack(side="left")
 
+    if is_brutal_mode:
+        price_row.pack_forget()
+        stock_row.pack_forget()
+
     # ── F12 自动恢复倒计时行 ──
     resume_row = tk.Frame(body, bg=_BG)
     resume_row.pack(fill="x", pady=(0, 4))
@@ -217,6 +222,30 @@ def _create_editor():
                           padx=6, pady=1)
     resume_btn.pack(side="left")
 
+    # ── 暴力模式抢购上限行 ──
+    brutal_limit_row = tk.Frame(body, bg=_BG)
+    if is_brutal_mode:
+        brutal_limit_row.pack(fill="x", pady=(0, 4))
+
+    brutal_limit_lbl = tk.Label(brutal_limit_row, text="抢购上限:",
+                                font=_FONT_LABEL, fg=_FG_DIM, bg=_BG,
+                                width=14, anchor="w")
+    brutal_limit_lbl.pack(side="left")
+
+    brutal_limit_entry = tk.Entry(brutal_limit_row, font=_FONT_ENTRY, width=10,
+                                  bg=_ENTRY_BG, fg=_ENTRY_FG,
+                                  insertbackground=_ENTRY_FG, relief="flat",
+                                  highlightthickness=1, highlightcolor=_ACCENT,
+                                  highlightbackground=_BORDER)
+    if getattr(state, "brutal_purchase_limit_enabled", False):
+        brutal_limit_entry.insert(0, str(int(getattr(state, "brutal_purchase_limit", 0) or 0)))
+    brutal_limit_entry.pack(side="left", padx=(4, 6), ipady=3)
+
+    brutal_limit_btn = tk.Label(brutal_limit_row, text=" 应用 ", font=_FONT_BTN,
+                                fg=_FG, bg=_ACCENT, cursor="hand2",
+                                padx=6, pady=1)
+    brutal_limit_btn.pack(side="left")
+
     # ── 消息行 ──
     msg_label = tk.Label(body, textvariable=msg_var,
                          font=_FONT_MSG, fg=_SUCCESS, bg=_BG, anchor="w")
@@ -235,7 +264,10 @@ def _create_editor():
             arrow_var.set("▼")
             expanded[0] = True
             win.focus_force()
-            price_entry.focus_set()
+            if is_brutal_mode:
+                brutal_limit_entry.focus_set()
+            else:
+                price_entry.focus_set()
         win.update_idletasks()
 
     for w in (header, lbl_arrow, lbl_title):
@@ -250,7 +282,7 @@ def _create_editor():
     def _hover_out(e):
         e.widget.configure(bg=_ACCENT)
 
-    for btn in (price_btn, stock_btn, resume_btn):
+    for btn in (price_btn, stock_btn, resume_btn, brutal_limit_btn):
         btn.bind("<Enter>", _hover_in)
         btn.bind("<Leave>", _hover_out)
 
@@ -364,3 +396,33 @@ def _create_editor():
     resume_btn.bind("<Button-1>", _do_apply_auto_resume)
     resume_entry.bind("<Return>", _do_apply_auto_resume)
     resume_entry.bind("<KP_Enter>", _do_apply_auto_resume)
+
+    # ══════════════════════════════════
+    #  暴力模式抢购上限
+    # ══════════════════════════════════
+    def _do_apply_brutal_limit(event=None):
+        raw = brutal_limit_entry.get().strip()
+        if not raw or raw == "0":
+            state.brutal_purchase_limit = 0
+            state.brutal_purchase_limit_enabled = False
+            _show_msg("✓ 上限不限")
+            return
+        if not raw.isdigit():
+            _show_msg("✗ 上限必须是整数", _ERROR)
+            return
+
+        limit = int(raw)
+        if limit <= 0:
+            state.brutal_purchase_limit = 0
+            state.brutal_purchase_limit_enabled = False
+            _show_msg("✓ 上限不限")
+            return
+
+        state.brutal_purchase_limit = limit
+        state.brutal_purchase_limit_enabled = True
+        _show_msg("✓ 上限已设置")
+        _collapse_body()
+
+    brutal_limit_btn.bind("<Button-1>", _do_apply_brutal_limit)
+    brutal_limit_entry.bind("<Return>", _do_apply_brutal_limit)
+    brutal_limit_entry.bind("<KP_Enter>", _do_apply_brutal_limit)

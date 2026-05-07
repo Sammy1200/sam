@@ -10,6 +10,12 @@ target_stop_seconds = 0
 temporary_purchase_mode = False
 temporary_target_execution_slot = None
 startup_listing_mode_active = False
+listing_enabled = True
+listing_disabled_for_session = False
+listing_global_skip_logged = False
+brutal_purchase_mode = False
+brutal_purchase_limit = 0
+brutal_purchase_limit_enabled = False
 pause_auto_resume_deadline = None
 pause_auto_resume_token = 0
 

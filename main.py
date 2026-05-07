@@ -113,7 +113,7 @@ from utils import async_push_msg, logger
 from vision import is_image_present, load_digit_templates
 from overlay import hide_overlay_until_hidden, shutdown_overlay, start_overlay, ui_print, update_score_text
 from listing import execute_listing_routine
-from purchase import recognize_latest_balance_at_trade, run_purchase_loop, reset_purchase_counters
+from purchase import recognize_latest_balance_at_trade, run_brutal_purchase_loop, run_purchase_loop, reset_purchase_counters
 from startup_listing_mode import run_startup_listing_mode, select_normal_mode_handoff_target
 from switch import (
     detect_current_execution_slot_from_launcher,
@@ -457,6 +457,12 @@ def _restore_current_account_ready_status(reason):
 
 
 def _set_account_state_defaults():
+    listing_enabled = bool(getattr(state, "listing_enabled", True))
+    listing_disabled_for_session = bool(getattr(state, "listing_disabled_for_session", False))
+    listing_global_skip_logged = bool(getattr(state, "listing_global_skip_logged", False))
+    brutal_purchase_mode = bool(getattr(state, "brutal_purchase_mode", False))
+    brutal_purchase_limit = int(getattr(state, "brutal_purchase_limit", 0) or 0)
+    brutal_purchase_limit_enabled = bool(getattr(state, "brutal_purchase_limit_enabled", False))
     state.success_count = 0
     state.fail_count = 0
     state.total_listed_count = 0
@@ -497,6 +503,23 @@ def _set_account_state_defaults():
     state.temporary_purchase_mode = False
     state.temporary_target_execution_slot = None
     state.startup_listing_mode_active = False
+    state.listing_enabled = listing_enabled
+    state.listing_disabled_for_session = listing_disabled_for_session
+    state.listing_global_skip_logged = listing_global_skip_logged
+    state.brutal_purchase_mode = brutal_purchase_mode
+    state.brutal_purchase_limit = brutal_purchase_limit
+    state.brutal_purchase_limit_enabled = brutal_purchase_limit_enabled
+
+
+def _is_listing_enabled_for_session():
+    return bool(state.listing_enabled) and not bool(getattr(state, "listing_disabled_for_session", False))
+
+
+def _log_listing_disabled_once():
+    if state.listing_global_skip_logged:
+        return
+    ui_print("上架已关闭", save_log=True)
+    state.listing_global_skip_logged = True
 
 
 def _prepare_temporary_purchase_context():
@@ -874,6 +897,9 @@ def _run_pre_listing_flow(
     if reset_runtime_before_listing:
         reset_round_runtime_state(reset_reason, reset_purchase_runtime=False, reset_round_counters=False)
         reset_purchase_counters(purchase_reset_reason)
+    if not _is_listing_enabled_for_session():
+        _log_listing_disabled_once()
+        return _wait_until_account_ready()
     ui_print("开始执行预上架流程...")
     execute_listing_routine(
         camera,
@@ -886,7 +912,10 @@ def _run_direct_account_flow(camera):
     if not _load_current_account_context():
         return False
     if not state.account_allow_purchase:
-        ui_print("账号未到抢购时间，执行预上架流程...")
+        if _is_listing_enabled_for_session():
+            ui_print("账号未到抢购时间，执行预上架流程...")
+        else:
+            ui_print("账号未到抢购时间，等待冷却...")
         return _run_pre_listing_flow(
             camera,
             reset_runtime_before_listing=True,
@@ -1310,7 +1339,14 @@ def _refresh_latest_balance_before_switch(camera):
 
 def main():
     ensure_web_view_server_ready()
-    mode, _temp_slot = show_launcher()
+    mode, listing_enabled = show_launcher()
+    state.listing_enabled = bool(listing_enabled)
+    state.listing_disabled_for_session = not bool(listing_enabled)
+    state.listing_global_skip_logged = False
+    state.brutal_purchase_mode = mode == "brutal_launcher"
+    if not state.brutal_purchase_mode:
+        state.brutal_purchase_limit = 0
+        state.brutal_purchase_limit_enabled = False
     start_overlay()
     try:
         if not hide_overlay_until_hidden():
@@ -1412,6 +1448,9 @@ def main():
                 ):
                     return
             elif mode == "listing_launcher":
+                if not _is_listing_enabled_for_session():
+                    _log_listing_disabled_once()
+                    return
                 ui_print("上架模式启动", save_log=True)
                 listing_mode_result = run_startup_listing_mode(camera)
                 if not isinstance(listing_mode_result, dict):
@@ -1429,8 +1468,11 @@ def main():
                     _pause_after_launcher_start_failure()
                     return
                 _prepare_temporary_purchase_context()
-                ui_print("开始执行预上架流程...")
-                execute_listing_routine(camera)
+                if _is_listing_enabled_for_session():
+                    ui_print("开始执行预上架流程...")
+                    execute_listing_routine(camera)
+                else:
+                    _log_listing_disabled_once()
                 run_purchase_loop(
                     camera,
                     templates,
@@ -1448,6 +1490,35 @@ def main():
                     pass
                 else:
                     return
+            elif mode == "brutal_launcher":
+                state.listing_enabled = False
+                state.listing_disabled_for_session = True
+                state.account_record_loaded = False
+                state.account_read_status = ""
+                state.current_nickname = ""
+                state.current_execution_slot = None
+                state.overlay_status = "暴力抢购"
+                state.round_purchase_success_count = 0
+                state.round_purchase_fail_count = 0
+                state.round_listing_success_count = 0
+                state.success_count = 0
+                state.fail_count = 0
+                if state.overlay_root:
+                    try:
+                        state.overlay_root.after(0, state.overlay_root.deiconify)
+                        state.overlay_root.after(0, update_score_text)
+                    except Exception:
+                        pass
+                ui_print("暴力模式启动", save_log=True)
+                run_brutal_purchase_loop(
+                    camera,
+                    temp_success,
+                    temp_shop,
+                    temp_goumai,
+                    temp_meihuo,
+                    temp_diyici,
+                )
+                return
             else:
                 ui_print(f"未知启动模式：{mode}", save_log=True)
                 return

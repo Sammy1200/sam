@@ -337,6 +337,203 @@ def wait_and_recognize_balance(wait_time, camera):
     return True
 
 
+def _wait_trade_without_balance(wait_time, camera):
+    """暴力模式：只等待回到交易行，不识别余额、不写库。"""
+    gc_checkpoint()
+    start_total = time.time()
+    while time.time() - start_total < 1.4:
+        if state.IS_PAUSED:
+            return False
+
+        frame = safe_get_frame(camera)
+        if frame is not None and is_image_present(frame, MONITOR_JIAOYIHANG, state.temp_jiaoyi, threshold=0.7):
+            break
+        time.sleep(0.05)
+
+    elapsed = time.time() - start_total
+    remaining = wait_time - elapsed
+    if remaining > 0:
+        return smart_wait(remaining)
+    return True
+
+
+def _check_brutal_purchase_limit():
+    if not getattr(state, "brutal_purchase_limit_enabled", False):
+        return False
+    limit = int(getattr(state, "brutal_purchase_limit", 0) or 0)
+    if limit <= 0:
+        return False
+    if int(state.round_purchase_success_count) < limit:
+        return False
+
+    ui_print(f"暴力上限{limit}", save_log=True)
+    state.overlay_status = "暴力暂停"
+    if not state.IS_PAUSED:
+        toggle_pause()
+    return True
+
+
+def run_brutal_purchase_loop(camera, temp_success, temp_shop, temp_goumai, temp_meihuo, temp_diyici):
+    """暴力抢购模式：跳过价格识别，不写库，不接换号链路。"""
+    state.brutal_purchase_mode = True
+    state.overlay_status = "暴力抢购"
+    state.purchase_timer_active = False
+    state.last_resume_time = None
+
+    last_refresh = time.time()
+    last_frame = None
+    last_frame_time = time.time()
+    last_abnormal_print_sec = 0
+    waiting_detail_after_refresh = False
+
+    gc.disable()
+
+    try:
+        while True:
+            if state.IS_PAUSED:
+                gc_checkpoint()
+                time.sleep(0.5)
+                last_refresh = time.time()
+                last_frame = None
+                continue
+
+            if _check_brutal_purchase_limit():
+                continue
+
+            try:
+                raw_frame = safe_get_frame(camera)
+                if raw_frame is None:
+                    if last_frame is not None and (time.time() - last_frame_time) < FRAME_MAX_AGE:
+                        frame = last_frame
+                    else:
+                        continue
+                else:
+                    frame = raw_frame
+                    last_frame = frame
+                    last_frame_time = time.time()
+
+                is_trade_page = is_image_present(frame, MONITOR_JIAOYIHANG, state.temp_jiaoyi)
+                if is_trade_page:
+                    state.limit_count = 0
+                    state.unknown_page_count = 0
+                    if not is_image_present(frame, MONITOR_SHOP, temp_shop):
+                        ui_print("店铺异常", is_replace=True)
+                        fast_click(REFRESH_POS)
+                        last_refresh = time.time()
+                        waiting_detail_after_refresh = False
+                        time.sleep(0.05)
+                        continue
+
+                    fast_click(REFRESH_POS)
+                    last_refresh = time.time()
+                    waiting_detail_after_refresh = True
+                    time.sleep(0.05)
+                    continue
+
+                if waiting_detail_after_refresh:
+                    state.unknown_page_count = 0
+                    if is_image_present(frame, MONITOR_MEIHUO, temp_meihuo):
+                        ui_print("已售空", is_replace=True)
+                        click_exit()
+                        if _wait_trade_without_balance(EXIT_DELAY, camera):
+                            fast_click(REFRESH_POS)
+                            last_refresh = time.time()
+                            waiting_detail_after_refresh = True
+                        else:
+                            waiting_detail_after_refresh = False
+                        continue
+
+                    waiting_detail_after_refresh = False
+                    buy_click_end_time = time.perf_counter() + 0.012
+                    while time.perf_counter() < buy_click_end_time:
+                        fast_click(BUY_POS)
+                        precise_sleep(0.002)
+                    precise_sleep(CONFIRM_DELAY)
+                    confirm_click_end_time = time.perf_counter() + 0.05
+                    while time.perf_counter() < confirm_click_end_time:
+                        fast_click(CONFIRM_POS)
+                        precise_sleep(0.005)
+                    time.sleep(0.6)
+
+                    frame_after = safe_get_frame(camera)
+                    if frame_after is not None and is_image_present(frame_after, MONITOR_SUCCESS, temp_success):
+                        state.success_count += 1
+                        state.round_purchase_success_count += 1
+                        if state.overlay_root:
+                            state.overlay_root.after(0, update_score_text)
+                        ui_print("暴力成功", save_log=True, show_console=False)
+                        precise_sleep(0.15)
+                        fast_click(SUCCESS_CONFIRM_POS)
+                        precise_sleep(0.15)
+                        fast_click(SUCCESS_CONFIRM_POS)
+                        if _check_brutal_purchase_limit():
+                            continue
+                    else:
+                        state.fail_count += 1
+                        state.round_purchase_fail_count += 1
+                        if state.overlay_root:
+                            state.overlay_root.after(0, update_score_text)
+                        ui_print("暴力失败", save_log=True, show_console=False)
+                        click_exit()
+
+                    if _wait_trade_without_balance(EXIT_DELAY, camera):
+                        fast_click(REFRESH_POS)
+                        last_refresh = time.time()
+                        waiting_detail_after_refresh = True
+                    continue
+
+                time_since_last_action = time.time() - last_refresh
+                if time_since_last_action > 1.5:
+                    if state.unknown_page_count == 0 or time_since_last_action > 10.0:
+                        ui_print("画面异常，全场景识别。", save_log=True)
+                        is_unknown_page = False
+                        if is_image_present(frame, MONITOR_DIYICI, temp_diyici, threshold=0.6):
+                            fast_click(DIYICI_CLICK_POS)
+                        elif is_image_present(frame, MONITOR_GOUMAI, temp_goumai, threshold=0.6):
+                            click_exit()
+                        elif _is_listing_page(frame):
+                            click_exit()
+                        elif (
+                            is_image_present(frame, MONITOR_JIAOYIHANG, state.temp_jiaoyi, threshold=0.6)
+                            and not is_image_present(frame, MONITOR_SHOP, temp_shop, threshold=0.6)
+                        ):
+                            fast_click(FIX_SHOP_POS1)
+                            precise_sleep(1.0)
+                            fast_click(FIX_SHOP_POS2)
+                        elif is_at_gumu(camera):
+                            navigate_to_trade(camera)
+                        elif try_return_to_gumu(camera, retry_count=3):
+                            navigate_to_trade(camera)
+                        else:
+                            is_unknown_page = True
+                            state.unknown_page_count += 1
+                            if state.unknown_page_count >= 5:
+                                state.overlay_status = "未知异常"
+                                state.unknown_page_count = 0
+                                if not state.IS_PAUSED:
+                                    toggle_pause()
+                            else:
+                                last_refresh = time.time()
+                                last_abnormal_print_sec = 0
+
+                        if not is_unknown_page:
+                            state.unknown_page_count = 0
+                            if smart_wait(1.0):
+                                fast_click(REFRESH_POS)
+                                last_refresh = time.time()
+                    else:
+                        current_sec = int(time_since_last_action)
+                        if current_sec != last_abnormal_print_sec:
+                            ui_print(f"场景识别介入（{current_sec}秒/10秒）", is_replace=True)
+                            last_abnormal_print_sec = current_sec
+
+                time.sleep(0.002)
+            except Exception:
+                time.sleep(0.5)
+    finally:
+        gc.enable()
+
+
 def run_purchase_loop(camera, templates, temp_success, temp_shop,
                       temp_goumai, temp_meihuo, temp_diyici):
     """抢购主循环，由 main.py 调用。"""

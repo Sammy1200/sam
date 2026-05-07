@@ -254,20 +254,32 @@ def _create_score_panel(root):
     )
     body.pack(fill="x", padx=1, pady=1)
 
-    row_specs = [
-        (
-            {"title": "", "value_key": "remaining", "value_width": 8, "value_font": OVERLAY_SCORE_TIME_FONT, "value_fg": OVERLAY_SCORE_TIME_FG, "value_padx": 0, "value_anchor": "center", "value_sticky": "ew"},
-            {"title": "执行位", "value_key": "slot", "value_width": 3, "value_font": OVERLAY_SCORE_SLOT_FONT, "value_fg": OVERLAY_SCORE_SLOT_FG, "title_fg": OVERLAY_SCORE_SLOT_LABEL_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP_FIRST_ROW},
-        ),
-        (
-            {"title": "上架成功", "value_key": "listing_success", "value_width": 4, "value_font": OVERLAY_SCORE_VALUE_FONT, "value_fg": OVERLAY_SCORE_VALUE_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP},
-            {"title": "道具库存", "value_key": "inventory", "value_width": 4, "value_font": OVERLAY_SCORE_VALUE_FONT, "value_fg": OVERLAY_SCORE_VALUE_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP},
-        ),
-        (
-            {"title": "抢购成功", "value_key": "purchase_success", "value_width": 4, "value_font": OVERLAY_SCORE_VALUE_FONT, "value_fg": OVERLAY_SCORE_VALUE_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP},
-            {"title": "抢购失败", "value_key": "purchase_fail", "value_width": 4, "value_font": OVERLAY_SCORE_VALUE_FONT, "value_fg": OVERLAY_SCORE_FAIL_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP},
-        ),
-    ]
+    if getattr(state, "brutal_purchase_mode", False):
+        row_specs = [
+            (
+                {"title": "", "value_key": "remaining", "value_width": 8, "value_font": OVERLAY_SCORE_TIME_FONT, "value_fg": OVERLAY_SCORE_TIME_FG, "value_padx": 0, "value_anchor": "center", "value_sticky": "ew"},
+                {"title": "状态", "value_key": "status", "value_width": 4, "value_font": OVERLAY_SCORE_VALUE_FONT, "value_fg": OVERLAY_SCORE_VALUE_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP_FIRST_ROW},
+            ),
+            (
+                {"title": "抢购成功", "value_key": "purchase_success", "value_width": 4, "value_font": OVERLAY_SCORE_VALUE_FONT, "value_fg": OVERLAY_SCORE_VALUE_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP},
+                {"title": "抢购失败", "value_key": "purchase_fail", "value_width": 4, "value_font": OVERLAY_SCORE_VALUE_FONT, "value_fg": OVERLAY_SCORE_FAIL_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP},
+            ),
+        ]
+    else:
+        row_specs = [
+            (
+                {"title": "", "value_key": "remaining", "value_width": 8, "value_font": OVERLAY_SCORE_TIME_FONT, "value_fg": OVERLAY_SCORE_TIME_FG, "value_padx": 0, "value_anchor": "center", "value_sticky": "ew"},
+                {"title": "执行位", "value_key": "slot", "value_width": 3, "value_font": OVERLAY_SCORE_SLOT_FONT, "value_fg": OVERLAY_SCORE_SLOT_FG, "title_fg": OVERLAY_SCORE_SLOT_LABEL_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP_FIRST_ROW},
+            ),
+            (
+                {"title": "上架成功", "value_key": "listing_success", "value_width": 4, "value_font": OVERLAY_SCORE_VALUE_FONT, "value_fg": OVERLAY_SCORE_VALUE_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP},
+                {"title": "道具库存", "value_key": "inventory", "value_width": 4, "value_font": OVERLAY_SCORE_VALUE_FONT, "value_fg": OVERLAY_SCORE_VALUE_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP},
+            ),
+            (
+                {"title": "抢购成功", "value_key": "purchase_success", "value_width": 4, "value_font": OVERLAY_SCORE_VALUE_FONT, "value_fg": OVERLAY_SCORE_VALUE_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP},
+                {"title": "抢购失败", "value_key": "purchase_fail", "value_width": 4, "value_font": OVERLAY_SCORE_VALUE_FONT, "value_fg": OVERLAY_SCORE_FAIL_FG, "value_padx": OVERLAY_SCORE_VALUE_GAP},
+            ),
+        ]
 
     for row_index, row_spec in enumerate(row_specs):
         row = tk.Frame(body, bg=OVERLAY_SCORE_MAIN_BG, bd=0, highlightthickness=0)
@@ -415,6 +427,7 @@ def update_score_text():
     balance_text = _get_balance_display_text()
     values = {
         "slot": slot_text,
+        "status": _format_overlay_value(state.overlay_status, fallback="暴力"),
         "remaining": remaining_text,
         "listing_success": state.round_listing_success_count,
         "inventory": current_inventory,
@@ -424,24 +437,40 @@ def update_score_text():
     }
     try:
         if state.score_var is not None:
-            rolling_lines = [
-                _format_score_rolling_line(
-                    f"执行位 {slot_text}  时间剩余 {remaining_text}",
-                    f"位{slot_text} 时{remaining_text}",
-                ),
-                _format_score_rolling_line(
-                    f"上架成功 {state.round_listing_success_count}  道具库存 {current_inventory}",
-                    f"上架{state.round_listing_success_count} 库存{current_inventory}",
-                ),
-                _format_score_rolling_line(
-                    f"抢购成功 {state.round_purchase_success_count}  抢购失败 {state.round_purchase_fail_count}",
-                    f"抢成{state.round_purchase_success_count} 抢失{state.round_purchase_fail_count}",
-                ),
-                _format_score_rolling_line(
-                    f"余额 {balance_text}",
-                    f"余{balance_text}",
-                ),
-            ]
+            if getattr(state, "brutal_purchase_mode", False):
+                rolling_lines = [
+                    _format_score_rolling_line(
+                        f"暴力模式  时间 {remaining_text}",
+                        f"暴力 {remaining_text}",
+                    ),
+                    _format_score_rolling_line(
+                        f"抢购成功 {state.round_purchase_success_count}  抢购失败 {state.round_purchase_fail_count}",
+                        f"抢成{state.round_purchase_success_count} 抢失{state.round_purchase_fail_count}",
+                    ),
+                    _format_score_rolling_line(
+                        f"余额 {balance_text}",
+                        f"余{balance_text}",
+                    ),
+                ]
+            else:
+                rolling_lines = [
+                    _format_score_rolling_line(
+                        f"执行位 {slot_text}  时间剩余 {remaining_text}",
+                        f"位{slot_text} 时{remaining_text}",
+                    ),
+                    _format_score_rolling_line(
+                        f"上架成功 {state.round_listing_success_count}  道具库存 {current_inventory}",
+                        f"上架{state.round_listing_success_count} 库存{current_inventory}",
+                    ),
+                    _format_score_rolling_line(
+                        f"抢购成功 {state.round_purchase_success_count}  抢购失败 {state.round_purchase_fail_count}",
+                        f"抢成{state.round_purchase_success_count} 抢失{state.round_purchase_fail_count}",
+                    ),
+                    _format_score_rolling_line(
+                        f"余额 {balance_text}",
+                        f"余{balance_text}",
+                    ),
+                ]
             state.score_var.set(
                 "\n".join(rolling_lines)
             )

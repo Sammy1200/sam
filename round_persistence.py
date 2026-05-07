@@ -797,6 +797,8 @@ def _persist_startup_listing_mode_pause_resume_snapshot(event_name):
 
 def persist_pause_snapshot():
     """F12 暂停后只补当前账号最小必要字段，并写入人工暂停状态。"""
+    if state.brutal_purchase_mode:
+        return AccountWriteResult("skipped", "暴力模式不写入任何持久化数据")
     if state.temporary_purchase_mode:
         return AccountWriteResult("skipped", "临时模式不写入 canonical SQLite")
     if state.startup_listing_mode_active:
@@ -859,6 +861,8 @@ def persist_pause_snapshot():
 
 def persist_resume_snapshot():
     """F12 恢复后仅在库内当前状态为人工暂停时恢复为运行中。"""
+    if state.brutal_purchase_mode:
+        return AccountWriteResult("skipped", "暴力模式不写入任何持久化数据")
     if state.temporary_purchase_mode:
         return AccountWriteResult("skipped", "临时模式不写入 canonical SQLite")
     if state.startup_listing_mode_active:

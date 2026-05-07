@@ -460,6 +460,19 @@ def _should_disable_listing_by_round_success_limit():
     return True
 
 
+def _is_listing_enabled():
+    return bool(getattr(state, "listing_enabled", True)) and not bool(
+        getattr(state, "listing_disabled_for_session", False)
+    )
+
+
+def _log_listing_disabled_once():
+    if getattr(state, "listing_global_skip_logged", False):
+        return
+    ui_print("上架已关闭", save_log=True)
+    state.listing_global_skip_logged = True
+
+
 def check_and_click_tishi(camera_obj):
     if state.TEMP_TISHI is None:
         return False
@@ -647,6 +660,14 @@ def _wait_startup_listing_capacity_available(camera_obj, current_capacity):
 
 def execute_startup_listing_batch(camera_obj, target_success_count):
     """启动页上架模式专用批次上架，不影响原预上架与周期上架逻辑。"""
+    if not _is_listing_enabled():
+        _log_listing_disabled_once()
+        return {
+            "status": "skipped",
+            "reason": "上架已关闭",
+            "listed_count": 0,
+        }
+
     gc_checkpoint()
 
     first_popup_checked = False
@@ -848,6 +869,10 @@ def execute_startup_listing_batch(camera_obj, target_success_count):
 
 
 def execute_listing_routine(camera_obj, is_periodic=False, force_balance_check_after_switch=False):
+    if not _is_listing_enabled():
+        _log_listing_disabled_once()
+        return
+
     gc_checkpoint()
 
     resume_timer_after_listing = state.purchase_timer_active
@@ -1172,6 +1197,10 @@ def execute_listing_routine(camera_obj, is_periodic=False, force_balance_check_a
 
 
 def check_trigger_listing(camera):
+    if not _is_listing_enabled():
+        _log_listing_disabled_once()
+        return True
+
     elapsed = get_current_elapsed()
     if state.listing_periodic_disabled:
         if not state.listing_periodic_skip_logged:
