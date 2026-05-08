@@ -226,7 +226,7 @@ def _build_demo_account_rows():
             "updated_at_relative": "5小时前",
             "allow_purchase": True,
             "cooldown_remaining_seconds": 0,
-            "runtime_window_remaining_text": "2小时45分钟",
+            "runtime_window_remaining_text": "2小时40分钟",
         },
         {
             "current_execution_slot": 2,
@@ -287,7 +287,7 @@ def _render_module_title(title, note=""):
 """
 
 
-def _build_linear_summary_cards(machine_daily_summaries):
+def _build_linear_summary_cards(machine_daily_summaries, change_label="总道具变化"):
     summary_rows = _build_machine_daily_summary_rows(machine_daily_summaries)
     cards = []
     for index, row in enumerate(summary_rows):
@@ -302,7 +302,7 @@ def _build_linear_summary_cards(machine_daily_summaries):
     <span class="summary-card-date">{escape(stat_date)}</span>
   </div>
   <div class="summary-main">
-    <span class="summary-main-label">总道具变化</span>
+    <span class="summary-main-label">{escape(str(change_label))}</span>
     <strong class="summary-main-value">{row[1]}</strong>
   </div>
   <div class="summary-subgrid">
@@ -349,9 +349,11 @@ def _render_linear_page_title(title, lead_text, rule_text="", kicker="Page", act
 """
 
 
-def _render_linear_section_title(title, badge_text, eyebrow="Zone", action_html=""):
+def _render_linear_section_title(title, badge_text, eyebrow="Zone", action_html="", badge_html=""):
     action_block = f'<div class="section-head-actions">{action_html}</div>' if str(action_html or "").strip() else ""
-    badge_html = f'<span class="unit-tag">{escape(str(badge_text))}</span>' if str(badge_text or "").strip() else ""
+    badge_block = str(badge_html or "").strip()
+    if not badge_block and str(badge_text or "").strip():
+        badge_block = f'<span class="unit-tag">{escape(str(badge_text))}</span>'
     eyebrow_html = f'<div class="section-eyebrow">{escape(str(eyebrow))}</div>' if str(eyebrow or "").strip() else ""
     return f"""
 <div class="section-head">
@@ -361,7 +363,7 @@ def _render_linear_section_title(title, badge_text, eyebrow="Zone", action_html=
         {eyebrow_html}
         <h2 class="section-title">{escape(str(title))}</h2>
       </div>
-      {badge_html}
+      {badge_block}
     </div>
     {action_block}
   </div>
@@ -418,10 +420,47 @@ def _build_list_form_values(row, edit_result):
         "baseline_item_count": str(row.get("baseline_item_count") or row.get("inventory_quantity") or 0),
         "round_status": str(row.get("round_status") or "").strip(),
         "current_balance_wan": str(row.get("current_balance_wan") or "").strip(),
+        "db_mode": str(row.get("db_mode") or "stone").strip() or "stone",
     }
     if _is_active_edit_row(row, edit_result):
         form_values.update(edit_result.get("form_values") or {})
     return form_values
+
+
+def _normalize_db_mode_from_view(source):
+    mode = str((source or {}).get("db_mode") or "").strip().lower()
+    return "accessory" if mode == "accessory" else "stone"
+
+
+def _db_mode_labels(db_mode):
+    normalized = "accessory" if str(db_mode or "").strip().lower() == "accessory" else "stone"
+    if normalized == "accessory":
+        return {
+            "db_mode": "accessory",
+            "db_label": "饰品库",
+            "alternate_db_mode": "stone",
+            "alternate_db_label": "石头库",
+            "inventory_label": "饰品库存",
+            "balance_label": "金币（万）",
+            "summary_change_label": "总饰品变化",
+        }
+    return {
+        "db_mode": "stone",
+        "db_label": "石头库",
+        "alternate_db_mode": "accessory",
+        "alternate_db_label": "饰品库",
+        "inventory_label": "道具库存",
+        "balance_label": "余额（万）",
+        "summary_change_label": "总道具变化",
+    }
+
+
+def _build_db_mode_toggle(path, labels):
+    target = labels["alternate_db_mode"]
+    label = labels["db_label"]
+    separator = "&" if "?" in path else "?"
+    href = f"{path}{separator}db={target}"
+    return f'<a class="unit-tag db-mode-badge-toggle" href="{escape(href, quote=True)}">{escape(label)}</a>'
 
 
 def _get_local_edit_result(edit_result):
@@ -707,6 +746,8 @@ def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
         return muted_html, muted_html, muted_html, muted_html
 
     edit_meta = edit_meta or {}
+    db_mode = str(edit_meta.get("db_mode") or "stone").strip() or "stone"
+    detail_query = f"/account?nickname={nickname}&db={db_mode}"
     form_id = f"inline-edit-form-{row_index}"
     field_errors = (edit_result or {}).get("field_errors") if _is_active_edit_row(row, edit_result) else {}
     form_values = _build_list_form_values(row, edit_result)
@@ -751,13 +792,14 @@ def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
 <div class="inline-save">
   <form id="{escape(form_id, quote=True)}" method="post" action="/account/update" data-preserve-scroll="true">
     <input type="hidden" name="nickname" value="{escape(nickname, quote=True)}">
+    <input type="hidden" name="db_mode" value="{escape(db_mode, quote=True)}">
     <input type="hidden" name="return_to" value="index">
     <input type="hidden" name="scroll_x" value="">
     <input type="hidden" name="scroll_y" value="">
   </form>
   <div class="inline-save-main">
     <button type="submit" form="{escape(form_id, quote=True)}">保存</button>
-    <a href="{escape(f'/account?nickname={nickname}', quote=True)}">查看详情</a>
+    <a href="{escape(detail_query, quote=True)}">查看详情</a>
   </div>
   {_render_inline_row_result(row, edit_result)}
 </div>
@@ -952,6 +994,7 @@ def render_more_info_page(view_rows_result, runtime_result):
 
 def render_account_detail_page(detail_result, runtime_result, edit_result=None, read_only_mode=True):
     del edit_result, read_only_mode
+    labels = _db_mode_labels(_normalize_db_mode_from_view(detail_result))
     record = detail_result.get("record")
     health = detail_result.get("health") or {}
     lookup = detail_result.get("lookup") or {}
@@ -968,7 +1011,7 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None, 
 </div>
 <div class="section">
   <p>未根据当前查询条件找到对应账号记录。</p>
-  <p><a href="/">返回首页</a></p>
+  <p><a href="/?db={labels['db_mode']}">返回首页</a></p>
 </div>
 """
         return _base_page("账号详情", body_html)
@@ -977,9 +1020,9 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None, 
         ("昵称", record.get("nickname")),
         ("执行位", record.get("current_execution_slot")),
         ("账号状态", record.get("round_status")),
-        ("余额（万）", _format_balance_wan_display(record.get("current_balance_wan"))),
-        ("余额原始存储", record.get("current_balance")),
-        ("道具库存", record.get("baseline_item_count")),
+        (labels["balance_label"], _format_balance_wan_display(record.get("current_balance_wan"))),
+        (labels["balance_label"].replace("（万）", "原始存储"), record.get("current_balance")),
+        (labels["inventory_label"], record.get("baseline_item_count")),
         ("更新", record.get("updated_at_relative")),
         ("更新时间原值", record.get("updated_at")),
         ("本轮抢购成功数", record.get("round_purchase_success_count")),
@@ -1013,7 +1056,7 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None, 
 </div>
 
 <div class="section">
-  <p><a href="/">返回首页</a></p>
+  <p><a href="/?db={labels['db_mode']}">返回首页</a></p>
 </div>
 
 <div class="section">
@@ -1208,6 +1251,7 @@ def render_index_page(
     del runtime_result
     rows = view_rows_result.get("rows") or []
     edit_meta = view_rows_result.get("edit_meta") or {}
+    labels = _db_mode_labels(_normalize_db_mode_from_view(view_rows_result))
     row_items, using_demo_rows = _build_account_list_rows(
         rows,
         edit_meta=edit_meta,
@@ -1242,14 +1286,17 @@ def render_index_page(
             )
         )
     local_machine_display_name = view_rows_result.get("machine_display_name") or "本机"
-    local_summary_html = _build_linear_summary_cards(view_rows_result.get("machine_daily_summaries"))
+    local_summary_html = _build_linear_summary_cards(
+        view_rows_result.get("machine_daily_summaries"),
+        labels["summary_change_label"],
+    )
     remote_machine_sections = list(remote_machine_sections or [])
     remote_sections_html = "".join(
-        _render_remote_machine_section(section, refresh_result=refresh_result)
+        _render_remote_machine_section(section, refresh_result=refresh_result, labels=labels)
         for section in remote_machine_sections
     )
     local_table_html = _render_table(
-        ("昵称", "道具库存", "余额（万）", "可运行时间", "账号状态", "冷却剩余时间", "详情 / 保存"),
+        ("昵称", labels["inventory_label"], labels["balance_label"], "可运行时间", "账号状态", "冷却剩余时间", "详情 / 保存"),
         display_row_items,
         column_classes=account_table_column_classes,
         table_class="account-table account-table-local",
@@ -1259,7 +1306,12 @@ def render_index_page(
     body_html = f"""
 <div class="page-shell page-shell-home">
 <div class="section stage-panel stage-primary">
-  {_render_linear_section_title(local_machine_display_name, "本机真实数据", eyebrow="")}
+  {_render_linear_section_title(
+      local_machine_display_name,
+      "",
+      eyebrow="",
+      badge_html=_build_db_mode_toggle("/", labels),
+  )}
   {local_summary_html}
   {demo_notice_html}
   {local_table_html}
@@ -1303,14 +1355,15 @@ def _build_section_refresh_action(form_action, hidden_inputs, button_label, meta
 """
 
 
-def _build_remote_section_refresh_action(section):
+def _build_remote_section_refresh_action(section, labels=None):
+    labels = labels or _db_mode_labels(section.get("db_mode"))
     machine_id = str(section.get("machine_id") or "").strip()
     last_refresh_time = _format_snapshot_relative_time(section.get("last_report_time"))
     machine_label = str(section.get("machine_display_name") or section.get("machine_id") or "远端").strip()
     machine_label = machine_label.replace("电脑", "").strip() or "远端"
     return _build_section_refresh_action(
         "/remote-sync/refresh",
-        (("target_machine_id", machine_id),),
+        (("target_machine_id", machine_id), ("db_mode", labels["db_mode"])),
         "刷新",
         f"{machine_label}最后快照时间：{last_refresh_time}",
         disabled=not bool(machine_id),
@@ -1324,23 +1377,24 @@ def _render_remote_refresh_toolbar(section, refresh_result=None):
     return _render_remote_refresh_result(section, refresh_result)
 
 
-def _render_remote_machine_section(section, refresh_result=None):
+def _render_remote_machine_section(section, refresh_result=None, labels=None):
+    labels = labels or _db_mode_labels(section.get("db_mode"))
     rows = section.get("rows") or []
     row_items = _build_remote_account_list_rows(section)
-    summary_html = _build_linear_summary_cards(section.get("machine_daily_summaries"))
+    summary_html = _build_linear_summary_cards(section.get("machine_daily_summaries"), labels["summary_change_label"])
     empty_html = f'<p class="muted-text">{escape(str(section.get("message") or "暂无远端镜像数据。"))}</p>' if not rows else ""
 
     table_html = _render_table(
-        ("昵称", "道具库存", "余额（万）", "可运行时间", "冷却剩余时间", "账号状态", "更新时间"),
+        ("昵称", labels["inventory_label"], labels["balance_label"], "可运行时间", "冷却剩余时间", "账号状态", "更新时间"),
         row_items,
     )
     return f"""
 <div class="section stage-panel stage-secondary">
   {_render_linear_section_title(
       section.get("machine_display_name") or section.get("machine_id") or "远端机器",
-      "",
+      labels["db_label"],
       eyebrow="Mirror",
-      action_html=_build_remote_section_refresh_action(section),
+      action_html=_build_remote_section_refresh_action(section, labels),
   )}
   {_render_remote_refresh_toolbar(section, refresh_result)}
   {summary_html}
@@ -1353,7 +1407,8 @@ def _render_remote_machine_section(section, refresh_result=None):
 
 
 # 公网页最终生效模板入口
-def _build_public_local_section_refresh_action(view_rows_result=None):
+def _build_public_local_section_refresh_action(view_rows_result=None, labels=None):
+    labels = labels or _db_mode_labels(_normalize_db_mode_from_view(view_rows_result or {}))
     rows = list((view_rows_result or {}).get("rows") or [])
     latest_updated_at = ""
     for row in rows:
@@ -1363,20 +1418,21 @@ def _build_public_local_section_refresh_action(view_rows_result=None):
     last_refresh_time = _format_snapshot_relative_time(latest_updated_at)
     return _build_section_refresh_action(
         "/public-snapshot/refresh",
-        (("target_scope", "local"),),
+        (("target_scope", "local"), ("db_mode", labels["db_mode"])),
         "\u5237\u65b0",
         f"1\u53f7\u6700\u540e\u5feb\u7167\u65f6\u95f4\uff1a{last_refresh_time}",
     )
 
 
-def _build_public_remote_section_refresh_action(section):
+def _build_public_remote_section_refresh_action(section, labels=None):
+    labels = labels or _db_mode_labels(section.get("db_mode"))
     machine_id = str(section.get("machine_id") or "").strip()
     last_refresh_time = _format_snapshot_relative_time(section.get("last_report_time"))
     machine_label = str(section.get("machine_display_name") or section.get("machine_id") or "远端").strip()
     machine_label = machine_label.replace("电脑", "").strip() or "远端"
     return _build_section_refresh_action(
         "/public-snapshot/refresh",
-        (("target_scope", "remote"), ("target_machine_id", machine_id)),
+        (("target_scope", "remote"), ("target_machine_id", machine_id), ("db_mode", labels["db_mode"])),
         "\u5237\u65b0",
         f"{machine_label}\u6700\u540e\u5feb\u7167\u65f6\u95f4\uff1a{last_refresh_time}",
         disabled=not bool(machine_id),
@@ -1394,9 +1450,10 @@ def _render_public_remote_refresh_toolbar(section, refresh_result=None):
     return _render_remote_refresh_toolbar(section, refresh_result)
 
 
-def _render_public_remote_machine_section(section, grid_index, refresh_result=None):
+def _render_public_remote_machine_section(section, grid_index, refresh_result=None, labels=None):
+    labels = labels or _db_mode_labels(section.get("db_mode"))
     row_items = _build_remote_account_list_rows(section)
-    summary_html = _build_linear_summary_cards(section.get("machine_daily_summaries"))
+    summary_html = _build_linear_summary_cards(section.get("machine_daily_summaries"), labels["summary_change_label"])
     empty_message = str(section.get("message") or "暂无远端快照数据。")
     empty_html = (
         f'<p class="muted-text">{escape(empty_message)}</p>'
@@ -1407,8 +1464,8 @@ def _render_public_remote_machine_section(section, grid_index, refresh_result=No
     table_html = _render_table(
         (
             "\u6635\u79f0",
-            "\u9053\u5177\u5e93\u5b58",
-            "\u4f59\u989d\uff08\u4e07\uff09",
+            labels["inventory_label"],
+            labels["balance_label"],
             "\u53ef\u8fd0\u884c\u65f6\u95f4",
             "\u51b7\u5374\u5269\u4f59\u65f6\u95f4",
             "\u8d26\u53f7\u72b6\u6001",
@@ -1420,9 +1477,9 @@ def _render_public_remote_machine_section(section, grid_index, refresh_result=No
   <div class="section stage-panel stage-secondary">
     {_render_linear_section_title(
         display_name,
-        "",
+        labels["db_label"],
         eyebrow="Snapshot",
-        action_html=_build_public_remote_section_refresh_action(section),
+        action_html=_build_public_remote_section_refresh_action(section, labels),
     )}
     {_render_public_remote_refresh_toolbar(section, refresh_result)}
     {summary_html}
@@ -1436,9 +1493,13 @@ def _render_public_remote_machine_section(section, grid_index, refresh_result=No
 
 
 def render_public_snapshot_page(view_rows_result, remote_machine_sections=None, refresh_result=None):
+    labels = _db_mode_labels(_normalize_db_mode_from_view(view_rows_result))
     rows = list(view_rows_result.get("rows") or [])
     local_machine_display_name = view_rows_result.get("machine_display_name") or "1\u53f7\u7535\u8111"
-    local_summary_html = _build_linear_summary_cards(view_rows_result.get("machine_daily_summaries"))
+    local_summary_html = _build_linear_summary_cards(
+        view_rows_result.get("machine_daily_summaries"),
+        labels["summary_change_label"],
+    )
     local_row_items = _build_public_local_snapshot_rows(rows)
 
     remote_machine_sections = list(remote_machine_sections or [])
@@ -1458,6 +1519,7 @@ def render_public_snapshot_page(view_rows_result, remote_machine_sections=None, 
             section,
             grid_index=index,
             refresh_result=refresh_result,
+            labels=labels,
         )
         for index, section in enumerate(remote_machine_sections, start=2)
     )
@@ -1467,8 +1529,8 @@ def render_public_snapshot_page(view_rows_result, remote_machine_sections=None, 
     local_table_html = _render_table(
         (
             "\u6635\u79f0",
-            "\u9053\u5177\u5e93\u5b58",
-            "\u4f59\u989d\uff08\u4e07\uff09",
+            labels["inventory_label"],
+            labels["balance_label"],
             "\u53ef\u8fd0\u884c\u65f6\u95f4",
             "\u51b7\u5374\u5269\u4f59\u65f6\u95f4",
             "\u8d26\u53f7\u72b6\u6001",
@@ -1487,7 +1549,8 @@ def render_public_snapshot_page(view_rows_result, remote_machine_sections=None, 
         local_machine_display_name,
         "",
         eyebrow="Snapshot",
-        action_html=_build_public_local_section_refresh_action(view_rows_result),
+        badge_html=_build_db_mode_toggle("/public-snapshot", labels),
+        action_html=_build_public_local_section_refresh_action(view_rows_result, labels),
     )}
     {_render_public_local_refresh_toolbar(local_machine_display_name, refresh_result)}
     {local_summary_html}
@@ -1500,7 +1563,7 @@ def render_public_snapshot_page(view_rows_result, remote_machine_sections=None, 
 {remote_sections_html}
 
   <div class="detail-back-link">
-    {_render_linear_page_action("/", return_home_label)}
+    {_render_linear_page_action(f"/?db={labels['db_mode']}", return_home_label)}
   </div>
 
   {_build_refresh_scroll_script()}

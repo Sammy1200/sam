@@ -10,6 +10,8 @@ import subprocess
 from machine_sync_config import get_machine_sync_runtime_context
 from live_paths import resolve_account_stats_db_path
 from account_db import (
+    ACCOUNT_DB_MODE_ACCESSORY,
+    ACCOUNT_DB_MODE_STONE,
     AccountStatsRecord,
     CANONICAL_ACCOUNT_STATS_COLUMNS,
     CANONICAL_ACCOUNT_STATS_TABLE,
@@ -21,8 +23,13 @@ from account_db import (
     ROUND_STATUS_RUNTIME_REACHED,
     ROUND_STATUS_RUNNING,
     ROUND_STATUS_VALUES,
+    ensure_account_stats_store_for_mode,
+    find_account_stats_store_for_mode,
     find_canonical_account_stats_store,
+    get_account_db_mode_label,
+    get_alternate_account_db_mode,
     normalize_round_status_value,
+    normalize_account_db_mode,
     read_canonical_account_stats_record,
     read_machine_daily_summary_records,
     read_runtime_execution_state,
@@ -33,10 +40,12 @@ from account_db import (
 from config import (
     ACCOUNT_MAX_PURCHASE_SECONDS,
     ACCOUNT_LIMIT_COOLDOWN_SECONDS,
-    EXECUTION_SLOT_COUNT,
-    TEMPORARY_ACCOUNT_DISPLAY_SLOT,
     TEMPORARY_ACCOUNT_NICKNAME,
     THREAD6_RUNTIME_DB_PATH,
+)
+from local_switch_account_config import (
+    get_execution_slot_count,
+    get_temporary_account_display_slot,
 )
 
 
@@ -507,7 +516,7 @@ def _temporary_snapshot_to_view_record(snapshot, now):
         "nickname": str(snapshot.nickname or TEMPORARY_ACCOUNT_NICKNAME).strip() or TEMPORARY_ACCOUNT_NICKNAME,
         "is_temporary_account": True,
         "is_read_only": True,
-        "current_execution_slot": _parse_int(snapshot.current_execution_slot) or TEMPORARY_ACCOUNT_DISPLAY_SLOT,
+        "current_execution_slot": _parse_int(snapshot.current_execution_slot) or get_temporary_account_display_slot(),
         "baseline_item_count": max(0, _parse_int(snapshot.baseline_item_count)),
         "round_purchase_success_count": max(0, _parse_int(snapshot.round_purchase_success_count)),
         "round_listing_success_count": max(0, _parse_int(snapshot.round_listing_success_count)),
@@ -611,7 +620,7 @@ def _build_expected_slot_health(rows):
             if row.get("current_execution_slot") is not None
         }
     )
-    expected_slots = list(range(1, int(EXECUTION_SLOT_COUNT) + 1))
+    expected_slots = list(range(1, int(get_execution_slot_count()) + 1))
     missing_slots = [slot for slot in expected_slots if slot not in present_slots]
     return {
         "expected_execution_slots": expected_slots,
@@ -714,13 +723,16 @@ def _build_runtime_consistency_health(runtime_snapshot, canonical_record):
     }
 
 
-def _build_source_summary(database_path, table_name, runtime_snapshot):
+def _build_source_summary(database_path, table_name, runtime_snapshot, db_mode=ACCOUNT_DB_MODE_STONE):
     runtime_snapshot = runtime_snapshot or {}
+    normalized_mode = normalize_account_db_mode(db_mode)
     return {
         "canonical_source_type": CANONICAL_SOURCE_TYPE,
         "canonical_is_primary": True,
         "canonical_database_path": database_path or "",
         "canonical_table_name": table_name,
+        "db_mode": normalized_mode,
+        "db_label": get_account_db_mode_label(normalized_mode),
         "runtime_source_type": RUNTIME_SOURCE_TYPE,
         "runtime_is_auxiliary_snapshot": True,
         "runtime_database_path": runtime_snapshot.get("database_path") or "",
@@ -746,14 +758,21 @@ def _row_to_view_record(row, now):
     return _account_stats_record_to_view_record(_row_to_canonical_account_record(row), now)
 
 
-def _build_edit_meta(record=None):
+def _build_edit_meta(record=None, db_mode=ACCOUNT_DB_MODE_STONE):
     record = record or {}
+    normalized_mode = normalize_account_db_mode(db_mode)
     return {
         "editable_fields": (
             "baseline_item_count",
             "round_status",
             "current_balance_wan",
         ),
+        "db_mode": normalized_mode,
+        "db_label": get_account_db_mode_label(normalized_mode),
+        "alternate_db_mode": get_alternate_account_db_mode(normalized_mode),
+        "alternate_db_label": get_account_db_mode_label(get_alternate_account_db_mode(normalized_mode)),
+        "inventory_label": "饰品库存" if normalized_mode == ACCOUNT_DB_MODE_ACCESSORY else "道具库存",
+        "balance_label": "金币（万）" if normalized_mode == ACCOUNT_DB_MODE_ACCESSORY else "余额（万）",
         "status_options": list(ROUND_STATUS_VALUES),
         "balance_input_unit": BALANCE_INPUT_UNIT,
         "column_mapping": {
@@ -819,7 +838,27 @@ def _iter_git_worktree_roots():
     return roots
 
 
-def _resolve_account_view_canonical_store(table_name=CANONICAL_ACCOUNT_STATS_TABLE):
+def _resolve_account_view_canonical_store(
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+    db_mode=ACCOUNT_DB_MODE_STONE,
+):
+    normalized_mode = normalize_account_db_mode(db_mode)
+    if normalized_mode == ACCOUNT_DB_MODE_ACCESSORY:
+        database_path, resolved_table_name = find_account_stats_store_for_mode(normalized_mode, table_name)
+        if not database_path:
+            database_path, resolved_table_name, _ = ensure_account_stats_store_for_mode(normalized_mode, table_name)
+        expected_database_path, _ = find_account_stats_store_for_mode(normalized_mode, table_name)
+        expected_database_path = expected_database_path or database_path
+        return {
+            "database_path": database_path or "",
+            "table_name": resolved_table_name,
+            "expected_database_path": expected_database_path or "",
+            "resolution_type": "accessory_live_root" if database_path else "not_found",
+            "resolved_from_root": os.path.dirname(os.path.abspath(__file__)),
+            "using_fallback": False,
+            "db_mode": normalized_mode,
+        }
+
     database_path, resolved_table_name = find_canonical_account_stats_store(table_name)
     expected_database_path = resolve_account_stats_db_path().path
     current_root = os.path.dirname(os.path.abspath(__file__))
@@ -832,6 +871,7 @@ def _resolve_account_view_canonical_store(table_name=CANONICAL_ACCOUNT_STATS_TAB
             "resolution_type": "current_search",
             "resolved_from_root": current_root,
             "using_fallback": False,
+            "db_mode": normalized_mode,
         }
 
     database_name = os.path.basename(expected_database_path)
@@ -848,6 +888,7 @@ def _resolve_account_view_canonical_store(table_name=CANONICAL_ACCOUNT_STATS_TAB
             "resolution_type": "git_worktree_fallback",
             "resolved_from_root": worktree_root,
             "using_fallback": True,
+            "db_mode": normalized_mode,
         }
 
     return {
@@ -857,6 +898,7 @@ def _resolve_account_view_canonical_store(table_name=CANONICAL_ACCOUNT_STATS_TAB
         "resolution_type": "not_found",
         "resolved_from_root": "",
         "using_fallback": False,
+        "db_mode": normalized_mode,
     }
 
 
@@ -878,12 +920,15 @@ def _count_canonical_records(database_path, table_name):
 
 def _build_source_diagnostics(resolved_source, real_record_count):
     resolution_type = resolved_source.get("resolution_type")
-    if resolution_type == "git_worktree_fallback":
+    db_label = get_account_db_mode_label(resolved_source.get("db_mode"))
+    if resolution_type == "accessory_live_root":
+        resolution_label = f"{db_label} live 数据源"
+    elif resolution_type == "git_worktree_fallback":
         resolution_label = "当前工作树未找到数据库，已回退到 Git 主工作树数据源"
     elif resolution_type == "current_search":
-        resolution_label = "当前工作树主数据库数据源"
+        resolution_label = f"{db_label}数据源"
     else:
-        resolution_label = "未找到主数据库数据源"
+        resolution_label = f"未找到{db_label}数据源"
 
     return {
         "current_database_path": resolved_source.get("database_path") or "",
@@ -894,6 +939,8 @@ def _build_source_diagnostics(resolved_source, real_record_count):
         "using_fallback": bool(resolved_source.get("using_fallback")),
         "real_record_count": int(real_record_count or 0),
         "showing_demo_data": int(real_record_count or 0) == 0,
+        "db_mode": normalize_account_db_mode(resolved_source.get("db_mode")),
+        "db_label": db_label,
     }
 
 
@@ -922,15 +969,20 @@ def _read_local_machine_daily_summaries(database_path, machine_id):
     )
 
 
-def _build_canonical_result(database_path, table_name, rows, generated_at):
+def _build_canonical_result(database_path, table_name, rows, generated_at, db_mode=ACCOUNT_DB_MODE_STONE):
     machine_meta = _build_local_machine_meta()
+    normalized_mode = normalize_account_db_mode(db_mode)
     return {
         "source_type": CANONICAL_SOURCE_TYPE,
         "database_path": database_path,
         "table_name": table_name,
+        "db_mode": normalized_mode,
+        "db_label": get_account_db_mode_label(normalized_mode),
+        "alternate_db_mode": get_alternate_account_db_mode(normalized_mode),
+        "alternate_db_label": get_account_db_mode_label(get_alternate_account_db_mode(normalized_mode)),
         "generated_at": _serialize_datetime(generated_at),
         "rows": rows,
-        "edit_meta": _build_edit_meta(),
+        "edit_meta": _build_edit_meta(db_mode=normalized_mode),
         "machine_daily_summaries": _read_local_machine_daily_summaries(
             database_path,
             machine_meta.get("machine_id"),
@@ -939,17 +991,20 @@ def _build_canonical_result(database_path, table_name, rows, generated_at):
     }
 
 
-def get_account_view_rows():
+def get_account_view_rows(db_mode=ACCOUNT_DB_MODE_STONE):
     """读取 canonical 账号视图列表，并补出冷却派生字段。"""
-    resolved_source = _resolve_account_view_canonical_store()
+    normalized_mode = normalize_account_db_mode(db_mode)
+    resolved_source = _resolve_account_view_canonical_store(db_mode=normalized_mode)
     database_path = resolved_source.get("database_path") or ""
     table_name = resolved_source.get("table_name") or CANONICAL_ACCOUNT_STATS_TABLE
     generated_at = datetime.now()
     runtime_snapshot = get_runtime_snapshot()
     real_record_count = _count_canonical_records(database_path, table_name)
     if not database_path or not os.path.isfile(database_path):
-        view_rows = _append_temporary_snapshot_row([], generated_at)
-        result = _build_canonical_result("", table_name, view_rows, generated_at)
+        view_rows = []
+        if normalized_mode == ACCOUNT_DB_MODE_STONE:
+            _append_temporary_snapshot_row(view_rows, generated_at)
+        result = _build_canonical_result("", table_name, view_rows, generated_at, normalized_mode)
         result["health"] = {
             **_build_duplicate_slot_health(view_rows),
             **_build_expected_slot_health(view_rows),
@@ -957,7 +1012,7 @@ def get_account_view_rows():
             **_build_runtime_snapshot_health(view_rows, runtime_snapshot),
         }
         result["execution_slot_summary"] = _build_execution_slot_summary(result["health"])
-        result["source_summary"] = _build_source_summary("", table_name, runtime_snapshot)
+        result["source_summary"] = _build_source_summary("", table_name, runtime_snapshot, normalized_mode)
         result["source_diagnostics"] = _build_source_diagnostics(resolved_source, real_record_count)
         return result
 
@@ -985,8 +1040,9 @@ def get_account_view_rows():
                 generated_at,
             )
             view_rows.append(_account_stats_record_to_view_record(canonical_record, generated_at))
-        _append_temporary_snapshot_row(view_rows, generated_at)
-        result = _build_canonical_result(database_path, table_name, view_rows, generated_at)
+        if normalized_mode == ACCOUNT_DB_MODE_STONE:
+            _append_temporary_snapshot_row(view_rows, generated_at)
+        result = _build_canonical_result(database_path, table_name, view_rows, generated_at, normalized_mode)
         result["health"] = {
             **_build_duplicate_slot_health(view_rows),
             **_build_expected_slot_health(view_rows),
@@ -994,16 +1050,17 @@ def get_account_view_rows():
             **_build_runtime_snapshot_health(view_rows, runtime_snapshot),
         }
         result["execution_slot_summary"] = _build_execution_slot_summary(result["health"])
-        result["source_summary"] = _build_source_summary(database_path, table_name, runtime_snapshot)
+        result["source_summary"] = _build_source_summary(database_path, table_name, runtime_snapshot, normalized_mode)
         result["source_diagnostics"] = _build_source_diagnostics(resolved_source, real_record_count)
         return result
     finally:
         conn.close()
 
 
-def get_account_view_detail(nickname=None, execution_slot=None):
+def get_account_view_detail(nickname=None, execution_slot=None, db_mode=ACCOUNT_DB_MODE_STONE):
     """按昵称或执行位读取单条 canonical 账号视图。"""
-    resolved_source = _resolve_account_view_canonical_store()
+    normalized_mode = normalize_account_db_mode(db_mode)
+    resolved_source = _resolve_account_view_canonical_store(db_mode=normalized_mode)
     database_path = resolved_source.get("database_path") or ""
     table_name = resolved_source.get("table_name") or CANONICAL_ACCOUNT_STATS_TABLE
     generated_at = datetime.now()
@@ -1012,14 +1069,18 @@ def get_account_view_detail(nickname=None, execution_slot=None):
         "source_type": CANONICAL_SOURCE_TYPE,
         "database_path": database_path or "",
         "table_name": table_name,
+        "db_mode": normalized_mode,
+        "db_label": get_account_db_mode_label(normalized_mode),
+        "alternate_db_mode": get_alternate_account_db_mode(normalized_mode),
+        "alternate_db_label": get_account_db_mode_label(get_alternate_account_db_mode(normalized_mode)),
         "generated_at": _serialize_datetime(generated_at),
         "lookup": {
             "nickname": (nickname or "").strip() or None,
             "execution_slot": execution_slot,
         },
         "record": None,
-        "source_summary": _build_source_summary(database_path, table_name, runtime_snapshot),
-        "edit_meta": _build_edit_meta(),
+        "source_summary": _build_source_summary(database_path, table_name, runtime_snapshot, normalized_mode),
+        "edit_meta": _build_edit_meta(db_mode=normalized_mode),
         "health": {
             "has_missing_critical_fields": False,
             "missing_critical_fields": [],
@@ -1072,7 +1133,7 @@ def get_account_view_detail(nickname=None, execution_slot=None):
             )
             record = _account_stats_record_to_view_record(canonical_record, generated_at)
             result["record"] = record
-            result["edit_meta"] = _build_edit_meta(record)
+            result["edit_meta"] = _build_edit_meta(record, normalized_mode)
             result["health"] = {
                 **_build_record_health(record),
                 "runtime_consistency": _build_runtime_consistency_health(
@@ -1116,14 +1177,17 @@ def update_account_view_record(
     round_status,
     balance_wan_text,
     baseline_update_mode="detail",
+    db_mode=ACCOUNT_DB_MODE_STONE,
 ):
     """最小单账号写接口：仅允许更新道具库存、状态和余额。"""
+    normalized_mode = normalize_account_db_mode(db_mode)
     normalized_nickname = str(nickname or "").strip()
     form_values = {
         "nickname": normalized_nickname,
         "baseline_item_count": str(baseline_item_count_text or "").strip(),
         "round_status": str(round_status or "").strip(),
         "current_balance_wan": str(balance_wan_text or "").strip(),
+        "db_mode": normalized_mode,
     }
     result = {
         "status": "error",
@@ -1140,7 +1204,7 @@ def update_account_view_record(
         result["message"] = "临时号来自辅助快照，只读显示，不写入主 SQLite。"
         return result
 
-    resolved_source = _resolve_account_view_canonical_store()
+    resolved_source = _resolve_account_view_canonical_store(db_mode=normalized_mode)
     database_path = resolved_source.get("database_path") or ""
     table_name = resolved_source.get("table_name") or CANONICAL_ACCOUNT_STATS_TABLE
     if not database_path or not os.path.isfile(database_path):
@@ -1150,7 +1214,7 @@ def update_account_view_record(
     current_record = read_canonical_account_stats_record(database_path, normalized_nickname, table_name)
     if current_record is None:
         result["message"] = "未找到对应账号记录，无法写入。"
-        result["detail_result"] = get_account_view_detail(nickname=normalized_nickname)
+        result["detail_result"] = get_account_view_detail(nickname=normalized_nickname, db_mode=normalized_mode)
         return result
 
     try:
@@ -1174,7 +1238,7 @@ def update_account_view_record(
 
     if result["field_errors"]:
         result["message"] = "提交失败，请先修正表单输入。"
-        result["detail_result"] = get_account_view_detail(nickname=normalized_nickname)
+        result["detail_result"] = get_account_view_detail(nickname=normalized_nickname, db_mode=normalized_mode)
         return result
 
     updated_record = AccountStatsRecord(
@@ -1204,7 +1268,7 @@ def update_account_view_record(
         save_canonical_account_stats_record(database_path, updated_record, table_name)
     except Exception as exc:
         result["message"] = f"写库失败：{exc}"
-        result["detail_result"] = get_account_view_detail(nickname=normalized_nickname)
+        result["detail_result"] = get_account_view_detail(nickname=normalized_nickname, db_mode=normalized_mode)
         return result
 
     reloaded_record = read_canonical_account_stats_record(database_path, normalized_nickname, table_name)
@@ -1218,16 +1282,17 @@ def update_account_view_record(
         or str(reloaded_record.current_balance or "").strip() != storage_balance_text
     ):
         result["message"] = "写库后回读校验失败：数据库中的值与提交值不一致。"
-        result["detail_result"] = get_account_view_detail(nickname=normalized_nickname)
+        result["detail_result"] = get_account_view_detail(nickname=normalized_nickname, db_mode=normalized_mode)
         return result
 
     result["status"] = "success"
     result["message"] = "保存成功，已完成写库并回读确认。"
-    result["detail_result"] = get_account_view_detail(nickname=normalized_nickname)
+    result["detail_result"] = get_account_view_detail(nickname=normalized_nickname, db_mode=normalized_mode)
     result["form_values"] = {
         "nickname": normalized_nickname,
         "baseline_item_count": str(recalculated_baseline),
         "round_status": normalized_round_status,
         "current_balance_wan": normalized_balance_wan,
+        "db_mode": normalized_mode,
     }
     return result

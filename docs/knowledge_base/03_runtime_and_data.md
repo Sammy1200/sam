@@ -6,6 +6,20 @@
 
 canonical SQLite 是当前系统的唯一真实数据源。
 
+当前有两份本机 canonical SQLite：
+
+- 石头库：`C:\py666\account_stats.sqlite3`
+- 饰品库：`C:\py666\accessory_account_stats.sqlite3`
+
+两份库不共享同一个 SQLite 文件。库存、余额/金币、抢购数、上架数等模式专属数据继续按库隔离；`账号状态`、`可运行时间`、`冷却剩余时间` 是账号通用数据，任意一边修改后必须同步到另一边。
+
+通用数据对应的底层字段是：
+
+- `round_status`
+- `purchase_running_seconds`
+- `runtime_window_start_time`
+- `last_limit_time`
+
 当前最核心的 canonical 表是：
 
 - 表名：`account_stats`
@@ -39,6 +53,12 @@ canonical SQLite 是当前系统的唯一真实数据源。
 
 所以“执行位可变，昵称主键不变”是当前系统基本语义。
 
+## 执行位数量
+
+默认执行位数量仍是 `1-8`。如果真实本机 `local_switch_account_config.json` 显式声明 `execution_slot_count` 以及对应的大区索引、昵称模板、下一执行位映射和跨账号边界，脚本会按该本机配置扩展执行位范围，例如 4号电脑可使用 `1-9`。
+
+临时号不写入 canonical `account_stats`，它的展示执行位按“当前本机执行位数量 + 1”派生；因此 9 执行位机器上的临时号展示位是 10，默认 8 执行位机器仍是 9。
+
 ## `updated_at` 与 `last_account_end_time` 的区别
 
 这两个字段经常被混用，但它们不是一回事。
@@ -66,11 +86,11 @@ canonical SQLite 是当前系统的唯一真实数据源。
 - 不要把 `updated_at` 当成“最后下号时间”
 - 不要把 `last_account_end_time` 当成“最近任何字段改动时间”
 
-## 2 小时 45 分与 24 小时窗口规则
+## 2 小时 40 分与 24 小时窗口规则
 
-### 2 小时 45 分
+### 2 小时 40 分
 
-当前代码常量 `ACCOUNT_MAX_PURCHASE_SECONDS` 等于 2 小时 45 分。
+当前代码常量 `ACCOUNT_MAX_PURCHASE_SECONDS` 等于 2 小时 40 分。
 
 它的语义是：
 
@@ -120,6 +140,7 @@ canonical SQLite 是当前系统的唯一真实数据源。
   - `round_purchase_success_count`
   - `round_listing_success_count`
   - `round_purchase_fail_count`
+- 饰品抢购模式中，如果当前账号命中 `账号限制` 或 `抢购时长已到` 并准备换号，也沿用同一套三项即时清零口径。
 - 但 canonical SQLite 仍沿用最终收尾步骤统一写零，不在状态命中瞬间额外新增一轮“三项立即清库”。
 - 启动页上架模式中，每个账号成功下号并确认回到启动页后，当前进程里的 `round_listing_success_count` 与兼容显示字段会立刻清零；同时，当前账号在 canonical SQLite 里的 `round_listing_success_count` 也会被清零。
 - 启动页上架模式最终微信汇总使用“下号前快照”生成，不受下号后清零动作影响。
@@ -220,7 +241,7 @@ canonical SQLite 是当前系统的唯一真实数据源。
 - `余额不足`
   当前有效余额低于阈值，触发本轮结束与调度。
 - `抢购时长已到`
-  当前账号已达到 2 小时 45 分活跃抢购上限。
+  当前账号已达到 2 小时 40 分活跃抢购上限。
 - `已准备`
   正式状态值，表示账号已恢复到可重新进入流程的准备态。
 - `未知异常`
@@ -243,7 +264,7 @@ canonical SQLite 是当前系统的唯一真实数据源。
 
 网页手动改成 `已准备` 时，也要同步满足：
 
-- 可运行时间恢复为 2 小时 45 分
+- 可运行时间恢复为 2 小时 40 分
 - 冷却剩余时间归零
 
 下一份建议阅读： [04_operations_and_acceptance.md](04_operations_and_acceptance.md)

@@ -12,6 +12,7 @@
   - `C:\py666\account_stats.sqlite3`
   - `C:\py666\local_switch_account_config.json`
   - `C:\py666\local_web_sync_config.json`
+  - `C:\py666\launcher_preferences.json`
   - `C:\py666\nichen`
 - 其中 `account_stats.sqlite3`、`local_switch_account_config.json`、`local_web_sync_config.json` 缺失时，按当前正式口径直接报错，不再回退到项目根目录旧位置
 - 本次只把两个本机 JSON 与 SQLite 收口为唯一路径；昵称模板目录策略维持现状
@@ -40,6 +41,20 @@
 - 当前正式口径只认 `C:\py666\local_switch_account_config.json`
 - 示例文件只用于说明字段结构，不代表当前机器真实运行值
 - 读取链路由 `local_switch_account_config.py` 承接时，也应继续遵守“真实文件优先、示例文件只做说明”的原则
+
+---
+
+# 本机执行位范围外置
+
+当前主线事实：
+- 默认执行位范围仍是 `1-8`
+- 只有真实本机 `local_switch_account_config.json` 显式配置 `execution_slot_count` 时，才启用本机专属执行位范围
+- 执行位扩展必须同时配置大区索引、昵称模板文件、下一执行位映射、跨账号边界和对应 `after_slot_{执行位}_account_id`
+
+含义：
+- 4号电脑可以配置为 `1-9`，执行位9使用 `9.png` 和自己的账号切换边界
+- 未配置这些字段的机器继续按原 `1-8` 运行，不补第9执行位、不要求 `9.png`
+- 临时号展示位按“当前本机执行位数量 + 1”派生，避免与扩展执行位冲突
 
 ---
 

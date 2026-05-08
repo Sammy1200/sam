@@ -6,6 +6,7 @@ import re
 import time
 
 import state
+from accessory_purchase import run_accessory_purchase_loop
 from config import (
     ACCOUNT_MAX_PURCHASE_SECONDS,
     BALANCE_INSUFFICIENT_THRESHOLD,
@@ -538,6 +539,10 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                       temp_goumai, temp_meihuo, temp_diyici):
     """抢购主循环，由 main.py 调用。"""
     from listing import check_trigger_listing
+
+    if state.accessory_purchase_mode:
+        run_accessory_purchase_loop(camera, temp_success)
+        return
 
     state.overlay_status = "抢购中"
     state.purchase_timer_active = True

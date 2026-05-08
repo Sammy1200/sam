@@ -9,6 +9,7 @@ import config
 
 LIVE_ROOT_DIR = os.path.abspath(r"C:\py666")
 LIVE_ACCOUNT_STATS_DB_PATH = os.path.join(LIVE_ROOT_DIR, "account_stats.sqlite3")
+LIVE_ACCESSORY_ACCOUNT_STATS_DB_PATH = os.path.join(LIVE_ROOT_DIR, "accessory_account_stats.sqlite3")
 LIVE_LOCAL_SWITCH_ACCOUNT_CONFIG_PATH = os.path.join(LIVE_ROOT_DIR, "local_switch_account_config.json")
 LIVE_LOCAL_WEB_SYNC_CONFIG_PATH = os.path.join(LIVE_ROOT_DIR, "local_web_sync_config.json")
 LIVE_NICKNAME_TEMPLATE_DIR = os.path.join(LIVE_ROOT_DIR, "nichen")
@@ -62,6 +63,10 @@ def _resolve_live_only_path(required_path):
 
 def resolve_account_stats_db_path():
     return _resolve_live_only_path(LIVE_ACCOUNT_STATS_DB_PATH)
+
+
+def resolve_accessory_account_stats_db_path():
+    return _resolve_live_only_path(LIVE_ACCESSORY_ACCOUNT_STATS_DB_PATH)
 
 
 def resolve_local_switch_account_config_path():

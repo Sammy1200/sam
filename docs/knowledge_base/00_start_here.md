@@ -26,6 +26,7 @@
 - canonical SQLite：`C:\py666\account_stats.sqlite3`
 - 本机换号配置：`C:\py666\local_switch_account_config.json`
 - 本机网页同步配置：`C:\py666\local_web_sync_config.json`
+- 启动器偏好：`C:\py666\launcher_preferences.json`
 - 昵称模板目录：`C:\py666\nichen`
 
 如果 `C:\py666` 中对应文件缺失，代码才会回退到项目根目录旧位置。
@@ -46,7 +47,7 @@
 - 昵称是 canonical 账号记录的唯一键。
 - 网页层不是主真源，只能查看，或对少数字段做最小修改后回写 canonical 并回读确认。
 - `已准备` 是正式状态值，不是展示映射。
-- 56 分钟轻量落库、2 小时 45 分抢购活跃态统计，仍是当前主线硬规则。
+- 56 分钟轻量落库、2 小时 40 分抢购活跃态统计，仍是当前主线硬规则。
 
 ## 当前已进入主线基线的能力
 

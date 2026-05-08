@@ -9,7 +9,7 @@ import unicodedata
 import state
 from local_switch_account_config import load_purchase_price_rule_config
 from config import (
-    MONITOR_PRICE, MONITOR_PRICE_SECONDARY, MONITOR_CAPACITY, MONITOR_BALANCE,
+    MONITOR_PRICE, MONITOR_PRICE_SECONDARY, MONITOR_CAPACITY, MONITOR_BALANCE, ACCESSORY_MONITOR_BALANCE,
     UPSCALE, STANDARD_W, STANDARD_H, TEMPLATE_DIR,
     BALANCE_TEMPLATE_DIR, BALANCE_TEMPLATE_MATCH_THRESHOLD, BALANCE_TEMPLATE_DUPLICATE_GAP,
     BALANCE_TEMPLATE_DOT_MATCH_THRESHOLD, BALANCE_TEMPLATE_UNIT_MATCH_THRESHOLD,
@@ -911,6 +911,7 @@ def _match_balance_text(gray, params=None):
     blocks = _refine_balance_blocks(blocks)
     if not blocks:
         return None
+    blocks = _drop_leading_balance_icon_blocks(blocks, params)
     return _search_balance_sequence(blocks, params)
 
 
@@ -927,18 +928,57 @@ def _sanitize_balance_text(raw_text):
     return None
 
 
+def _drop_leading_balance_icon_blocks(blocks, params=None):
+    if len(blocks) < 4:
+        return blocks
+
+    params = _get_balance_params(params)
+    min_icon_gap = max(6, int(params["segment_merge_gap"]) + 5)
+    max_icon_cluster_width = 32
+    max_amount_start_x = 45
+    max_split_index = min(3, len(blocks) - 2)
+
+    for split_index in range(1, max_split_index + 1):
+        previous_block = blocks[split_index - 1]
+        next_block = blocks[split_index]
+        previous_right = int(previous_block["x"]) + int(previous_block["width"])
+        gap = int(next_block["x"]) - previous_right
+        if gap < min_icon_gap:
+            continue
+
+        first_block = blocks[0]
+        leading_cluster_width = previous_right - int(first_block["x"])
+        if leading_cluster_width > max_icon_cluster_width:
+            continue
+        if int(next_block["x"]) > max_amount_start_x:
+            continue
+
+        remaining_blocks = blocks[split_index:]
+        if _sanitize_balance_text(_search_balance_sequence(remaining_blocks, params)):
+            return remaining_blocks
+
+    return blocks
+
+
+def _get_active_balance_monitor():
+    if bool(getattr(state, "accessory_purchase_mode", False)):
+        return ACCESSORY_MONITOR_BALANCE
+    return MONITOR_BALANCE
+
+
 def recognize_balance_image(image, roi_already_cropped=False, params=None):
     if image is None:
         return None
-    cropped = image if roi_already_cropped else crop_frame(image, MONITOR_BALANCE)
+    cropped = image if roi_already_cropped else crop_frame(image, _get_active_balance_monitor())
     return _sanitize_balance_text(_match_balance_text(_to_gray(cropped), params))
 
 
 def get_balance_recognition(frame):
     try:
-        cropped = crop_frame(frame, MONITOR_BALANCE)
+        active_monitor = _get_active_balance_monitor()
+        cropped = crop_frame(frame, active_monitor)
         tiny = cv2.resize(cropped, (8, 8))
-        current_hash = tiny.tobytes()
+        current_hash = (tuple(sorted(active_monitor.items())), tiny.tobytes())
         last_balance_hash = getattr(state, "_last_balance_hash", None)
         if last_balance_hash is not None and current_hash == last_balance_hash:
             return {

@@ -441,7 +441,7 @@ def get_runtime_window_remaining_seconds():
 
 
 def persist_account_limit_reached_if_needed():
-    """\u5728\u8fbe\u5230 2 \u5c0f\u65f6 45 \u5206\u9608\u503c\u65f6\u7acb\u5373\u843d\u5e93 last_limit_time\u3002"""
+    """\u5728\u8fbe\u5230 2 \u5c0f\u65f6 40 \u5206\u9608\u503c\u65f6\u7acb\u5373\u843d\u5e93 last_limit_time\u3002"""
     previous_limit_time = state.account_limit_reached_at
     reached_time = refresh_account_limit_reached_at()
     if reached_time is None or previous_limit_time is not None:
@@ -968,6 +968,42 @@ def persist_final_round_snapshot(default_status):
     )
     logger.info(
         "[account-data] final write ok: nickname=%s status=%s inventory=%s",
+        state.current_nickname,
+        record.round_status,
+        result.new_baseline_item_count,
+    )
+    return result
+
+
+def persist_accessory_round_status_snapshot(default_status):
+    """饰品抢购模式复用正常轮次收尾字段，目标库由 state.account_db_path 隔离。"""
+    if state.account_round_finalized:
+        return AccountWriteResult("success", "already finalized")
+
+    round_status = resolve_shutdown_final_status(default_status)
+    record, error_result = _build_record(True, round_status)
+    if error_result is not None:
+        state.account_round_writeback_failed = True
+        state.account_round_writeback_error = error_result.reason
+        logger.error("[饰品抢购] 最终写库失败：%s", error_result.reason)
+        return error_result
+
+    result = _save_record(record)
+    if result.status != "success":
+        state.account_round_writeback_failed = True
+        state.account_round_writeback_error = result.reason
+        logger.error("[饰品抢购] 最终写库失败：%s", result.reason)
+        return result
+
+    state.account_round_finalized = True
+    state.account_round_writeback_failed = False
+    state.account_round_writeback_error = ""
+    if _is_forced_limit_status(record.round_status):
+        _clear_round_counters()
+        state.round_purchase_running_seconds = 0.0
+    _schedule_remote_snapshot_event("饰品抢购收尾", synchronous=True)
+    logger.info(
+        "[饰品抢购] 最终写库完成：昵称=%s 状态=%s 饰品库存=%s",
         state.current_nickname,
         record.round_status,
         result.new_baseline_item_count,

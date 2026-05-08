@@ -504,7 +504,8 @@ def show_counter(parent: tk.Misc) -> bool:
         return True
     try:
         _counter_window = FloatingCounter(parent, on_close=_forget_counter)
-    except Exception:
+    except Exception as exc:
+        print(f"[计数窗] 启动失败：{exc}")
         _counter_window = None
         return False
     return True

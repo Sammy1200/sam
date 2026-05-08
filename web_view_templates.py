@@ -802,6 +802,17 @@ def _base_page(title, body_html):
       font-weight: 510;
       font-size: 12px;
     }
+    .db-mode-badge-toggle {
+      cursor: pointer;
+      text-decoration: none;
+      transition: background .18s ease, border-color .18s ease, color .18s ease, transform .18s ease;
+    }
+    .db-mode-badge-toggle:hover {
+      background: rgba(113,112,255,0.16);
+      border-color: rgba(130,143,255,0.42);
+      color: #ffffff;
+      transform: translateY(-1px);
+    }
     .form-actions button,
     .inline-save button,
     button {

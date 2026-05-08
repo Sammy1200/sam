@@ -16,6 +16,11 @@ listing_global_skip_logged = False
 brutal_purchase_mode = False
 brutal_purchase_limit = 0
 brutal_purchase_limit_enabled = False
+accessory_purchase_mode = False
+accessory_item_index = 0
+accessory_item_click_started_at = None
+accessory_skip_trade_ready_wait_once = False
+accessory_next_item_click_not_before = None
 pause_auto_resume_deadline = None
 pause_auto_resume_token = 0
 
@@ -99,6 +104,7 @@ account_limit_reached_at = None
 # --- 账号读库 / 等待流程兼容字段 ---
 account_db_path = ""
 account_db_table_name = ""
+account_db_mode = "stone"
 account_record_loaded = False
 canonical_cleanup_completed = False
 account_allow_purchase = True

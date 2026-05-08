@@ -3,6 +3,8 @@ Switch helpers for launcher/server/account flow.
 
 Public APIs:
   startup_from_launcher(camera, server_index)
+  startup_accessory_from_server_list(camera, server_index)
+  enter_accessory_trade_from_current_scene(camera)
   full_switch_server(camera, server_index)
   is_at_gumu(camera)
   navigate_to_trade(camera)
@@ -28,16 +30,26 @@ import pyautogui
 import config
 import state
 from account_db import (
+    ACCOUNT_DB_MODE_ACCESSORY,
+    ACCOUNT_DB_MODE_STONE,
     CANONICAL_ACCOUNT_STATS_TABLE,
     ROUND_STATUS_RUNNING,
+    ensure_account_stats_store_for_mode,
+    find_account_stats_store_for_mode,
     find_canonical_account_stats_store,
     read_preferred_canonical_account_stats_record_by_execution_slot,
     restore_ready_account_status_if_needed,
     update_canonical_account_status_fields,
 )
 from local_switch_account_config import (
+    get_execution_slot_count,
+    get_execution_slot_nickname_template_files,
+    get_execution_slot_server_coord_indexes,
     load_boundary_switch_accounts,
+    load_execution_slot_config,
     load_local_nickname_match_config,
+    resolve_account_switch_source_slot_for_execution_slot,
+    resolve_execution_slot_account_index,
 )
 from overlay import toggle_pause, ui_print
 from utils import (
@@ -59,6 +71,8 @@ from utils import (
 
 
 _TPL_CACHE = {}
+_ACCESSORY_DIANPU_TEMPLATE = None
+_ACCESSORY_TRADE_PAGE_TEMPLATE = None
 _TPL_FILES = {
     "f4": "f4queding.png",
     "qd": "qidong.png",
@@ -137,10 +151,23 @@ def _resolve_canonical_store_for_switch():
     if database_path:
         return database_path, table_name
 
+    if bool(getattr(state, "accessory_purchase_mode", False)):
+        account_db_mode = ACCOUNT_DB_MODE_ACCESSORY
+        database_path, table_name = find_account_stats_store_for_mode(account_db_mode, table_name)
+        if not database_path:
+            database_path, table_name, _ = ensure_account_stats_store_for_mode(account_db_mode, table_name)
+        if database_path:
+            state.account_db_path = database_path
+            state.account_db_table_name = table_name or CANONICAL_ACCOUNT_STATS_TABLE
+            state.account_db_mode = account_db_mode
+            return state.account_db_path, state.account_db_table_name
+        return "", table_name
+
     database_path, table_name = find_canonical_account_stats_store()
     if database_path:
         state.account_db_path = database_path
         state.account_db_table_name = table_name or CANONICAL_ACCOUNT_STATS_TABLE
+        state.account_db_mode = ACCOUNT_DB_MODE_STONE
         return state.account_db_path, state.account_db_table_name
 
     return "", table_name
@@ -349,6 +376,30 @@ def _tpl(key):
             logger.error("[切换流程] 模板缺失：%s", path)
         _TPL_CACHE[key] = img
     return _TPL_CACHE[key]
+
+
+def _accessory_dianpu_tpl():
+    """按需加载饰品交易行店铺确认模板。"""
+    global _ACCESSORY_DIANPU_TEMPLATE
+    if _ACCESSORY_DIANPU_TEMPLATE is None:
+        path = os.path.join("logo", "tezhengtu", "dianpu.png")
+        img = cv2.imread(path)
+        if img is None:
+            logger.error("[饰品抢购] 模板缺失：%s", path)
+        _ACCESSORY_DIANPU_TEMPLATE = img
+    return _ACCESSORY_DIANPU_TEMPLATE
+
+
+def _accessory_trade_page_tpl():
+    """按需加载饰品交易行页面模板。"""
+    global _ACCESSORY_TRADE_PAGE_TEMPLATE
+    if _ACCESSORY_TRADE_PAGE_TEMPLATE is None:
+        path = os.path.join("logo", "tezhengtu", "shipinjiaoyihang.png")
+        img = cv2.imread(path)
+        if img is None:
+            logger.error("[饰品抢购] 模板缺失：%s", path)
+        _ACCESSORY_TRADE_PAGE_TEMPLATE = img
+    return _ACCESSORY_TRADE_PAGE_TEMPLATE
 
 
 def _normalize_match_image(img):
@@ -792,12 +843,21 @@ def resolve_execution_slot_transition(current_execution_slot):
     except (TypeError, ValueError):
         return None
 
-    next_slot = config.EXECUTION_SLOT_NEXT_SLOT_MAP.get(current_slot)
+    try:
+        execution_slot_config, _ = load_execution_slot_config()
+    except Exception:
+        raise
+
+    next_slot = execution_slot_config["next_slot_map"].get(current_slot)
     if next_slot is None:
         return None
 
     slot_index = next_slot - 1
-    requires_account_switch = current_slot in config.EXECUTION_SLOT_SWITCH_TARGETS
+    server_coord_indexes = execution_slot_config["server_coord_indexes"]
+    if slot_index < 0 or slot_index >= len(server_coord_indexes):
+        return None
+
+    requires_account_switch = current_slot in execution_slot_config["switch_targets"]
     account_id = None
     config_error = ""
 
@@ -813,7 +873,7 @@ def resolve_execution_slot_transition(current_execution_slot):
         "current_slot": current_slot,
         "next_slot": next_slot,
         "account_id": account_id,
-        "server_coord_index": config.EXECUTION_SLOT_SERVER_COORD_INDEXES[slot_index],
+        "server_coord_index": server_coord_indexes[slot_index],
         "requires_account_switch": requires_account_switch,
         "config_error": config_error,
     }
@@ -834,7 +894,12 @@ def _resolve_account_id_for_execution_slot_group(slot_number):
     except (TypeError, ValueError):
         return None, "目标执行位不是有效整数。"
 
-    if normalized_slot_number < 1 or normalized_slot_number > len(config.EXECUTION_SLOT_SERVER_COORD_INDEXES):
+    try:
+        server_coord_indexes = get_execution_slot_server_coord_indexes()
+    except Exception as exc:
+        return None, f"本机执行位配置读取失败：{exc}"
+
+    if normalized_slot_number < 1 or normalized_slot_number > len(server_coord_indexes):
         return None, f"目标执行位 {normalized_slot_number} 超出有效范围。"
 
     try:
@@ -842,15 +907,13 @@ def _resolve_account_id_for_execution_slot_group(slot_number):
     except Exception as exc:
         return None, f"本机换号配置读取失败：{exc}"
 
-    if normalized_slot_number <= 4:
-        account_id = boundary_accounts.get(8)
-        if not account_id:
-            return None, "本机换号配置缺少账号 1 对应的 after_slot_8_account_id。"
-        return account_id, ""
+    source_slot = resolve_account_switch_source_slot_for_execution_slot(normalized_slot_number)
+    if source_slot is None:
+        return None, f"本机执行位配置缺少执行位 {normalized_slot_number} 对应的跨账号边界。"
 
-    account_id = boundary_accounts.get(4)
+    account_id = boundary_accounts.get(source_slot)
     if not account_id:
-        return None, "本机换号配置缺少账号 2 对应的 after_slot_4_account_id。"
+        return None, f"本机换号配置缺少 after_slot_{source_slot}_account_id。"
     return account_id, ""
 
 
@@ -866,7 +929,17 @@ def _build_temporary_target_transition(target_execution_slot):
             "config_error": "目标执行位不是有效整数。",
         }
 
-    if target_slot < 1 or target_slot > len(config.EXECUTION_SLOT_SERVER_COORD_INDEXES):
+    try:
+        server_coord_indexes = get_execution_slot_server_coord_indexes()
+    except Exception as exc:
+        return {
+            "target_slot": target_slot,
+            "account_id": None,
+            "server_coord_index": None,
+            "config_error": f"本机执行位配置读取失败：{exc}",
+        }
+
+    if target_slot < 1 or target_slot > len(server_coord_indexes):
         return {
             "target_slot": target_slot,
             "account_id": None,
@@ -878,7 +951,7 @@ def _build_temporary_target_transition(target_execution_slot):
     return {
         "target_slot": target_slot,
         "account_id": account_id,
-        "server_coord_index": config.EXECUTION_SLOT_SERVER_COORD_INDEXES[target_slot - 1],
+        "server_coord_index": server_coord_indexes[target_slot - 1],
         "config_error": config_error,
     }
 
@@ -1093,11 +1166,12 @@ def _switch_account_for_slot(camera, account_id):
 
 def _load_nickname_template(slot_number):
     """按执行位加载昵称模板。"""
-    if slot_number < 1 or slot_number > len(config.EXECUTION_SLOT_NICKNAME_TEMPLATE_FILES):
+    template_files = get_execution_slot_nickname_template_files()
+    if slot_number < 1 or slot_number > len(template_files):
         return None, ""
 
     nickname_match_config = _get_local_nickname_match_config()
-    template_name = config.EXECUTION_SLOT_NICKNAME_TEMPLATE_FILES[slot_number - 1]
+    template_name = template_files[slot_number - 1]
     template_path = os.path.join(nickname_match_config["template_dir"], template_name)
     template = cv2.imread(template_path)
     return template, template_path
@@ -1249,7 +1323,7 @@ def _sync_verified_slot_status_to_running(slot_number):
 
 def _detect_slot_nickname_once(camera, nickname_match_config):
     """在昵称校验区域内扫描当前命中的执行位模板。"""
-    for slot_number in range(1, int(config.EXECUTION_SLOT_COUNT) + 1):
+    for slot_number in range(1, int(get_execution_slot_count()) + 1):
         template, _ = _load_nickname_template(slot_number)
         if template is None:
             continue
@@ -1605,6 +1679,143 @@ def _step10_trade(camera):
     return True
 
 
+def is_accessory_trade_page(camera):
+    """返回当前场景是否为饰品交易行。"""
+    return _match_image(
+        camera,
+        _accessory_trade_page_tpl(),
+        config.ACCESSORY_TRADE_PAGE_REGION,
+        threshold=config.SWITCH_UI_MATCH_THRESHOLD,
+    )
+
+
+def _is_accessory_dianpu_ready(camera):
+    return _match_image(
+        camera,
+        _accessory_dianpu_tpl(),
+        config.ACCESSORY_DIANPU_REGION,
+        threshold=config.SWITCH_UI_MATCH_THRESHOLD,
+    )
+
+
+def _recover_accessory_dianpu(camera):
+    if not is_accessory_trade_page(camera):
+        return False
+    if _is_accessory_dianpu_ready(camera):
+        return True
+
+    for _attempt in range(1, config.ACCESSORY_DIANPU_RECOVER_RETRY_COUNT + 1):
+        fast_click(config.ACCESSORY_RECOVER_POS1)
+        safe_sleep(config.ACCESSORY_DIANPU_RECOVER_WAIT_SECONDS)
+        fast_click(config.ACCESSORY_RECOVER_POS2)
+        safe_sleep(config.ACCESSORY_DIANPU_RECOVER_INTERVAL_SECONDS)
+        if _is_accessory_dianpu_ready(camera):
+            return True
+    return False
+
+
+def _wait_accessory_trade_page(camera, timeout_seconds=2.0):
+    end_time = time.time() + float(timeout_seconds)
+    while time.time() < end_time:
+        if is_accessory_trade_page(camera):
+            if not _recover_accessory_dianpu(camera):
+                return False
+            safe_sleep(config.ACCESSORY_TRADE_READY_CONFIRM_DELAY_SECONDS)
+            return is_accessory_trade_page(camera) and _is_accessory_dianpu_ready(camera)
+        safe_sleep(0.1)
+    return False
+
+
+def enter_accessory_trade_from_gumu(camera):
+    """从古墓大厅进入饰品交易行。"""
+    update_overlay_mini("饰品进场")
+    for round_index in range(1, config.ACCESSORY_TRADE_REENTER_RETRY_COUNT + 1):
+        fast_click(config.ACCESSORY_ENTRY_POS)
+        safe_sleep(config.ACCESSORY_ACTION_DELAY_SECONDS)
+
+        shoucan_center = None
+        for _attempt in range(1, config.ACCESSORY_TRADE_ENTRY_RETRY_COUNT + 1):
+            shoucan_center = _match_center(
+                camera,
+                "shoucan",
+                config.ACCESSORY_SHOUCAN_REGION,
+                threshold=config.SWITCH_UI_MATCH_THRESHOLD,
+            )
+            if shoucan_center is not None:
+                break
+            fast_click(config.ACCESSORY_SHOUCAN_CENTER_POS)
+            safe_sleep(config.ACCESSORY_ACTION_DELAY_SECONDS)
+
+        if shoucan_center is not None:
+            fast_click(shoucan_center)
+            safe_sleep(config.ACCESSORY_ACTION_DELAY_SECONDS)
+            if _wait_accessory_trade_page(camera, timeout_seconds=config.ACCESSORY_TRADE_READY_TIMEOUT_SECONDS):
+                restore_overlay()
+                return True
+
+        if round_index < config.ACCESSORY_TRADE_REENTER_RETRY_COUNT:
+            logger.info("[饰品抢购] 未进入饰品交易行，准备返回古墓大厅后重试。")
+            if not try_return_to_gumu(camera, retry_count=config.SWITCH_RETURN_GUMU_RETRY_COUNT):
+                return False
+
+    ui_print("饰品进场失败", save_log=True)
+    return False
+
+
+def enter_accessory_trade_from_current_scene(camera):
+    """从当前场景恢复到古墓大厅，再进入饰品交易行。"""
+    if not is_at_gumu(camera):
+        if not try_return_to_gumu(camera, retry_count=config.SWITCH_RETURN_GUMU_RETRY_COUNT):
+            return False
+    return enter_accessory_trade_from_gumu(camera)
+
+
+def startup_accessory_from_server_list(camera, server_index):
+    """已位于选区页时，继续执行后续启动链路并进入饰品交易行。"""
+    set_overlay_mini("饰品启动中")
+    state.current_server_index = server_index
+    steps = [
+        ("选择目标大区", lambda: _step03_select(camera, server_index)),
+        ("启动游戏", lambda: _step04_launch(camera)),
+        ("处理空格弹窗", lambda: _step05_space(camera)),
+        ("清理广告和弹窗", lambda: _step06_ads(camera)),
+        ("进入古墓大厅", lambda: _step07_gumu(camera)),
+    ]
+
+    for name, fn in steps:
+        logger.info("[饰品抢购] %s开始。", name)
+        if not fn():
+            logger.error("[饰品抢购] %s失败。", name)
+            restore_overlay()
+            return False
+        logger.info("[饰品抢购] %s完成。", name)
+
+    logger.info("[饰品抢购] 领取金币开始。")
+    gold_step_result = _step08_gold(camera)
+    if not gold_step_result:
+        logger.error("[饰品抢购] 领取金币失败。")
+        restore_overlay()
+        return False
+    logger.info("[饰品抢购] 领取金币完成。")
+
+    if gold_step_result == _GOLD_STEP_NEED_CLOSE:
+        logger.info("[饰品抢购] 关闭面板开始。")
+        if not _step09_close(camera):
+            logger.error("[饰品抢购] 关闭面板失败。")
+            restore_overlay()
+            return False
+        logger.info("[饰品抢购] 关闭面板完成。")
+
+    logger.info("[饰品抢购] 进入饰品交易行开始。")
+    if not enter_accessory_trade_from_gumu(camera):
+        logger.error("[饰品抢购] 进入饰品交易行失败。")
+        restore_overlay()
+        return False
+    logger.info("[饰品抢购] 已进入饰品交易行。")
+    restore_overlay()
+    return True
+
+
 def _run_startup_from_launcher(camera, server_index, skip_open_server_list=False):
     """执行从启动器到交易行的完整流程。"""
     set_overlay_mini("启动准备中")
@@ -1860,7 +2071,7 @@ def switch_server_within_account_after_slot_boundary(camera, transition=None):
 
         state.current_execution_slot = target["next_slot"]
         state.current_server_index = target["server_coord_index"]
-        state.current_account_index = 0 if target["next_slot"] <= 4 else 1
+        state.current_account_index = resolve_execution_slot_account_index(target["next_slot"])
         state.current_nickname = str(target["next_slot"])
         state.need_switch_server = False
         state.switch_flow_paused = False
@@ -1955,7 +2166,7 @@ def switch_account_after_slot_boundary(camera):
 
         state.current_execution_slot = target["next_slot"]
         state.current_server_index = target["server_coord_index"]
-        state.current_account_index = 0 if target["next_slot"] <= 4 else 1
+        state.current_account_index = resolve_execution_slot_account_index(target["next_slot"])
         state.current_nickname = str(target["next_slot"])
         state.need_switch_server = False
         state.switch_flow_paused = False
@@ -2037,7 +2248,7 @@ def switch_account_for_temporary_target_slot(camera, target_execution_slot):
 
         state.current_execution_slot = target["target_slot"]
         state.current_server_index = target["server_coord_index"]
-        state.current_account_index = 0 if target["target_slot"] <= 4 else 1
+        state.current_account_index = resolve_execution_slot_account_index(target["target_slot"])
         state.current_nickname = str(target["target_slot"])
         state.need_switch_server = False
         state.switch_flow_paused = False
@@ -2312,7 +2523,7 @@ def enter_startup_listing_target_slot(
 
     state.current_execution_slot = target["target_slot"]
     state.current_server_index = target["server_coord_index"]
-    state.current_account_index = 0 if target["target_slot"] <= 4 else 1
+    state.current_account_index = resolve_execution_slot_account_index(target["target_slot"])
     state.current_nickname = str(target["target_slot"])
     state.need_switch_server = False
     state.switch_flow_paused = False

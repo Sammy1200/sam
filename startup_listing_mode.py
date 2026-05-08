@@ -5,6 +5,7 @@ import re
 import config
 import state
 from account_view_repo import get_account_view_rows
+from local_switch_account_config import get_execution_slot_count
 from account_db import (
     CANONICAL_ACCOUNT_STATS_TABLE,
     ROUND_STATUS_LIMITED,
@@ -116,12 +117,12 @@ def select_normal_mode_handoff_target():
             slot_number = int(row.get("current_execution_slot"))
         except (TypeError, ValueError):
             continue
-        if 1 <= slot_number <= int(config.EXECUTION_SLOT_COUNT) and slot_number not in rows_by_slot:
+        if 1 <= slot_number <= int(get_execution_slot_count()) and slot_number not in rows_by_slot:
             rows_by_slot[slot_number] = row
 
     runtime_candidates = []
     cooldown_candidates = []
-    for slot_number in range(1, int(config.EXECUTION_SLOT_COUNT) + 1):
+    for slot_number in range(1, int(get_execution_slot_count()) + 1):
         row = rows_by_slot.get(slot_number)
         if row is None:
             continue
@@ -200,7 +201,7 @@ def _is_limited_slot_record(record):
 def _find_next_candidate(processed_slots, skipped_slots=None):
     ignored_slots = set(processed_slots or ())
     ignored_slots.update(skipped_slots or ())
-    for slot_number in range(1, int(config.EXECUTION_SLOT_COUNT) + 1):
+    for slot_number in range(1, int(get_execution_slot_count()) + 1):
         if slot_number in ignored_slots:
             continue
 

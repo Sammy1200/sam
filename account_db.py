@@ -1,5 +1,5 @@
 """SQLite account lookup and round write-back helpers."""
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 import json
 import os
@@ -8,14 +8,20 @@ import sqlite3
 from config import (
     ACCOUNT_LIMIT_COOLDOWN_SECONDS,
     ACCOUNT_STATS_DB_PATH,
-    EXECUTION_SLOT_COUNT,
-    EXECUTION_SLOT_NICKNAMES,
     SCRIPT_DIR,
-    TEMPORARY_ACCOUNT_DISPLAY_SLOT,
     TEMPORARY_ACCOUNT_NICKNAME,
     THREAD6_RUNTIME_DB_PATH,
 )
-from live_paths import log_resolved_live_path, resolve_account_stats_db_path
+from live_paths import (
+    log_resolved_live_path,
+    resolve_accessory_account_stats_db_path,
+    resolve_account_stats_db_path,
+)
+from local_switch_account_config import (
+    get_execution_slot_count,
+    get_execution_slot_nicknames,
+    get_temporary_account_display_slot,
+)
 
 
 _DB_SUFFIXES = (".db", ".sqlite", ".sqlite3")
@@ -260,6 +266,16 @@ CANONICAL_RESET_MODE_VALUES = (
     CANONICAL_RESET_MODE_CONSERVATIVE,
     CANONICAL_RESET_MODE_AGGRESSIVE,
 )
+ACCOUNT_DB_MODE_STONE = "stone"
+ACCOUNT_DB_MODE_ACCESSORY = "accessory"
+ACCOUNT_DB_MODE_VALUES = (
+    ACCOUNT_DB_MODE_STONE,
+    ACCOUNT_DB_MODE_ACCESSORY,
+)
+ACCOUNT_DB_MODE_LABELS = {
+    ACCOUNT_DB_MODE_STONE: "石头库",
+    ACCOUNT_DB_MODE_ACCESSORY: "饰品库",
+}
 CANONICAL_DB_HINT_PATHS = (
     ACCOUNT_STATS_DB_PATH,
     THREAD6_RUNTIME_DB_PATH,
@@ -268,6 +284,34 @@ CANONICAL_DB_HINT_PATHS = (
     os.path.join(SCRIPT_DIR, "account_data.sqlite3"),
     os.path.join(SCRIPT_DIR, "account_data.db"),
 )
+
+
+def normalize_account_db_mode(db_mode):
+    normalized = str(db_mode or "").strip().lower()
+    if normalized in ("accessory", "shipin", "饰品", "饰品库"):
+        return ACCOUNT_DB_MODE_ACCESSORY
+    return ACCOUNT_DB_MODE_STONE
+
+
+def get_account_db_mode_label(db_mode):
+    return ACCOUNT_DB_MODE_LABELS.get(
+        normalize_account_db_mode(db_mode),
+        ACCOUNT_DB_MODE_LABELS[ACCOUNT_DB_MODE_STONE],
+    )
+
+
+def get_alternate_account_db_mode(db_mode):
+    normalized = normalize_account_db_mode(db_mode)
+    if normalized == ACCOUNT_DB_MODE_ACCESSORY:
+        return ACCOUNT_DB_MODE_STONE
+    return ACCOUNT_DB_MODE_ACCESSORY
+
+
+def resolve_account_stats_db_path_for_mode(db_mode):
+    normalized = normalize_account_db_mode(db_mode)
+    if normalized == ACCOUNT_DB_MODE_ACCESSORY:
+        return resolve_accessory_account_stats_db_path()
+    return resolve_account_stats_db_path()
 
 
 def _iter_canonical_db_hint_paths():
@@ -350,6 +394,9 @@ class AccountWriteResult:
     new_baseline_item_count: int | None = None
 
 
+_SYNC_FIELD_MISSING = object()
+
+
 def compute_item_quantity(
     baseline_item_count,
     round_purchase_success_count,
@@ -425,7 +472,7 @@ class RuntimeExecutionState:
 @dataclass
 class TemporaryAccountSnapshot:
     nickname: str = TEMPORARY_ACCOUNT_NICKNAME
-    current_execution_slot: int = TEMPORARY_ACCOUNT_DISPLAY_SLOT
+    current_execution_slot: int = field(default_factory=get_temporary_account_display_slot)
     baseline_item_count: int = 0
     round_purchase_success_count: int = 0
     round_listing_success_count: int = 0
@@ -737,7 +784,7 @@ def read_temporary_account_snapshot():
 
         return TemporaryAccountSnapshot(
             nickname=str(row[0] or TEMPORARY_ACCOUNT_NICKNAME).strip() or TEMPORARY_ACCOUNT_NICKNAME,
-            current_execution_slot=_parse_int(row[1]) or TEMPORARY_ACCOUNT_DISPLAY_SLOT,
+            current_execution_slot=_parse_int(row[1]) or get_temporary_account_display_slot(),
             baseline_item_count=max(0, _parse_int(row[2])),
             round_purchase_success_count=max(0, _parse_int(row[3])),
             round_listing_success_count=max(0, _parse_int(row[4])),
@@ -766,7 +813,7 @@ def save_temporary_account_snapshot(snapshot):
         write_time = snapshot.updated_at or datetime.now()
         payload = (
             str(snapshot.nickname or TEMPORARY_ACCOUNT_NICKNAME).strip() or TEMPORARY_ACCOUNT_NICKNAME,
-            int(snapshot.current_execution_slot or TEMPORARY_ACCOUNT_DISPLAY_SLOT),
+            int(snapshot.current_execution_slot or get_temporary_account_display_slot()),
             max(0, int(snapshot.baseline_item_count or 0)),
             max(0, int(snapshot.round_purchase_success_count or 0)),
             max(0, int(snapshot.round_listing_success_count or 0)),
@@ -822,7 +869,7 @@ def reset_temporary_account_snapshot():
     return save_temporary_account_snapshot(
         TemporaryAccountSnapshot(
             nickname=TEMPORARY_ACCOUNT_NICKNAME,
-            current_execution_slot=TEMPORARY_ACCOUNT_DISPLAY_SLOT,
+            current_execution_slot=get_temporary_account_display_slot(),
             round_status=ROUND_STATUS_RUNNING,
             updated_at=datetime.now(),
         )
@@ -1578,6 +1625,274 @@ def ensure_local_canonical_account_stats_store(
     return database_path, table_name, inserted_seed_records
 
 
+def _read_account_identity_seed_rows(database_path, table_name):
+    if not database_path or not os.path.isfile(database_path):
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return []
+    try:
+        if not _canonical_table_exists(conn, table_name):
+            return []
+        rows = conn.execute(
+            f"SELECT {_quote_identifier('nickname')}, {_quote_identifier('current_execution_slot')} "
+            f"FROM {_quote_identifier(table_name)} "
+            f"ORDER BY CASE WHEN {_quote_identifier('current_execution_slot')} IS NULL THEN 1 ELSE 0 END, "
+            f"{_quote_identifier('current_execution_slot')}, {_quote_identifier('nickname')}"
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+
+    result = []
+    for row in rows:
+        nickname = str(row["nickname"] or "").strip()
+        if not nickname:
+            continue
+        slot_value = row["current_execution_slot"]
+        slot_value = _parse_int(slot_value) if slot_value not in (None, "") else None
+        result.append((nickname, slot_value))
+    return result
+
+
+def ensure_accessory_account_identity_seed_records(
+    database_path,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+    source_database_path=None,
+    source_table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+):
+    """补齐饰品库账号身份记录，只复制昵称和执行位，不复制库存/余额/计数。"""
+    if not database_path:
+        raise ValueError("database_path is empty")
+
+    ensure_canonical_account_stats_table(database_path, table_name)
+    source_database_path = source_database_path or resolve_account_stats_db_path().path
+    source_rows = _read_account_identity_seed_rows(source_database_path, source_table_name)
+
+    conn = sqlite3.connect(database_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            f"SELECT {_quote_identifier('nickname')}, {_quote_identifier('current_execution_slot')} "
+            f"FROM {_quote_identifier(table_name)}"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    existing_nicknames = set()
+    existing_slots = set()
+    for row in rows:
+        nickname = str(row["nickname"] or "").strip()
+        if nickname:
+            existing_nicknames.add(nickname)
+        slot_value = row["current_execution_slot"]
+        if slot_value not in (None, ""):
+            existing_slots.add(_parse_int(slot_value))
+
+    inserted_records = []
+    now = datetime.now()
+    for nickname, slot_value in source_rows:
+        if nickname in existing_nicknames:
+            continue
+        if slot_value is not None and slot_value in existing_slots:
+            continue
+        seed_record = AccountStatsRecord(
+            nickname=nickname,
+            baseline_item_count=0,
+            last_limit_time=None,
+            last_account_end_time=None,
+            updated_at=now,
+            current_execution_slot=slot_value,
+            round_purchase_success_count=0,
+            round_listing_success_count=0,
+            round_purchase_fail_count=0,
+            current_balance="",
+            purchase_running_seconds=0,
+            runtime_window_start_time=None,
+            round_status=ROUND_STATUS_READY,
+        )
+        save_canonical_account_stats_record(
+            database_path,
+            seed_record,
+            table_name,
+            sync_shared_account_fields=False,
+        )
+        existing_nicknames.add(nickname)
+        if slot_value is not None:
+            existing_slots.add(slot_value)
+        inserted_records.append(seed_record)
+
+    if not source_rows:
+        inserted_records.extend(
+            ensure_canonical_execution_slot_seed_records(database_path, table_name)
+        )
+    return inserted_records
+
+
+def find_account_stats_store_for_mode(
+    db_mode=ACCOUNT_DB_MODE_STONE,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+):
+    normalized_mode = normalize_account_db_mode(db_mode)
+    if normalized_mode == ACCOUNT_DB_MODE_STONE:
+        return find_canonical_account_stats_store(table_name)
+
+    resolved_path = resolve_accessory_account_stats_db_path()
+    database_path = resolved_path.path
+    if database_path and os.path.isfile(database_path):
+        try:
+            conn = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+        except sqlite3.Error:
+            return None, table_name
+        try:
+            if _canonical_table_exists(conn, table_name):
+                log_resolved_live_path("饰品SQLite真源", resolved_path)
+                return database_path, table_name
+        finally:
+            conn.close()
+    return None, table_name
+
+
+def ensure_account_stats_store_for_mode(
+    db_mode=ACCOUNT_DB_MODE_STONE,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+):
+    normalized_mode = normalize_account_db_mode(db_mode)
+    if normalized_mode == ACCOUNT_DB_MODE_STONE:
+        return ensure_local_canonical_account_stats_store(table_name)
+
+    resolved_path = resolve_accessory_account_stats_db_path()
+    database_path = resolved_path.path
+    log_resolved_live_path("饰品SQLite真源", resolved_path)
+    inserted_seed_records = ensure_accessory_account_identity_seed_records(
+        database_path,
+        table_name,
+        source_database_path=resolve_account_stats_db_path().path,
+        source_table_name=table_name,
+    )
+    return database_path, table_name, inserted_seed_records
+
+
+def _normalize_db_path_for_compare(database_path):
+    text = str(database_path or "").strip()
+    if not text:
+        return ""
+    return os.path.normcase(os.path.abspath(text))
+
+
+def _resolve_alternate_account_stats_store(database_path, table_name):
+    source_path = _normalize_db_path_for_compare(database_path)
+    if not source_path:
+        return None, table_name
+
+    stone_path = _normalize_db_path_for_compare(resolve_account_stats_db_path().path)
+    accessory_path = _normalize_db_path_for_compare(resolve_accessory_account_stats_db_path().path)
+    if source_path == stone_path:
+        alternate_mode = ACCOUNT_DB_MODE_ACCESSORY
+    elif source_path == accessory_path:
+        alternate_mode = ACCOUNT_DB_MODE_STONE
+    else:
+        return None, table_name
+
+    alternate_path, alternate_table_name = find_account_stats_store_for_mode(
+        alternate_mode,
+        table_name,
+    )
+    if not alternate_path:
+        alternate_path, alternate_table_name, _ = ensure_account_stats_store_for_mode(
+            alternate_mode,
+            table_name,
+        )
+    return alternate_path, alternate_table_name
+
+
+def _sync_shared_account_fields_to_alternate(
+    database_path,
+    nickname,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+    *,
+    round_status=_SYNC_FIELD_MISSING,
+    purchase_running_seconds=_SYNC_FIELD_MISSING,
+    runtime_window_start_time=_SYNC_FIELD_MISSING,
+    last_limit_time=_SYNC_FIELD_MISSING,
+    updated_at=None,
+):
+    normalized_nickname = str(nickname or "").strip()
+    if not normalized_nickname:
+        return AccountWriteResult("nickname_missing", "current nickname is empty")
+
+    alternate_path, alternate_table_name = _resolve_alternate_account_stats_store(
+        database_path,
+        table_name,
+    )
+    if not alternate_path:
+        return AccountWriteResult("skipped", "alternate account database is unavailable")
+
+    ensure_canonical_account_stats_table(alternate_path, alternate_table_name)
+
+    assignments = []
+    if round_status is not _SYNC_FIELD_MISSING:
+        normalized_status = _normalize_round_status_for_storage(round_status)
+        if not _validate_round_status(normalized_status):
+            return AccountWriteResult("invalid_round_status", f"invalid round_status: {round_status}")
+        assignments.append(("round_status", normalized_status))
+
+    if purchase_running_seconds is not _SYNC_FIELD_MISSING:
+        try:
+            normalized_seconds = max(0, int(float(purchase_running_seconds)))
+        except (TypeError, ValueError):
+            return AccountWriteResult(
+                "invalid_running_seconds",
+                f"invalid purchase_running_seconds: {purchase_running_seconds}",
+            )
+        assignments.append(("purchase_running_seconds", normalized_seconds))
+
+    if runtime_window_start_time is not _SYNC_FIELD_MISSING:
+        assignments.append(("runtime_window_start_time", _serialize_datetime(runtime_window_start_time)))
+
+    if last_limit_time is not _SYNC_FIELD_MISSING:
+        assignments.append(("last_limit_time", _serialize_datetime(last_limit_time)))
+
+    if not assignments:
+        return AccountWriteResult("skipped", "no shared account fields to sync")
+
+    assignments.append(("updated_at", _serialize_datetime(_parse_datetime(updated_at) or datetime.now())))
+
+    columns = ["nickname", *(name for name, _ in assignments)]
+    values = [normalized_nickname, *(value for _, value in assignments)]
+    update_clauses = [
+        f"{_quote_identifier(name)} = excluded.{_quote_identifier(name)}"
+        for name, _ in assignments
+    ]
+    sql = f"""
+        INSERT INTO {_quote_identifier(alternate_table_name)} (
+            {', '.join(_quote_identifier(name) for name in columns)}
+        ) VALUES (
+            {', '.join('?' for _ in columns)}
+        )
+        ON CONFLICT({_quote_identifier('nickname')}) DO UPDATE SET
+            {', '.join(update_clauses)}
+    """
+
+    conn = sqlite3.connect(alternate_path)
+    try:
+        conn.execute(sql, values)
+        conn.commit()
+    except sqlite3.Error as exc:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return AccountWriteResult("write_failed", f"shared field sync failed: {exc}")
+    finally:
+        conn.close()
+
+    return AccountWriteResult("success", "")
+
+
 def _normalize_machine_daily_summary_date(value):
     if value is None:
         return datetime.now().strftime("%Y-%m-%d")
@@ -1887,6 +2202,7 @@ def save_canonical_account_stats_record(
     database_path,
     record,
     table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+    sync_shared_account_fields=True,
 ):
     """保存线程 2 统一字段记录。"""
     if not isinstance(record, AccountStatsRecord):
@@ -1941,6 +2257,18 @@ def save_canonical_account_stats_record(
         conn.commit()
     finally:
         conn.close()
+
+    if sync_shared_account_fields:
+        _sync_shared_account_fields_to_alternate(
+            database_path,
+            record.nickname,
+            table_name,
+            round_status=normalized_round_status,
+            purchase_running_seconds=record.purchase_running_seconds,
+            runtime_window_start_time=record.runtime_window_start_time,
+            last_limit_time=record.last_limit_time,
+            updated_at=record.updated_at,
+        )
 
     return AccountWriteResult(
         "success",
@@ -2029,6 +2357,17 @@ def update_canonical_account_runtime_fields(
                 f"account record not found for nickname: {normalized_nickname}",
             )
         conn.commit()
+        _sync_shared_account_fields_to_alternate(
+            database_path,
+            normalized_nickname,
+            table_name,
+            purchase_running_seconds=normalized_running_seconds,
+            runtime_window_start_time=runtime_window_start_time,
+            last_limit_time=(
+                last_limit_time if update_last_limit_time else _SYNC_FIELD_MISSING
+            ),
+            updated_at=updated_at,
+        )
         return AccountWriteResult("success", "", normalized_running_seconds)
     except sqlite3.Error as exc:
         try:
@@ -2140,6 +2479,26 @@ def update_canonical_account_item_balance_fields(
                 f"未找到昵称为 {normalized_nickname} 的账号记录",
             )
         conn.commit()
+        if normalized_running_seconds is not None or update_last_limit_time:
+            _sync_shared_account_fields_to_alternate(
+                database_path,
+                normalized_nickname,
+                table_name,
+                purchase_running_seconds=(
+                    normalized_running_seconds
+                    if normalized_running_seconds is not None
+                    else _SYNC_FIELD_MISSING
+                ),
+                runtime_window_start_time=(
+                    runtime_window_start_time
+                    if normalized_running_seconds is not None
+                    else _SYNC_FIELD_MISSING
+                ),
+                last_limit_time=(
+                    last_limit_time if update_last_limit_time else _SYNC_FIELD_MISSING
+                ),
+                updated_at=updated_at,
+            )
         return AccountWriteResult("success", "", desired_item_quantity)
     except sqlite3.Error as exc:
         try:
@@ -2308,6 +2667,23 @@ def update_canonical_account_status_fields(
                 f"未找到昵称为 {normalized_nickname} 的账号记录",
             )
         conn.commit()
+        _sync_shared_account_fields_to_alternate(
+            database_path,
+            normalized_nickname,
+            table_name,
+            round_status=normalized_round_status,
+            purchase_running_seconds=(
+                normalized_running_seconds
+                if normalized_running_seconds is not None
+                else _SYNC_FIELD_MISSING
+            ),
+            runtime_window_start_time=(
+                runtime_window_start_time
+                if runtime_window_start_time is not None
+                else _SYNC_FIELD_MISSING
+            ),
+            updated_at=updated_at,
+        )
         return AccountWriteResult("success", "", normalized_item_quantity)
     except sqlite3.Error as exc:
         try:
@@ -2505,13 +2881,15 @@ def ensure_canonical_execution_slot_seed_records(
             existing_slots.add(_parse_int(slot_value))
 
     inserted_records = []
-    for slot_index in range(1, int(EXECUTION_SLOT_COUNT) + 1):
+    execution_slot_count = int(get_execution_slot_count())
+    execution_slot_nicknames = get_execution_slot_nicknames()
+    for slot_index in range(1, execution_slot_count + 1):
         if slot_index in existing_slots:
             continue
 
         configured_nickname = ""
-        if 0 <= slot_index - 1 < len(EXECUTION_SLOT_NICKNAMES):
-            configured_nickname = str(EXECUTION_SLOT_NICKNAMES[slot_index - 1] or "").strip()
+        if 0 <= slot_index - 1 < len(execution_slot_nicknames):
+            configured_nickname = str(execution_slot_nicknames[slot_index - 1] or "").strip()
 
         seed_nickname = configured_nickname or str(slot_index)
         if seed_nickname in existing_nicknames:
@@ -2536,7 +2914,12 @@ def ensure_canonical_execution_slot_seed_records(
             runtime_window_start_time=None,
             round_status=ROUND_STATUS_MANUAL_PAUSE,
         )
-        save_canonical_account_stats_record(database_path, seed_record, table_name)
+        save_canonical_account_stats_record(
+            database_path,
+            seed_record,
+            table_name,
+            sync_shared_account_fields=False,
+        )
         existing_nicknames.add(seed_nickname)
         inserted_records.append(seed_record)
 
@@ -2616,6 +2999,19 @@ def write_account_round_record(database_path, table_name, nickname, payload):
                 f"account record not found for nickname: {nickname}",
             )
         conn.commit()
+        _sync_shared_account_fields_to_alternate(
+            database_path,
+            nickname,
+            table_name,
+            round_status=payload.round_status,
+            purchase_running_seconds=payload.purchase_running_seconds,
+            last_limit_time=(
+                payload.last_limit_time
+                if payload.update_last_limit_time
+                else _SYNC_FIELD_MISSING
+            ),
+            updated_at=payload.updated_at,
+        )
         return AccountWriteResult("success", "", payload.baseline_item_count)
     except sqlite3.Error as exc:
         try:

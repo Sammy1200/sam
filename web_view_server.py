@@ -11,6 +11,7 @@ from account_view_repo import (
     get_runtime_snapshot,
     update_account_view_record,
 )
+from account_db import normalize_account_db_mode
 from config import WEB_VIEW_HOST, WEB_VIEW_PORT
 from machine_sync_config import resolve_web_bind_host
 from remote_sync import (
@@ -44,6 +45,10 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         return max(0, value)
 
     @staticmethod
+    def _parse_db_mode(query_or_form):
+        return normalize_account_db_mode(((query_or_form.get("db") or query_or_form.get("db_mode") or ["stone"])[0] or "stone"))
+
+    @staticmethod
     def _build_local_flash_edit_result(query):
         status = str(((query.get("flash_status") or [""])[0] or "")).strip().lower()
         scope = str(((query.get("flash_scope") or [""])[0] or "")).strip().lower()
@@ -74,13 +79,13 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
 
         try:
             if path == "/":
-                self._handle_index()
+                self._handle_index(query)
                 return
             if path == "/public-snapshot":
-                self._handle_public_snapshot()
+                self._handle_public_snapshot(query=query)
                 return
             if path == "/more-info":
-                self._handle_more_info()
+                self._handle_more_info(query)
                 return
             if path == "/account":
                 self._handle_account(query)
@@ -148,11 +153,14 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         )
         self._send_html(html, status_code=status_code)
 
-    def _handle_index(self):
-        view_rows_result = get_account_view_rows()
+    def _handle_index(self, query=None):
+        query = query or {}
+        db_mode = self._parse_db_mode(query)
+        view_rows_result = get_account_view_rows(db_mode=db_mode)
         runtime_result = get_runtime_snapshot()
         remote_machine_sections = get_remote_machine_sections(
             exclude_machine_id=view_rows_result.get("machine_id"),
+            db_mode=db_mode,
         )
         edit_result = self._build_local_flash_edit_result(parse_qs(urlparse(self.path).query))
         html = render_index_page(
@@ -165,10 +173,13 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         )
         self._send_html(html)
 
-    def _handle_public_snapshot(self, refresh_result=None):
-        view_rows_result = get_account_view_rows()
+    def _handle_public_snapshot(self, refresh_result=None, query=None):
+        query = query or {}
+        db_mode = self._parse_db_mode(query)
+        view_rows_result = get_account_view_rows(db_mode=db_mode)
         remote_machine_sections = get_remote_machine_sections(
             exclude_machine_id=view_rows_result.get("machine_id"),
+            db_mode=db_mode,
         )
         html = render_public_snapshot_page(
             view_rows_result,
@@ -177,8 +188,10 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         )
         self._send_html(html)
 
-    def _handle_more_info(self):
-        view_rows_result = get_account_view_rows()
+    def _handle_more_info(self, query=None):
+        query = query or {}
+        db_mode = self._parse_db_mode(query)
+        view_rows_result = get_account_view_rows(db_mode=db_mode)
         runtime_result = get_runtime_snapshot()
         html = render_more_info_page(view_rows_result, runtime_result)
         self._send_html(html)
@@ -186,6 +199,7 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
     def _handle_account(self, query):
         nickname = ((query.get("nickname") or [""])[0] or "").strip()
         execution_slot_raw = ((query.get("execution_slot") or [""])[0] or "").strip()
+        db_mode = self._parse_db_mode(query)
 
         if not nickname and not execution_slot_raw:
             html = render_message_page(
@@ -217,6 +231,7 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
             detail_result = get_account_view_detail(
                 nickname=nickname,
                 execution_slot=execution_slot,
+                db_mode=db_mode,
             )
         except Exception as exc:
             print(
@@ -271,6 +286,7 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         baseline_item_count = ((form.get("baseline_item_count") or [""])[0] or "").strip()
         round_status = ((form.get("round_status") or [""])[0] or "").strip()
         current_balance_wan = ((form.get("current_balance_wan") or [""])[0] or "").strip()
+        db_mode = self._parse_db_mode(form)
         return_to = ((form.get("return_to") or ["detail"])[0] or "detail").strip().lower()
         scroll_x = self._parse_scroll_value((form.get("scroll_x") or [""])[0])
         scroll_y = self._parse_scroll_value((form.get("scroll_y") or [""])[0])
@@ -282,6 +298,7 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
             round_status=round_status,
             balance_wan_text=current_balance_wan,
             baseline_update_mode=return_to,
+            db_mode=db_mode,
         )
         update_result["scope"] = "local"
         status_code = 200 if update_result.get("status") == "success" else 400
@@ -291,6 +308,7 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
                 "flash_status": "success",
                 "flash_scope": "local",
                 "flash_nickname": nickname,
+                "db": db_mode,
             }
             if scroll_x is not None:
                 redirect_payload["flash_scroll_x"] = str(scroll_x)
@@ -305,10 +323,11 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         if scroll_y is not None:
             update_result["scroll_y"] = scroll_y
 
-        view_rows_result = get_account_view_rows()
+        view_rows_result = get_account_view_rows(db_mode=db_mode)
         runtime_result = get_runtime_snapshot()
         remote_machine_sections = get_remote_machine_sections(
             exclude_machine_id=view_rows_result.get("machine_id"),
+            db_mode=db_mode,
         )
         html = render_index_page(
             view_rows_result,
@@ -329,10 +348,12 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         raw_body = self.rfile.read(content_length) if content_length > 0 else b""
         form = parse_qs(raw_body.decode("utf-8"), keep_blank_values=True)
         target_machine_id = ((form.get("target_machine_id") or [""])[0] or "").strip()
+        db_mode = self._parse_db_mode(form)
 
-        refresh_result = refresh_remote_machine_snapshot(machine_id=target_machine_id)
+        refresh_result = refresh_remote_machine_snapshot(machine_id=target_machine_id, db_mode=db_mode)
         refresh_result["scope"] = "remote_refresh"
         refresh_result["target_machine_id"] = target_machine_id
+        refresh_result["db_mode"] = db_mode
         status = str(refresh_result.get("status") or "").strip()
         if status == "success":
             status_code = 200
@@ -341,10 +362,11 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         else:
             status_code = 400
 
-        view_rows_result = get_account_view_rows()
+        view_rows_result = get_account_view_rows(db_mode=db_mode)
         runtime_result = get_runtime_snapshot()
         remote_machine_sections = get_remote_machine_sections(
             exclude_machine_id=view_rows_result.get("machine_id"),
+            db_mode=db_mode,
         )
         html = render_index_page(
             view_rows_result,
@@ -366,27 +388,31 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         form = parse_qs(raw_body.decode("utf-8"), keep_blank_values=True)
         target_scope = ((form.get("target_scope") or [""])[0] or "").strip().lower()
         target_machine_id = ((form.get("target_machine_id") or [""])[0] or "").strip()
+        db_mode = self._parse_db_mode(form)
 
         if target_scope == "local":
             refresh_result = {
                 "status": "success",
                 "scope": "public_local_refresh",
+                "db_mode": db_mode,
                 "message": "已刷新 1号快照显示。",
             }
-            self._handle_public_snapshot(refresh_result=refresh_result)
+            self._handle_public_snapshot(refresh_result=refresh_result, query={"db": [db_mode]})
             return
 
         if target_scope == "remote":
-            refresh_result = refresh_remote_machine_snapshot(machine_id=target_machine_id)
+            refresh_result = refresh_remote_machine_snapshot(machine_id=target_machine_id, db_mode=db_mode)
             refresh_result["scope"] = "remote_refresh"
             refresh_result["target_machine_id"] = target_machine_id
+            refresh_result["db_mode"] = db_mode
             status = str(refresh_result.get("status") or "").strip()
             if status == "success":
-                self._handle_public_snapshot(refresh_result=refresh_result)
+                self._handle_public_snapshot(refresh_result=refresh_result, query={"db": [db_mode]})
                 return
-            view_rows_result = get_account_view_rows()
+            view_rows_result = get_account_view_rows(db_mode=db_mode)
             remote_machine_sections = get_remote_machine_sections(
                 exclude_machine_id=view_rows_result.get("machine_id"),
+                db_mode=db_mode,
             )
             html = render_public_snapshot_page(
                 view_rows_result,
@@ -431,8 +457,20 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         self._send_json(result, status_code=status_code)
 
     def _handle_remote_sync_snapshot(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = 0
+
+        raw_body = self.rfile.read(content_length) if content_length > 0 else b""
+        try:
+            payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+        except json.JSONDecodeError:
+            payload = {}
+        db_mode = normalize_account_db_mode(payload.get("db_mode"))
         result = handle_remote_snapshot_request(
             client_ip=self.client_address[0] if self.client_address else "",
+            db_mode=db_mode,
         )
         status = str(result.get("status") or "").strip()
         if status == "success":

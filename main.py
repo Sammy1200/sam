@@ -77,18 +77,26 @@ import dxcam
 import config
 import state
 from launcher_gui import show_launcher
+from local_switch_account_config import (
+    get_execution_slot_count,
+    get_execution_slot_server_coord_indexes,
+)
 from config import (
     MONITOR_JIAOYIHANG, MONITOR_SHOP,
     FIX_SHOP_POS1, FIX_SHOP_POS2,
     ACCOUNT_LIMIT_COOLDOWN_SECONDS,
 )
 from account_db import (
+    ACCOUNT_DB_MODE_ACCESSORY,
+    ACCOUNT_DB_MODE_STONE,
     CANONICAL_ACCOUNT_STATS_TABLE,
     CANONICAL_RESET_MODE_AGGRESSIVE,
     ROUND_STATUS_MANUAL_PAUSE,
     ensure_canonical_account_stats_table,
     ensure_canonical_execution_slot_seed_records,
+    ensure_account_stats_store_for_mode,
     ensure_local_canonical_account_stats_store,
+    find_account_stats_store_for_mode,
     find_canonical_account_stats_store,
     inspect_canonical_account_stats_cleanup_scope,
     normalize_canonical_round_status_values,
@@ -100,6 +108,7 @@ from account_db import (
 )
 from round_persistence import (
     persist_item_balance_and_schedule_snapshot,
+    persist_accessory_round_status_snapshot,
     persist_temporary_account_snapshot,
     persist_final_round_snapshot,
     refresh_account_limit_reached_at,
@@ -117,6 +126,7 @@ from purchase import recognize_latest_balance_at_trade, run_brutal_purchase_loop
 from startup_listing_mode import run_startup_listing_mode, select_normal_mode_handoff_target
 from switch import (
     detect_current_execution_slot_from_launcher,
+    enter_accessory_trade_from_current_scene,
     enter_startup_listing_target_slot,
     pause_thread6_failure,
     refresh_latest_balance_route,
@@ -124,6 +134,7 @@ from switch import (
     switch_account_for_temporary_target_slot,
     switch_server_within_account_after_slot_boundary,
     startup_temporary_from_qidong,
+    startup_accessory_from_server_list,
     startup_from_server_list,
     switch_account_after_slot_boundary,
     wait_for_verified_slot_cooldown_before_launch,
@@ -310,10 +321,11 @@ def _resolve_server_index_from_execution_slot(execution_slot):
     except (TypeError, ValueError):
         return None
 
-    if slot_number < 1 or slot_number > len(config.EXECUTION_SLOT_SERVER_COORD_INDEXES):
+    server_coord_indexes = get_execution_slot_server_coord_indexes()
+    if slot_number < 1 or slot_number > len(server_coord_indexes):
         return None
 
-    server_index = config.EXECUTION_SLOT_SERVER_COORD_INDEXES[slot_number - 1]
+    server_index = server_coord_indexes[slot_number - 1]
     if 0 <= server_index < len(config.SERVER_COORDS):
         return server_index
     return None
@@ -370,7 +382,7 @@ def _parse_slot_from_nickname_hint(nickname):
     if not raw.isdigit():
         return None
     slot_number = int(raw)
-    if 1 <= slot_number <= int(config.EXECUTION_SLOT_COUNT):
+    if 1 <= slot_number <= int(get_execution_slot_count()):
         return slot_number
     return None
 
@@ -463,6 +475,7 @@ def _set_account_state_defaults():
     brutal_purchase_mode = bool(getattr(state, "brutal_purchase_mode", False))
     brutal_purchase_limit = int(getattr(state, "brutal_purchase_limit", 0) or 0)
     brutal_purchase_limit_enabled = bool(getattr(state, "brutal_purchase_limit_enabled", False))
+    accessory_purchase_mode = bool(getattr(state, "accessory_purchase_mode", False))
     state.success_count = 0
     state.fail_count = 0
     state.total_listed_count = 0
@@ -477,6 +490,7 @@ def _set_account_state_defaults():
     state.updated_at = None
     state.account_db_path = ""
     state.account_db_table_name = ""
+    state.account_db_mode = ACCOUNT_DB_MODE_ACCESSORY if accessory_purchase_mode else ACCOUNT_DB_MODE_STONE
     state.account_record_loaded = False
     state.account_allow_purchase = False
     state.account_allow_start_time = None
@@ -503,12 +517,16 @@ def _set_account_state_defaults():
     state.temporary_purchase_mode = False
     state.temporary_target_execution_slot = None
     state.startup_listing_mode_active = False
+    state.accessory_item_click_started_at = None
+    state.accessory_skip_trade_ready_wait_once = False
+    state.accessory_next_item_click_not_before = None
     state.listing_enabled = listing_enabled
     state.listing_disabled_for_session = listing_disabled_for_session
     state.listing_global_skip_logged = listing_global_skip_logged
     state.brutal_purchase_mode = brutal_purchase_mode
     state.brutal_purchase_limit = brutal_purchase_limit
     state.brutal_purchase_limit_enabled = brutal_purchase_limit_enabled
+    state.accessory_purchase_mode = accessory_purchase_mode
 
 
 def _is_listing_enabled_for_session():
@@ -525,6 +543,7 @@ def _log_listing_disabled_once():
 def _prepare_temporary_purchase_context():
     """线程10B：临时模式只初始化运行态，不读取账号库。"""
     _set_account_state_defaults()
+    state.accessory_purchase_mode = False
     state.temporary_purchase_mode = True
     state.temporary_target_execution_slot = None
     state.need_switch_server = False
@@ -681,11 +700,14 @@ def _load_current_account_context():
         logger.error(f"[账号数据] 读取失败：{state.account_read_error}")
         return False
 
-    database_path, table_name = find_canonical_account_stats_store()
+    account_db_mode = ACCOUNT_DB_MODE_ACCESSORY if state.accessory_purchase_mode else ACCOUNT_DB_MODE_STONE
+    state.account_db_mode = account_db_mode
+    database_path, table_name = find_account_stats_store_for_mode(account_db_mode)
     if not database_path:
-        database_path, table_name, inserted_seed_records = ensure_local_canonical_account_stats_store()
-        print(f"[账号数据] 未找到现成账号库，已自动初始化本地主数据库：{database_path}")
-        logger.info("[账号数据] 未找到现成账号库，已自动初始化本地主数据库：%s", database_path)
+        database_path, table_name, inserted_seed_records = ensure_account_stats_store_for_mode(account_db_mode)
+        mode_label = "饰品库" if account_db_mode == ACCOUNT_DB_MODE_ACCESSORY else "本地主数据库"
+        print(f"[账号数据] 未找到现成账号库，已自动初始化{mode_label}：{database_path}")
+        logger.info("[账号数据] 未找到现成账号库，已自动初始化%s：%s", mode_label, database_path)
         if inserted_seed_records:
             inserted_slots = ",".join(str(record.current_execution_slot) for record in inserted_seed_records)
             inserted_nicknames = ",".join(record.nickname for record in inserted_seed_records)
@@ -795,6 +817,7 @@ def _load_current_account_context():
     state.round_status = record.round_status
     state.account_db_path = database_path
     state.account_db_table_name = table_name
+    state.account_db_mode = account_db_mode
     state.account_record_loaded = True
     runtime_window_sync_result = restore_runtime_window_state()
     now = datetime.now()
@@ -908,6 +931,33 @@ def _run_pre_listing_flow(
     return _wait_until_account_ready()
 
 
+def _run_accessory_account_flow(
+    camera,
+    reset_runtime_before_purchase=False,
+    reset_reason="饰品抢购前清空当前账号运行态",
+    purchase_reset_reason="开始饰品抢购账号流程",
+    enter_trade=False,
+):
+    state.accessory_purchase_mode = True
+    state.listing_enabled = False
+    state.listing_disabled_for_session = True
+    if not _load_current_account_context():
+        return False
+    if reset_runtime_before_purchase:
+        reset_round_runtime_state(reset_reason, reset_purchase_runtime=False, reset_round_counters=False)
+        reset_purchase_counters(purchase_reset_reason)
+        state.accessory_item_index = 0
+        state.accessory_item_click_started_at = None
+        state.accessory_skip_trade_ready_wait_once = False
+        state.accessory_next_item_click_not_before = None
+    if not _wait_until_account_ready():
+        return False
+    state.overlay_status = "饰品抢购中"
+    if enter_trade and not enter_accessory_trade_from_current_scene(camera):
+        return False
+    return True
+
+
 def _run_direct_account_flow(camera):
     if not _load_current_account_context():
         return False
@@ -976,6 +1026,15 @@ def _finalize_current_account_round(default_status):
     if not state.account_record_loaded and state.account_read_status == "":
         return True
     _freeze_purchase_timer()
+    if state.accessory_purchase_mode:
+        result = persist_accessory_round_status_snapshot(default_status)
+        if result.status == "success":
+            return True
+
+        print(f"[账号数据] 饰品最小写回失败：{result.reason}")
+        logger.error("[账号数据] 饰品最小写回失败：%s", result.reason)
+        return False
+
     final_status = resolve_shutdown_final_status(default_status)
     result = persist_final_round_snapshot(final_status)
     if result.status == "success":
@@ -1096,6 +1155,19 @@ def _handle_execution_slot_dispatch(camera):
                 return "abort"
 
         _schedule_remote_snapshot_event("账号切换完成并回到稳定页面后")
+
+        if state.accessory_purchase_mode:
+            if not _run_accessory_account_flow(
+                camera,
+                reset_runtime_before_purchase=True,
+                reset_reason="换号后饰品抢购前清空当前账号运行态",
+                purchase_reset_reason="换号后开始饰品抢购账号流程",
+                enter_trade=True,
+            ):
+                if not state.switch_flow_paused:
+                    pause_thread6_failure("切换后饰品衔接", "线程 6 切换完成后未能进入饰品交易行。")
+                return "abort"
+            return "continue"
 
         if not _run_pre_listing_flow(
             camera,
@@ -1344,6 +1416,7 @@ def main():
     state.listing_disabled_for_session = not bool(listing_enabled)
     state.listing_global_skip_logged = False
     state.brutal_purchase_mode = mode == "brutal_launcher"
+    state.accessory_purchase_mode = mode == "accessory_launcher"
     if not state.brutal_purchase_mode:
         state.brutal_purchase_limit = 0
         state.brutal_purchase_limit_enabled = False
@@ -1427,6 +1500,7 @@ def main():
 
         try:
             if mode == "launcher":
+                state.accessory_purchase_mode = False
                 if not _prepare_default_launcher_start(camera):
                     _pause_after_launcher_start_failure()
                     return
@@ -1448,6 +1522,7 @@ def main():
                 ):
                     return
             elif mode == "listing_launcher":
+                state.accessory_purchase_mode = False
                 if not _is_listing_enabled_for_session():
                     _log_listing_disabled_once()
                     return
@@ -1462,6 +1537,7 @@ def main():
                 elif listing_mode_result.get("status") != "completed":
                     return
             elif mode == "temporary_launcher":
+                state.accessory_purchase_mode = False
                 ui_print("临时抢购模式在 1 秒后启动...")
                 safe_sleep(1.0)
                 if not startup_temporary_from_qidong(camera):
@@ -1490,7 +1566,34 @@ def main():
                     pass
                 else:
                     return
+            elif mode == "accessory_launcher":
+                state.accessory_purchase_mode = True
+                state.listing_enabled = False
+                state.listing_disabled_for_session = True
+                state.accessory_item_index = 0
+                ui_print("饰品抢购启动", save_log=True)
+                if not _prepare_default_launcher_start(camera):
+                    _pause_after_launcher_start_failure()
+                    return
+                if not wait_for_verified_slot_cooldown_before_launch(
+                    state.current_execution_slot,
+                    sync_running_status_after_wait=False,
+                ):
+                    _pause_after_launcher_start_failure()
+                    return
+                if not startup_accessory_from_server_list(camera, state.current_server_index):
+                    _pause_after_launcher_start_failure()
+                    return
+                if not _run_accessory_account_flow(
+                    camera,
+                    reset_runtime_before_purchase=True,
+                    reset_reason="启动后饰品抢购前清空当前账号运行态",
+                    purchase_reset_reason="启动后开始饰品抢购账号流程",
+                    enter_trade=False,
+                ):
+                    return
             elif mode == "brutal_launcher":
+                state.accessory_purchase_mode = False
                 state.listing_enabled = False
                 state.listing_disabled_for_session = True
                 state.account_record_loaded = False
@@ -1549,7 +1652,8 @@ def main():
                 if not state.need_switch_server:
                     break
 
-                _refresh_latest_balance_before_switch(camera)
+                if not state.accessory_purchase_mode:
+                    _refresh_latest_balance_before_switch(camera)
                 _clear_runtime_state_after_account_finalize("换号前移清理")
                 dispatch_action = _handle_execution_slot_dispatch(camera)
                 if dispatch_action == "continue":

@@ -13,6 +13,8 @@ from live_paths import (
 _PURCHASE_PRICE_RULE_CONFIG_CACHE = None
 _PURCHASE_PRICE_RULE_CONFIG_SOURCE_PATH = ""
 _PURCHASE_PRICE_RULE_CONFIG_LOGGED = False
+_EXECUTION_SLOT_CONFIG_CACHE = None
+_EXECUTION_SLOT_CONFIG_SOURCE_PATH = ""
 
 
 def _read_json(path):
@@ -126,6 +128,240 @@ def _normalize_optional_threshold(value, field_name):
     if threshold <= 0 or threshold > 1:
         raise ValueError(f"{field_name} 必须大于 0 且小于等于 1，当前值: {value!r}")
     return threshold
+
+
+def _normalize_optional_positive_int(value, field_name, default):
+    if value in (None, ""):
+        return int(default)
+    raw_value = str(value).strip()
+    if not raw_value.isdigit():
+        raise ValueError(f"{field_name} 必须是正整数，当前值: {value!r}")
+    result = int(raw_value)
+    if result <= 0:
+        raise ValueError(f"{field_name} 必须大于 0，当前值: {value!r}")
+    return result
+
+
+def _normalize_slot_index_sequence(value, field_name, slot_count, default_values):
+    if value in (None, ""):
+        values = tuple(int(item) for item in default_values)
+    else:
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(f"{field_name} 必须是执行位数组")
+        values = tuple(int(item) for item in value)
+
+    if len(values) != int(slot_count):
+        raise ValueError(f"{field_name} 长度必须等于 execution_slot_count={slot_count}，当前长度: {len(values)}")
+    if any(item < 0 for item in values):
+        raise ValueError(f"{field_name} 中的大区索引必须大于等于 0")
+    return values
+
+
+def _normalize_slot_template_files(value, field_name, slot_count, default_values):
+    if value in (None, ""):
+        if len(default_values) == int(slot_count):
+            return tuple(str(item or "").strip() for item in default_values)
+        return tuple(f"{slot_index}.png" for slot_index in range(1, int(slot_count) + 1))
+
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{field_name} 必须是模板文件数组")
+
+    files = tuple(str(item or "").strip() for item in value)
+    if len(files) != int(slot_count):
+        raise ValueError(f"{field_name} 长度必须等于 execution_slot_count={slot_count}，当前长度: {len(files)}")
+    if any(not item for item in files):
+        raise ValueError(f"{field_name} 不能包含空模板文件名")
+    return files
+
+
+def _normalize_slot_int_map(value, field_name, slot_count, default_map):
+    if value in (None, ""):
+        return {int(key): int(target) for key, target in default_map.items()}
+
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} 必须是对象，例如 {{\"8\": 9, \"9\": 1}}")
+
+    result = {}
+    for raw_key, raw_target in value.items():
+        try:
+            key = int(raw_key)
+            target = int(raw_target)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} 的键和值都必须是执行位整数") from exc
+        if key < 1 or key > int(slot_count) or target < 1 or target > int(slot_count):
+            raise ValueError(f"{field_name} 中的执行位必须在 1-{slot_count} 范围内")
+        result[key] = target
+    return result
+
+
+def _build_default_next_slot_map(slot_count):
+    return {
+        slot_index: (slot_index + 1 if slot_index < int(slot_count) else 1)
+        for slot_index in range(1, int(slot_count) + 1)
+    }
+
+
+def _build_default_execution_slot_config(source_path=""):
+    slot_count = int(config.EXECUTION_SLOT_COUNT)
+    return {
+        "count": slot_count,
+        "nicknames": tuple(config.EXECUTION_SLOT_NICKNAMES),
+        "server_coord_indexes": tuple(config.EXECUTION_SLOT_SERVER_COORD_INDEXES),
+        "nickname_template_files": tuple(config.EXECUTION_SLOT_NICKNAME_TEMPLATE_FILES),
+        "next_slot_map": {int(key): int(value) for key, value in config.EXECUTION_SLOT_NEXT_SLOT_MAP.items()},
+        "switch_targets": {int(key): int(value) for key, value in config.EXECUTION_SLOT_SWITCH_TARGETS.items()},
+        "source_path": source_path,
+    }
+
+
+def _build_execution_slot_config(data, source_path=""):
+    slot_count = _normalize_optional_positive_int(
+        data.get("execution_slot_count"),
+        "execution_slot_count",
+        config.EXECUTION_SLOT_COUNT,
+    )
+    default_nicknames = tuple(config.EXECUTION_SLOT_NICKNAMES)
+    if len(default_nicknames) == slot_count:
+        nicknames = default_nicknames
+    else:
+        nicknames = tuple("" for _ in range(slot_count))
+
+    default_server_indexes = tuple(config.EXECUTION_SLOT_SERVER_COORD_INDEXES)
+    default_template_files = tuple(config.EXECUTION_SLOT_NICKNAME_TEMPLATE_FILES)
+    default_next_slot_map = (
+        {int(key): int(value) for key, value in config.EXECUTION_SLOT_NEXT_SLOT_MAP.items()}
+        if slot_count == int(config.EXECUTION_SLOT_COUNT)
+        else _build_default_next_slot_map(slot_count)
+    )
+    default_switch_targets = (
+        {int(key): int(value) for key, value in config.EXECUTION_SLOT_SWITCH_TARGETS.items()}
+        if slot_count == int(config.EXECUTION_SLOT_COUNT)
+        else {}
+    )
+
+    server_coord_indexes = _normalize_slot_index_sequence(
+        data.get("execution_slot_server_coord_indexes"),
+        "execution_slot_server_coord_indexes",
+        slot_count,
+        default_server_indexes,
+    )
+    nickname_template_files = _normalize_slot_template_files(
+        data.get("execution_slot_nickname_template_files"),
+        "execution_slot_nickname_template_files",
+        slot_count,
+        default_template_files,
+    )
+    next_slot_map = _normalize_slot_int_map(
+        data.get("execution_slot_next_slot_map"),
+        "execution_slot_next_slot_map",
+        slot_count,
+        default_next_slot_map,
+    )
+    switch_targets = _normalize_slot_int_map(
+        data.get("execution_slot_switch_targets"),
+        "execution_slot_switch_targets",
+        slot_count,
+        default_switch_targets,
+    )
+
+    missing_next_slots = [
+        slot_index
+        for slot_index in range(1, int(slot_count) + 1)
+        if slot_index not in next_slot_map
+    ]
+    if missing_next_slots:
+        raise ValueError(f"execution_slot_next_slot_map 缺少执行位: {missing_next_slots}")
+
+    return {
+        "count": int(slot_count),
+        "nicknames": tuple(nicknames),
+        "server_coord_indexes": tuple(server_coord_indexes),
+        "nickname_template_files": tuple(nickname_template_files),
+        "next_slot_map": dict(next_slot_map),
+        "switch_targets": dict(switch_targets),
+        "source_path": source_path,
+    }
+
+
+def load_execution_slot_config(force_reload=False):
+    global _EXECUTION_SLOT_CONFIG_CACHE
+    global _EXECUTION_SLOT_CONFIG_SOURCE_PATH
+
+    if _EXECUTION_SLOT_CONFIG_CACHE is not None and not force_reload:
+        return _EXECUTION_SLOT_CONFIG_CACHE, _EXECUTION_SLOT_CONFIG_SOURCE_PATH
+
+    try:
+        data, source_path = _load_local_switch_account_config()
+    except FileNotFoundError:
+        config_payload = _build_default_execution_slot_config("")
+        _EXECUTION_SLOT_CONFIG_CACHE = config_payload
+        _EXECUTION_SLOT_CONFIG_SOURCE_PATH = ""
+        return config_payload, ""
+
+    config_payload = _build_execution_slot_config(data, source_path)
+    _EXECUTION_SLOT_CONFIG_CACHE = config_payload
+    _EXECUTION_SLOT_CONFIG_SOURCE_PATH = source_path
+    return config_payload, source_path
+
+
+def get_execution_slot_count():
+    execution_slot_config, _ = load_execution_slot_config()
+    return int(execution_slot_config["count"])
+
+
+def get_temporary_account_display_slot():
+    return get_execution_slot_count() + 1
+
+
+def get_execution_slot_nicknames():
+    execution_slot_config, _ = load_execution_slot_config()
+    return tuple(execution_slot_config["nicknames"])
+
+
+def get_execution_slot_server_coord_indexes():
+    execution_slot_config, _ = load_execution_slot_config()
+    return tuple(execution_slot_config["server_coord_indexes"])
+
+
+def get_execution_slot_nickname_template_files():
+    execution_slot_config, _ = load_execution_slot_config()
+    return tuple(execution_slot_config["nickname_template_files"])
+
+
+def resolve_execution_slot_account_index(slot_number):
+    try:
+        normalized_slot_number = int(slot_number)
+    except (TypeError, ValueError):
+        return 0
+
+    execution_slot_config, _ = load_execution_slot_config()
+    switch_boundaries = sorted(int(slot) for slot in execution_slot_config["switch_targets"])
+    account_index = 0
+    for boundary_slot in switch_boundaries:
+        if normalized_slot_number > boundary_slot:
+            account_index += 1
+    return account_index
+
+
+def resolve_account_switch_source_slot_for_execution_slot(slot_number):
+    try:
+        normalized_slot_number = int(slot_number)
+    except (TypeError, ValueError):
+        return None
+
+    execution_slot_config, _ = load_execution_slot_config()
+    slot_count = int(execution_slot_config["count"])
+    if normalized_slot_number < 1 or normalized_slot_number > slot_count:
+        return None
+
+    switch_boundaries = sorted(int(slot) for slot in execution_slot_config["switch_targets"])
+    if not switch_boundaries:
+        return None
+
+    for index, boundary_slot in enumerate(switch_boundaries):
+        if normalized_slot_number <= boundary_slot:
+            return switch_boundaries[index - 1] if index > 0 else switch_boundaries[-1]
+    return switch_boundaries[-1]
 
 
 def _build_purchase_price_rule_config(data):
@@ -263,10 +499,11 @@ def load_purchase_price_rule_config(force_reload=False):
 
 def load_boundary_switch_accounts():
     data, source_path = _load_local_switch_account_config()
-    accounts = {
-        4: _normalize_account_id(data.get("after_slot_4_account_id"), "after_slot_4_account_id"),
-        8: _normalize_account_id(data.get("after_slot_8_account_id"), "after_slot_8_account_id"),
-    }
+    execution_slot_config = _build_execution_slot_config(data, source_path)
+    accounts = {}
+    for slot_number in sorted(execution_slot_config["switch_targets"]):
+        field_name = f"after_slot_{slot_number}_account_id"
+        accounts[int(slot_number)] = _normalize_account_id(data.get(field_name), field_name)
     return accounts, source_path
 
 
