@@ -1,6 +1,9 @@
 """F9 暂停态计数悬浮窗。"""
 
+import ctypes
+import sys
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import font as tkfont
@@ -8,6 +11,10 @@ from typing import Any
 
 
 _counter_window = None
+_VK_NUMPAD_ADD = 0x6B
+_VK_NUMPAD_SUBTRACT = 0x6D
+_MOUSEEVENTF_LEFTDOWN = 0x0002
+_MOUSEEVENTF_LEFTUP = 0x0004
 
 
 class FloatingCounter:
@@ -31,11 +38,38 @@ class FloatingCounter:
         self.wancheng_scan_region = (911, 31, 101, 27)
         self.wancheng_scan_interval_seconds = 0.1
         self.match_threshold = 0.88
+        self.quick_trade_points = (
+            (1644, 1040), (1520, 1040), (1398, 1008),
+            (1644, 920), (1520, 920), (1400, 920),
+            (1644, 800), (1520, 800), (1400, 800),
+            (1644, 676), (1520, 676), (1400, 676),
+            (1644, 545), (1520, 545), (1400, 545),
+            (1644, 420), (1520, 420), (1400, 420),
+            (1644, 300), (1520, 300), (1400, 300),
+            (1644, 166), (1520, 166), (1400, 166),
+        )
+        self.quick_trade_target_pos = (888, 500)
+        self.quick_trade_full_region = (870, 537, 50, 51)
+        self.quick_trade_complete_pos = (950, 888)
+        self.quick_trade_drag_seconds = 0.005
+        self.quick_trade_source_settle_seconds = 0.05
+        self.quick_trade_hold_before_drag_seconds = 0.005
+        self.quick_trade_complete_click_interval_seconds = 0.15
+        self.quick_trade_check_after_drags = 0
         self.jipo_scan_state = "primary"
         self.trade_scan_state = "jiaoyi"
         self.stop_scan_event = threading.Event()
+        self.quick_trade_cancel_event = threading.Event()
         self.jipo_scan_thread = None
         self.trade_scan_thread = None
+        self.quick_trade_thread = None
+        self.quick_trade_test_thread = None
+        self.quick_trade_test_index = 0
+        self.quick_trade_hotkey_after_id = None
+        self.quick_trade_last_add_down = False
+        self.quick_trade_last_subtract_down = False
+        self.quick_trade_user32 = None
+        self.quick_trade_mouse_user32 = None
         self.is_closed = False
         self._cv2: Any = None
         self._np: Any = None
@@ -55,13 +89,14 @@ class FloatingCounter:
         self._refresh_counter()
         self._refresh_result_counters()
         self._start_auto_scans()
+        self._start_quick_trade_hotkey_listener()
 
     def _configure_window(self) -> None:
         self.root.title("悬浮计数器")
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.root.configure(bg="#0B111B")
-        self.root.geometry("+200+200")
+        self.root.geometry("+85+232")
         self.root.bind("<Escape>", self._request_shutdown)
         self.root.protocol("WM_DELETE_WINDOW", self._request_shutdown)
 
@@ -292,7 +327,7 @@ class FloatingCounter:
         if not self._load_detection_modules():
             return templates
 
-        for name in ("1jipo.png", "2jipo.png", "xiaohao.png", "jiaoyi.png", "wancheng.png"):
+        for name in ("1jipo.png", "2jipo.png", "xiaohao.png", "jiaoyi.png", "wancheng.png", "manle.png"):
             image = self._cv2.imread(str(self.assets_dir / name), self._cv2.IMREAD_COLOR)
             if image is not None:
                 templates[name] = image
@@ -325,6 +360,247 @@ class FloatingCounter:
         for thread in (self.jipo_scan_thread, self.trade_scan_thread):
             if thread and thread.is_alive() and thread is not threading.current_thread():
                 thread.join(timeout=0.3)
+
+    def _start_quick_trade_hotkey_listener(self) -> None:
+        if sys.platform != "win32":
+            return
+
+        try:
+            user32 = ctypes.windll.user32
+            user32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
+            user32.GetAsyncKeyState.restype = ctypes.c_short
+        except Exception:
+            return
+
+        self.quick_trade_user32 = user32
+        self.quick_trade_mouse_user32 = user32
+        self._poll_quick_trade_hotkey()
+
+    def _poll_quick_trade_hotkey(self) -> None:
+        if self.is_closed or self.quick_trade_user32 is None:
+            return
+
+        try:
+            is_add_down = bool(self.quick_trade_user32.GetAsyncKeyState(_VK_NUMPAD_ADD) & 0x8000)
+            if is_add_down and not self.quick_trade_last_add_down:
+                self._toggle_quick_trade()
+            self.quick_trade_last_add_down = is_add_down
+            is_subtract_down = bool(self.quick_trade_user32.GetAsyncKeyState(_VK_NUMPAD_SUBTRACT) & 0x8000)
+            if is_subtract_down and not self.quick_trade_last_subtract_down:
+                self._run_quick_trade_test_step()
+            self.quick_trade_last_subtract_down = is_subtract_down
+            self.quick_trade_hotkey_after_id = self.root.after(50, self._poll_quick_trade_hotkey)
+        except Exception:
+            self.quick_trade_hotkey_after_id = None
+
+    def _cancel_quick_trade_hotkey_listener(self) -> None:
+        after_id = self.quick_trade_hotkey_after_id
+        self.quick_trade_hotkey_after_id = None
+        if after_id is None:
+            return
+        try:
+            self.root.after_cancel(after_id)
+        except Exception:
+            pass
+
+    def _is_quick_trade_running(self) -> bool:
+        return bool(self.quick_trade_thread and self.quick_trade_thread.is_alive())
+
+    def _is_quick_trade_test_running(self) -> bool:
+        return bool(self.quick_trade_test_thread and self.quick_trade_test_thread.is_alive())
+
+    def _toggle_quick_trade(self) -> None:
+        if self.is_closed:
+            return
+        if self._is_quick_trade_running():
+            self.quick_trade_cancel_event.set()
+            return
+        if not self._load_detection_modules():
+            return
+
+        self.quick_trade_cancel_event.clear()
+        self.quick_trade_thread = threading.Thread(target=self._quick_trade_loop, daemon=True)
+        self.quick_trade_thread.start()
+
+    def _run_quick_trade_test_step(self) -> None:
+        if self.is_closed or self._is_quick_trade_running() or self._is_quick_trade_test_running():
+            return
+        if not self.quick_trade_points:
+            return
+
+        self.quick_trade_cancel_event.clear()
+        self.quick_trade_test_thread = threading.Thread(target=self._quick_trade_test_step_loop, daemon=True)
+        self.quick_trade_test_thread.start()
+
+    def _quick_trade_test_step_loop(self) -> None:
+        try:
+            old_pause = getattr(self._pyautogui, "PAUSE", None) if self._load_detection_modules() else None
+            if old_pause is not None:
+                self._pyautogui.PAUSE = 0
+            index = self.quick_trade_test_index % len(self.quick_trade_points)
+            self._quick_trade_drag(self.quick_trade_points[index], index)
+            self.quick_trade_test_index = (index + 1) % len(self.quick_trade_points)
+        except Exception:
+            return
+        finally:
+            if self._pyautogui is not None and old_pause is not None:
+                try:
+                    self._pyautogui.PAUSE = old_pause
+                except Exception:
+                    pass
+
+    def _quick_trade_loop(self) -> None:
+        old_pause = getattr(self._pyautogui, "PAUSE", None)
+        try:
+            self._pyautogui.PAUSE = 0
+            for index, source_pos in enumerate(self.quick_trade_points):
+                if self._should_stop_quick_trade():
+                    return
+                if index >= self.quick_trade_check_after_drags and self._detect_quick_trade_full():
+                    self._finish_quick_trade_full()
+                    return
+                if self._should_stop_quick_trade():
+                    return
+                self._quick_trade_drag(source_pos, index)
+        except Exception:
+            return
+        finally:
+            if old_pause is not None:
+                try:
+                    self._pyautogui.PAUSE = old_pause
+                except Exception:
+                    pass
+
+    def _should_stop_quick_trade(self) -> bool:
+        return self.is_closed or self.stop_scan_event.is_set() or self.quick_trade_cancel_event.is_set()
+
+    def _detect_quick_trade_full(self) -> bool:
+        if self._should_stop_quick_trade():
+            return False
+        return self._detect_template_in_region(self.quick_trade_full_region, ("manle.png",)) == "manle.png"
+
+    def _quick_trade_drag(self, source_pos: tuple[int, int], index: int) -> None:
+        if self._should_stop_quick_trade():
+            return
+
+        target_x, target_y = self.quick_trade_target_pos
+        source_x, source_y = source_pos
+        source_settle_seconds = self.quick_trade_source_settle_seconds
+        hold_before_drag_seconds = self.quick_trade_hold_before_drag_seconds
+        if self.quick_trade_mouse_user32 is not None:
+            self._quick_trade_drag_with_win32(
+                source_x,
+                source_y,
+                target_x,
+                target_y,
+                source_settle_seconds,
+                hold_before_drag_seconds,
+            )
+            return
+
+        self._quick_trade_drag_with_pyautogui(
+            source_x,
+            source_y,
+            target_x,
+            target_y,
+            source_settle_seconds,
+            hold_before_drag_seconds,
+        )
+
+    def _quick_trade_drag_with_win32(
+        self,
+        source_x: int,
+        source_y: int,
+        target_x: int,
+        target_y: int,
+        source_settle_seconds: float,
+        hold_before_drag_seconds: float,
+    ) -> None:
+        user32 = self.quick_trade_mouse_user32
+        if user32 is None:
+            return
+
+        mid_x = (source_x + target_x) // 2
+        mid_y = (source_y + target_y) // 2
+        delay = max(0.005, self.quick_trade_drag_seconds / 3)
+        mouse_is_down = False
+        try:
+            user32.SetCursorPos(source_x, source_y)
+            self._wait_quick_trade_interval(source_settle_seconds)
+            if self._should_stop_quick_trade():
+                return
+            user32.mouse_event(_MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            mouse_is_down = True
+            self._wait_quick_trade_interval(hold_before_drag_seconds)
+            if self._should_stop_quick_trade():
+                return
+            time.sleep(delay)
+            user32.SetCursorPos(mid_x, mid_y)
+            time.sleep(delay)
+            user32.SetCursorPos(target_x, target_y)
+            time.sleep(delay)
+        finally:
+            if mouse_is_down:
+                try:
+                    user32.mouse_event(_MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                except Exception:
+                    pass
+
+    def _quick_trade_drag_with_pyautogui(
+        self,
+        source_x: int,
+        source_y: int,
+        target_x: int,
+        target_y: int,
+        source_settle_seconds: float,
+        hold_before_drag_seconds: float,
+    ) -> None:
+        if not self._load_detection_modules():
+            return
+
+        mouse_is_down = False
+        try:
+            self._pyautogui.moveTo(source_x, source_y, duration=0)
+            self._wait_quick_trade_interval(source_settle_seconds)
+            if self._should_stop_quick_trade():
+                return
+            self._pyautogui.mouseDown(button="left")
+            mouse_is_down = True
+            self._wait_quick_trade_interval(hold_before_drag_seconds)
+            if self._should_stop_quick_trade():
+                return
+            self._pyautogui.moveTo(target_x, target_y, duration=self.quick_trade_drag_seconds)
+        finally:
+            if mouse_is_down:
+                try:
+                    self._pyautogui.mouseUp(button="left")
+                except Exception:
+                    pass
+
+    def _finish_quick_trade_full(self) -> None:
+        if not self._load_detection_modules():
+            return
+
+        click_x, click_y = self.quick_trade_complete_pos
+        for click_index in range(2):
+            if self._should_stop_quick_trade():
+                return
+            self._pyautogui.click(click_x, click_y)
+            if click_index == 0:
+                self._wait_quick_trade_interval(self.quick_trade_complete_click_interval_seconds)
+
+    def _wait_quick_trade_interval(self, seconds: float) -> None:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if self._should_stop_quick_trade():
+                return
+            time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+
+    def _stop_quick_trade(self) -> None:
+        self.quick_trade_cancel_event.set()
+        for thread in (self.quick_trade_thread, self.quick_trade_test_thread):
+            if thread and thread.is_alive() and thread is not threading.current_thread():
+                thread.join(timeout=0.5)
 
     def _jipo_scan_loop(self) -> None:
         while not self.stop_scan_event.is_set():
@@ -475,6 +751,8 @@ class FloatingCounter:
         if self.is_closed:
             return
         self.is_closed = True
+        self._cancel_quick_trade_hotkey_listener()
+        self._stop_quick_trade()
         self._stop_auto_scans()
         self._wait_scan_threads_stopped()
         try:
