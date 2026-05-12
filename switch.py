@@ -1369,15 +1369,69 @@ def detect_current_execution_slot_from_launcher(camera):
     return None
 
 
+def _find_exit_confirm_center(camera):
+    """查找退出确认按钮中心，优先原区域，再用宽区域兜底。"""
+    regions = [config.RGN_F4]
+    wide_region = getattr(config, "RGN_F4_WIDE", None)
+    if wide_region is not None and wide_region not in regions:
+        regions.append(wide_region)
+
+    for region in regions:
+        center = _match_center(
+            camera,
+            "f4",
+            region,
+            threshold=config.SWITCH_UI_MATCH_THRESHOLD,
+        )
+        if center is not None:
+            return center, region
+    return None, None
+
+
 def _step01_exit(camera):
     """步骤1：ALT+F4 并确认退出。"""
     update_overlay_mini("换号中：退出游戏")
     print("[切换流程] 正在尝试退出游戏。")
     pyautogui.hotkey("alt", "F4")
-    time.sleep(1)
-    fast_click((1050, 686))
-    time.sleep(2)
-    return True
+    time.sleep(0.5)
+
+    retry_count = int(getattr(config, "SWITCH_EXIT_CONFIRM_RETRY_COUNT", 3))
+    retry_interval = float(getattr(config, "SWITCH_EXIT_CONFIRM_RETRY_INTERVAL_SECONDS", 0.5))
+    launcher_verify_timeout = float(getattr(config, "SWITCH_EXIT_LAUNCHER_VERIFY_TIMEOUT_SECONDS", 2.0))
+
+    for attempt_index in range(1, retry_count + 1):
+        confirm_center, confirm_region = _find_exit_confirm_center(camera)
+        if confirm_center is not None:
+            logger.info(
+                "[切换流程] 第 %s 次识别退出确认按钮，区域=%s，点击中心：%s。",
+                attempt_index,
+                confirm_region,
+                confirm_center,
+            )
+            fast_click(confirm_center)
+        else:
+            logger.warning(
+                "[切换流程] 第 %s 次未识别退出确认按钮，沿用固定坐标兜底点击。",
+                attempt_index,
+            )
+            fast_click((1050, 686))
+
+        safe_sleep(retry_interval)
+        if _wait_for_launcher_ready_nonblocking(camera, launcher_verify_timeout):
+            logger.info("[切换流程] 退出游戏后已确认回到启动页。")
+            return True
+
+        confirm_center, _confirm_region = _find_exit_confirm_center(camera)
+        if confirm_center is None:
+            logger.info("[切换流程] 退出确认弹窗已消失，继续等待启动页。")
+            if _wait_for_launcher_ready_nonblocking(camera, launcher_verify_timeout):
+                logger.info("[切换流程] 弹窗消失后已确认回到启动页。")
+                return True
+        else:
+            logger.warning("[切换流程] 退出确认弹窗仍存在，准备重试确认点击。")
+
+    logger.error("[切换流程] 退出确认弹窗重试后仍未完成退出。")
+    return False
 
 
 def _step02_server_list(camera, suppress_failure_output=False):

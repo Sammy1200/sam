@@ -508,6 +508,7 @@ def _build_account_list_rows(rows, edit_meta=None, edit_result=None):
                 status_cell,
                 balance_cell,
                 _format_value(row.get("allow_purchase")),
+                _format_value(row.get("runtime_window_remaining_text")),
                 _format_cooldown_remaining_time(row.get("cooldown_remaining_seconds")),
                 detail_cell,
                 action_cell,
@@ -1686,7 +1687,7 @@ def render_index_page(view_rows_result, runtime_result, edit_result=None):
 <div class="section">
   <h2>账号列表</h2>
   {demo_notice_html}
-  {_render_table(("执行位", "昵称", "当前道具数量", "基数增减", "账号状态", "余额（万）", "允许抢购", "冷却剩余时间", "详情", "保存"), row_items)}
+  {_render_table(("执行位", "昵称", "当前道具数量", "基数增减", "账号状态", "余额（万）", "允许抢购", "可运行时间", "冷却剩余时间", "详情", "保存"), row_items)}
 </div>
 
 <div class="section">
@@ -1761,6 +1762,8 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None):
         ("当前道具数量（推算）", record.get("item_quantity")),
         ("允许开始时间", record.get("allow_start_time")),
         ("当前可抢购", record.get("allow_purchase")),
+        ("可运行时间", record.get("runtime_window_remaining_text")),
+        ("已运行时间", record.get("runtime_window_used_text")),
         ("冷却剩余时间", _format_cooldown_remaining_time(record.get("cooldown_remaining_seconds"))),
     ]
 

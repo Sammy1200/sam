@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from account_view_repo import (
@@ -12,7 +13,13 @@ from account_view_repo import (
     update_account_view_record,
 )
 from account_db import normalize_account_db_mode
-from config import WEB_VIEW_HOST, WEB_VIEW_PORT
+from config import (
+    WEB_VIEW_HOST,
+    WEB_VIEW_PORT,
+    WEB_VIEW_PORT_FALLBACK_END,
+    WEB_VIEW_PORT_FALLBACK_START,
+    WEB_VIEW_SERVER_PORT_FILE,
+)
 from machine_sync_config import resolve_web_bind_host
 from remote_sync import (
     get_remote_machine_sections,
@@ -30,6 +37,32 @@ from web_view_templates_inventory import (
 
 
 PORT = WEB_VIEW_PORT
+
+
+def _iter_web_view_candidate_ports(preferred_port):
+    ports = []
+
+    def add_port(value):
+        try:
+            port = int(value)
+        except (TypeError, ValueError):
+            return
+        if 1 <= port <= 65535 and port not in ports:
+            ports.append(port)
+
+    add_port(preferred_port)
+    for fallback_port in range(WEB_VIEW_PORT_FALLBACK_START, WEB_VIEW_PORT_FALLBACK_END + 1):
+        add_port(fallback_port)
+    return ports
+
+
+def _write_web_view_bound_port(port):
+    try:
+        os.makedirs(os.path.dirname(WEB_VIEW_SERVER_PORT_FILE), exist_ok=True)
+        with open(WEB_VIEW_SERVER_PORT_FILE, "w", encoding="utf-8") as file:
+            file.write(str(int(port)))
+    except Exception:
+        pass
 
 
 class ReadOnlyViewHandler(BaseHTTPRequestHandler):
@@ -506,15 +539,34 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
 
 def run_server(host=None, port=PORT):
     bind_host = host or resolve_web_bind_host() or WEB_VIEW_HOST
-    try:
-        server = ThreadingHTTPServer((bind_host, port), ReadOnlyViewHandler)
-    except OSError as exc:
-        if bind_host == WEB_VIEW_HOST:
-            raise
-        print(f"[网页查看页] 绑定 {bind_host}:{port} 失败：{exc}，回退到 {WEB_VIEW_HOST}:{port}")
-        server = ThreadingHTTPServer((WEB_VIEW_HOST, port), ReadOnlyViewHandler)
-        bind_host = WEB_VIEW_HOST
-    print(f"[网页查看页] 服务已启动：bind={bind_host} local=http://127.0.0.1:{port}")
+    server = None
+    actual_host = bind_host
+    actual_port = port
+    last_error = None
+
+    for candidate_port in _iter_web_view_candidate_ports(port):
+        candidate_hosts = [bind_host]
+        if bind_host != WEB_VIEW_HOST:
+            candidate_hosts.append(WEB_VIEW_HOST)
+        for candidate_host in candidate_hosts:
+            try:
+                server = ThreadingHTTPServer((candidate_host, candidate_port), ReadOnlyViewHandler)
+                actual_host = candidate_host
+                actual_port = candidate_port
+                break
+            except OSError as exc:
+                last_error = exc
+                print(f"[网页查看页] 绑定 {candidate_host}:{candidate_port} 失败：{exc}")
+        if server is not None:
+            break
+
+    if server is None:
+        if last_error is not None:
+            raise last_error
+        raise OSError("网页服务没有可用端口")
+
+    _write_web_view_bound_port(actual_port)
+    print(f"[网页查看页] 服务已启动：bind={actual_host} local=http://127.0.0.1:{actual_port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

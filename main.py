@@ -1189,6 +1189,9 @@ def _is_web_view_service_response_valid(body_text):
     markers = (
         "账号数据查看页",
         "账号详情页",
+        "<title>首页</title>",
+        "石头库",
+        "饰品库",
         "页面不存在。",
         "页面渲染失败",
         "提交处理失败",
@@ -1196,9 +1199,36 @@ def _is_web_view_service_response_valid(body_text):
     return any(marker in body_text for marker in markers)
 
 
-def _probe_web_view_service(timeout=0.5):
+def _get_web_view_candidate_ports():
+    ports = []
+
+    def add_port(value):
+        try:
+            port = int(value)
+        except (TypeError, ValueError):
+            return
+        if 1 <= port <= 65535 and port not in ports:
+            ports.append(port)
+
+    add_port(config.WEB_VIEW_PORT)
+    try:
+        with open(config.WEB_VIEW_SERVER_PORT_FILE, "r", encoding="utf-8") as file:
+            add_port(file.read().strip())
+    except Exception:
+        pass
+    for fallback_port in range(config.WEB_VIEW_PORT_FALLBACK_START, config.WEB_VIEW_PORT_FALLBACK_END + 1):
+        add_port(fallback_port)
+    return ports
+
+
+def _build_web_view_service_url(port):
+    return f"http://{config.WEB_VIEW_HOST}:{int(port)}"
+
+
+def _probe_web_view_service(timeout=0.5, port=None):
+    probe_port = int(port or config.WEB_VIEW_PORT)
     request = urllib_request.Request(
-        f"{config.WEB_VIEW_SERVER_URL}/",
+        f"{_build_web_view_service_url(probe_port)}/",
         headers={"User-Agent": "codex-main-web-check"},
     )
     try:
@@ -1207,14 +1237,25 @@ def _probe_web_view_service(timeout=0.5):
     except urllib_error.HTTPError as exc:
         body_text = exc.read().decode("utf-8", errors="ignore")
         if _is_web_view_service_response_valid(body_text):
-            return True, f"网页服务已可访问，HTTP {exc.code}"
-        return False, f"{config.WEB_VIEW_PORT} 已有其他 HTTP 服务响应，HTTP {exc.code}"
+            return True, f"网页服务已可访问，端口={probe_port}，HTTP {exc.code}"
+        return False, f"{probe_port} 已有其他 HTTP 服务响应，HTTP {exc.code}"
     except Exception as exc:
-        return False, f"网页服务不可访问：{exc}"
+        return False, f"{probe_port} 网页服务不可访问：{exc}"
 
     if _is_web_view_service_response_valid(body_text):
-        return True, "网页服务已可访问"
-    return False, f"{config.WEB_VIEW_PORT} 已有其他 HTTP 服务响应"
+        return True, f"网页服务已可访问，端口={probe_port}"
+    return False, f"{probe_port} 已有其他 HTTP 服务响应"
+
+
+def _probe_web_view_service_candidates(timeout=0.5):
+    first_reason = None
+    for port in _get_web_view_candidate_ports():
+        is_running, reason = _probe_web_view_service(timeout=timeout, port=port)
+        if is_running:
+            return True, reason
+        if first_reason is None:
+            first_reason = reason
+    return False, first_reason or "网页服务不可访问"
 
 
 def _read_text_tail(path, max_chars=1000):
@@ -1286,15 +1327,11 @@ def _start_web_view_server_in_background():
             print(message)
             logger.error(message)
             return False
-        is_running, reason = _probe_web_view_service(timeout=0.3)
+        is_running, reason = _probe_web_view_service_candidates(timeout=0.3)
         if is_running:
             logger.info("[网页服务] 后台静默启动完成：%s", reason)
             print(f"[网页服务] 后台静默启动完成：{reason}")
             return True
-        if "其他 HTTP 服务" in reason:
-            logger.warning("[网页服务] %s 端口冲突：%s", config.WEB_VIEW_PORT, reason)
-            print(f"[网页服务] {config.WEB_VIEW_PORT} 端口冲突：{reason}")
-            return False
 
     message = "[网页服务] 已尝试后台静默启动，但暂未确认可访问，主程序继续运行。"
     print(message)
@@ -1303,19 +1340,19 @@ def _start_web_view_server_in_background():
 
 
 def ensure_web_view_server_ready():
-    is_running, reason = _probe_web_view_service(timeout=0.4)
+    is_running, reason = _probe_web_view_service_candidates(timeout=0.4)
     if is_running:
         logger.info("[网页服务] 跳过启动：%s", reason)
         print(f"[网页服务] 跳过启动：{reason}")
         return True
 
     if "其他 HTTP 服务" in reason:
-        logger.warning("[网页服务] 跳过启动：%s", reason)
-        print(f"[网页服务] 跳过启动：{reason}")
-        return False
+        logger.warning("[网页服务] 默认端口疑似被占用，准备尝试备用端口：%s", reason)
+        print(f"[网页服务] 默认端口疑似被占用，准备尝试备用端口：{reason}")
+    else:
+        logger.info("[网页服务] 检查未通过，准备后台静默启动：%s", reason)
+        print(f"[网页服务] 检查未通过，准备后台静默启动：{reason}")
 
-    logger.info("[网页服务] 检查未通过，准备后台静默启动：%s", reason)
-    print(f"[网页服务] 检查未通过，准备后台静默启动：{reason}")
     return _start_web_view_server_in_background()
 
 

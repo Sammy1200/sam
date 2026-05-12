@@ -1,4 +1,5 @@
 """饰品抢购模式的独立循环，不接普通价格判断和上架链路。"""
+import re
 import time
 from datetime import datetime
 
@@ -20,6 +21,7 @@ from config import (
     ACCESSORY_EXIT_FIRST_CHECK_SECONDS,
     ACCESSORY_EXIT_RETRY_INTERVAL_SECONDS,
     ACCESSORY_EXIT_TO_NEXT_PAGE_SECONDS,
+    ACCESSORY_ITEM_CLICK_VERIFY_DELAY_SECONDS,
     ACCESSORY_ITEM_ENTER_RETRY_COUNT,
     ACCESSORY_ITEM_ENTER_RETRY_INTERVAL_SECONDS,
     ACCESSORY_ITEM_POSITIONS,
@@ -60,7 +62,7 @@ from utils import (
     safe_get_frame,
     safe_imread,
 )
-from vision import is_image_present
+from vision import get_balance_recognition, is_image_present
 
 
 _ACCESSORY_TRADE_PAGE_TEMPLATE = None
@@ -280,9 +282,8 @@ def _exit_and_open_next_accessory_item_page(camera, cycle_started_at=None):
     click_exit()
 
     if cycle_started_at is None:
-        deadline = time.perf_counter() + ACCESSORY_EXIT_TO_NEXT_PAGE_SECONDS
-    else:
-        deadline = float(cycle_started_at) + ACCESSORY_EXIT_TO_NEXT_PAGE_SECONDS
+        cycle_started_at = time.perf_counter()
+    deadline = float(cycle_started_at) + ACCESSORY_EXIT_TO_NEXT_PAGE_SECONDS
 
     first_wait = max(0.0, min(ACCESSORY_EXIT_FIRST_CHECK_SECONDS, deadline - time.perf_counter()))
     if first_wait > 0:
@@ -294,6 +295,9 @@ def _exit_and_open_next_accessory_item_page(camera, cycle_started_at=None):
         frame = safe_get_frame(camera)
         if _is_accessory_trade_frame(frame):
             returned_to_trade = True
+            remaining = deadline - time.perf_counter()
+            if remaining > 0:
+                precise_sleep(remaining)
             break
         if esc_retry_count < ACCESSORY_RETURN_ESC_RETRY_COUNT:
             click_exit()
@@ -322,6 +326,92 @@ def _wait_accessory_next_item_click_deadline():
     state.accessory_next_item_click_not_before = None
 
 
+def _parse_accessory_balance_text_to_value(balance_text):
+    try:
+        text = str(balance_text or "").strip()
+        if not text:
+            return None
+        match = re.search(r"[\d\.]+", text)
+        if not match:
+            return None
+        number = float(match.group())
+        if "亿" in text:
+            return int(round(number * 100000000))
+        if "万" in text:
+            return int(round(number * 10000))
+        return int(number)
+    except:
+        return None
+
+
+def _update_accessory_balance_state_from_recognition(recognition):
+    recognized_balance_text = str(recognition.get("text") or "").strip()
+    recognized_balance_confirmed = bool(recognition.get("confirmed")) and bool(recognized_balance_text)
+
+    previous_confirmed_balance_text = str(state.last_valid_balance or "").strip()
+    previous_confirmed_balance_value = _parse_accessory_balance_text_to_value(previous_confirmed_balance_text)
+    recognized_balance_value = _parse_accessory_balance_text_to_value(recognized_balance_text)
+
+    effective_balance_text = previous_confirmed_balance_text
+    effective_balance_value = previous_confirmed_balance_value
+    balance_display_mode = "沿" if previous_confirmed_balance_text else ""
+
+    if recognized_balance_confirmed:
+        effective_balance_text = recognized_balance_text
+        effective_balance_value = recognized_balance_value
+        balance_display_mode = "新"
+        if effective_balance_value is not None:
+            state.last_valid_balance = effective_balance_text
+    elif previous_confirmed_balance_text:
+        effective_balance_text = previous_confirmed_balance_text
+        effective_balance_value = previous_confirmed_balance_value
+        balance_display_mode = "沿"
+    else:
+        effective_balance_text = str(state.current_balance or "").strip()
+        effective_balance_value = None
+        balance_display_mode = "待确认"
+
+    state.balance_display_mode = balance_display_mode
+    if effective_balance_text:
+        state.current_balance = effective_balance_text
+        state.round_current_balance = effective_balance_text
+    elif balance_display_mode == "待确认":
+        state.round_current_balance = ""
+    if state.overlay_root:
+        state.overlay_root.after(0, update_score_text)
+    return {
+        "effective_text": effective_balance_text,
+        "effective_value": effective_balance_value,
+    }
+
+
+def _recognize_accessory_balance_from_frame(frame):
+    recognition = get_balance_recognition(frame) if frame is not None else {}
+    return _update_accessory_balance_state_from_recognition(recognition)
+
+
+def _run_if_before_accessory_deadline(deadline, callback, *args):
+    if time.perf_counter() >= float(deadline):
+        return None
+    return callback(*args)
+
+
+def _sync_initial_accessory_balance(frame):
+    balance_info = _recognize_accessory_balance_from_frame(frame)
+    if str(getattr(state, "balance_display_mode", "") or "").strip() != "新":
+        logger.info("[饰品抢购] 首次进入饰品交易行金币未确认，跳过首次金币入库。")
+        return False
+
+    balance_text = str(balance_info.get("effective_text") or "").strip()
+    if not balance_text or balance_info.get("effective_value") is None:
+        logger.info("[饰品抢购] 首次进入饰品交易行金币无有效数值，跳过首次金币入库。")
+        return False
+
+    result = persist_minimal_item_balance_sync()
+    logger.info("[饰品抢购] 首次进入饰品交易行金币已入库：%s，结果=%s。", balance_text, getattr(result, "status", result))
+    return True
+
+
 def _click_accessory_buy_color(color_point):
     click_pos = (
         int(color_point[0]) + int(ACCESSORY_BUY_COLOR_CLICK_OFFSET[0]),
@@ -332,16 +422,17 @@ def _click_accessory_buy_color(color_point):
         fast_click(click_pos)
         precise_sleep(ACCESSORY_COLOR_CLICK_INTERVAL_SECONDS)
 
-    buy_click_end = time.perf_counter() + 0.02
-    while time.perf_counter() < buy_click_end:
+def _click_purchase_buttons():
+    buy_click_end_time = time.perf_counter() + 0.012
+    while time.perf_counter() < buy_click_end_time:
         fast_click(BUY_POS)
         precise_sleep(0.002)
     precise_sleep(CONFIRM_DELAY)
 
-    confirm_click_end = time.perf_counter() + 0.02
-    while time.perf_counter() < confirm_click_end:
+    confirm_click_end_time = time.perf_counter() + 0.05
+    while time.perf_counter() < confirm_click_end_time:
         fast_click(CONFIRM_POS)
-        precise_sleep(0.002)
+        precise_sleep(0.005)
 
 
 def _handle_accessory_purchase_result(camera, temp_success):
@@ -349,12 +440,12 @@ def _handle_accessory_purchase_result(camera, temp_success):
     time.sleep(0.6)
     frame_after = safe_get_frame(camera)
     result_checked_at = time.perf_counter()
-    if frame_after is not None and is_image_present(frame_after, MONITOR_SUCCESS, temp_success):
+    next_click_deadline = result_checked_at + ACCESSORY_EXIT_TO_NEXT_PAGE_SECONDS
+    purchase_succeeded = frame_after is not None and is_image_present(frame_after, MONITOR_SUCCESS, temp_success)
+    if purchase_succeeded:
         state.success_count += 1
         state.round_purchase_success_count += 1
         state.baseline_item_count += 1
-        record_daily_purchase_success()
-        persist_minimal_item_balance_sync()
         if state.overlay_root:
             state.overlay_root.after(0, update_score_text)
         ui_print("饰品抢购成功", save_log=True, show_console=False)
@@ -365,20 +456,33 @@ def _handle_accessory_purchase_result(camera, temp_success):
     else:
         state.fail_count += 1
         state.round_purchase_fail_count += 1
-        record_daily_purchase_fail()
         if state.overlay_root:
             state.overlay_root.after(0, update_score_text)
         ui_print("饰品抢购失败", save_log=True, show_console=False)
         click_exit()
 
     if not _recover_accessory_trade_page(camera):
+        _run_if_before_accessory_deadline(next_click_deadline, _recognize_accessory_balance_from_frame, frame_after)
+        if purchase_succeeded:
+            _run_if_before_accessory_deadline(next_click_deadline, record_daily_purchase_success)
+            _run_if_before_accessory_deadline(next_click_deadline, persist_minimal_item_balance_sync)
+        else:
+            _run_if_before_accessory_deadline(next_click_deadline, record_daily_purchase_fail)
         ui_print("饰品重进场", save_log=True)
         logger.warning("[饰品抢购] 坐标 %s 购买后未确认返回饰品交易行，尝试异常恢复。", item_number)
         return _recover_accessory_exception(camera, "饰品购买后返回失败")
 
+    trade_frame = safe_get_frame(camera)
+    _run_if_before_accessory_deadline(next_click_deadline, _recognize_accessory_balance_from_frame, trade_frame)
+    if purchase_succeeded:
+        _run_if_before_accessory_deadline(next_click_deadline, record_daily_purchase_success)
+        _run_if_before_accessory_deadline(next_click_deadline, persist_minimal_item_balance_sync)
+    else:
+        _run_if_before_accessory_deadline(next_click_deadline, record_daily_purchase_fail)
+
     _advance_accessory_item_index()
     state.accessory_skip_trade_ready_wait_once = True
-    state.accessory_next_item_click_not_before = result_checked_at + ACCESSORY_EXIT_TO_NEXT_PAGE_SECONDS
+    state.accessory_next_item_click_not_before = next_click_deadline
     return True
 
 
@@ -443,6 +547,7 @@ def run_accessory_purchase_loop(camera, temp_success):
 
     last_frame = None
     last_frame_time = time.time()
+    initial_balance_synced = False
 
     try:
         while True:
@@ -487,8 +592,15 @@ def run_accessory_purchase_loop(camera, temp_success):
                 state.accessory_skip_trade_ready_wait_once = False
                 if not skip_ready_wait:
                     precise_sleep(ACCESSORY_TRADE_READY_CONFIRM_DELAY_SECONDS)
+                if not initial_balance_synced:
+                    _sync_initial_accessory_balance(safe_get_frame(camera))
+                    initial_balance_synced = True
                 _wait_accessory_next_item_click_deadline()
-                _open_next_accessory_item_page(camera)
+                if not _open_next_accessory_item_page(camera):
+                    if state.need_switch_server:
+                        return
+                    continue
+                time.sleep(0.05)
                 continue
 
             if not _is_accessory_purchase_frame(frame):
@@ -511,6 +623,7 @@ def run_accessory_purchase_loop(camera, temp_success):
                 continue
 
             _click_accessory_buy_color(color_point)
+            _click_purchase_buttons()
             if not _handle_accessory_purchase_result(camera, temp_success):
                 return
     except Exception as exc:

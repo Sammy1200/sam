@@ -32,6 +32,7 @@ from utils import (
 DEFAULT_OVERLAY_STATUS_TEXT = "状态待更新"
 F12_VK = 0x7B
 F9_VK = 0x78
+ACCESSORY_OVERLAY_NORMAL_GEOMETRY = "+20+100"
 OVERLAY_SCORE_PANEL_BG = "#15110d"
 OVERLAY_SCORE_MAIN_BG = "#15110d"
 OVERLAY_SCORE_MAIN_BORDER = "#19130f"
@@ -86,6 +87,12 @@ def fit_overlay_to_content(position_override=None):
         root.geometry(f"{root.winfo_reqwidth()}x{root.winfo_reqheight()}{position}")
     except Exception:
         pass
+
+
+def _get_normal_overlay_position():
+    if getattr(state, "accessory_purchase_mode", False):
+        return ACCESSORY_OVERLAY_NORMAL_GEOMETRY
+    return OVERLAY_NORMAL_GEOMETRY
 
 
 def _format_duration(seconds):
@@ -496,11 +503,12 @@ def create_overlay():
     root = state.overlay_root
     root.overrideredirect(True)
     root.attributes("-topmost", True)
-    root.geometry(OVERLAY_NORMAL_GEOMETRY)
+    normal_position = _get_normal_overlay_position()
+    root.geometry(normal_position)
     root.attributes("-alpha", OVERLAY_NORMAL_ALPHA)
     root.config(bg=OVERLAY_SCORE_PANEL_BG)
     root._overlay_is_mini = False
-    root._overlay_normal_position = OVERLAY_NORMAL_GEOMETRY
+    root._overlay_normal_position = normal_position
     state.log_lines = []
     state.overlay_last_log_replaceable = False
 
