@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from functools import lru_cache
 import itertools
 import json
 import re
@@ -15,11 +16,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import state
 import vision
 
 
 SAMPLE_NAME_RE = re.compile(r"^(?P<answer>.+?)_(?P<index>\d+)_(?P<kind>roi|full)\.png$", re.IGNORECASE)
 PLAIN_SAMPLE_NAME_RE = re.compile(r"^(?P<answer>.+?)\.png$", re.IGNORECASE)
+ANSWER_TOKEN_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?(?:万|亿)?)")
+TRUE_ANSWER_RE = re.compile(r"真实\s*[-:：=]?\s*(?P<value>\d+(?:\.\d+)?(?:万|亿)?)")
 
 
 @dataclass
@@ -32,6 +36,18 @@ class BalanceSample:
 
 def _strip_unit(answer: str) -> str:
     return re.sub(r"[万亿]$", "", answer)
+
+
+def _extract_answer(raw_answer: str) -> str | None:
+    text = raw_answer.strip()
+    true_match = TRUE_ANSWER_RE.search(text)
+    if true_match:
+        return true_match.group("value")
+
+    tokens = [match.group("value") for match in ANSWER_TOKEN_RE.finditer(text)]
+    if tokens:
+        return tokens[-1]
+    return None
 
 
 def _categorize_answer(answer: str) -> str:
@@ -64,6 +80,10 @@ def load_balance_samples(sample_dir: Path) -> list[BalanceSample]:
             if answer.lower().endswith(("_roi", "_full")):
                 continue
 
+        answer = _extract_answer(answer)
+        if not answer:
+            continue
+
         if kind not in ("roi", "full"):
             continue
         key = (_strip_unit(answer), index)
@@ -90,23 +110,38 @@ def load_balance_samples(sample_dir: Path) -> list[BalanceSample]:
     return samples
 
 
-def read_image(path: Path):
-    return cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+@lru_cache(maxsize=None)
+def read_image(path: str):
+    return cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
 
 
-def recognize_sample(sample: BalanceSample, params=None) -> str | None:
-    image = read_image(sample.path)
+def _resolve_mode(mode: str, sample_dir: Path) -> str:
+    if mode != "auto":
+        return mode
+    name = sample_dir.name.lower()
+    if "jinbi" in name or "accessory" in name:
+        return "accessory"
+    return "stone"
+
+
+def recognize_sample(sample: BalanceSample, params=None, mode: str = "stone") -> str | None:
+    image = read_image(str(sample.path))
     if image is None:
         return None
-    if sample.source_kind == "full":
-        return vision.recognize_balance_image(image, roi_already_cropped=False, params=params)
-    return vision.recognize_balance_image(image, roi_already_cropped=True, params=params)
+    previous_mode = bool(getattr(state, "accessory_purchase_mode", False))
+    state.accessory_purchase_mode = mode == "accessory"
+    try:
+        if sample.source_kind == "full":
+            return vision.recognize_balance_image(image, roi_already_cropped=False, params=params)
+        return vision.recognize_balance_image(image, roi_already_cropped=True, params=params)
+    finally:
+        state.accessory_purchase_mode = previous_mode
 
 
-def evaluate_samples(samples: list[BalanceSample], params=None):
+def evaluate_samples(samples: list[BalanceSample], params=None, mode: str = "stone"):
     rows = []
     for sample in samples:
-        result = recognize_sample(sample, params=params)
+        result = recognize_sample(sample, params=params, mode=mode)
         rows.append(
             {
                 "answer": sample.answer,
@@ -155,8 +190,47 @@ def rank_results(rows):
     )
 
 
-def search_best_params(samples: list[BalanceSample]):
+def _is_full_score(rows) -> bool:
+    summary = summarize_results(rows)
+    return bool(summary["total"]) and summary["correct"] == summary["total"]
+
+
+def _search_grid(samples: list[BalanceSample], base_params, grid, mode: str, best_candidate, tested_count: int):
+    for values in itertools.product(*grid.values()):
+        params = base_params.copy()
+        params.update(dict(zip(grid.keys(), values)))
+        rows = evaluate_samples(samples, params=params, mode=mode)
+        tested_count += 1
+        candidate = (rank_results(rows), params, rows)
+        if candidate[0] > best_candidate[0]:
+            best_candidate = candidate
+    return best_candidate, tested_count
+
+
+def search_best_params(samples: list[BalanceSample], mode: str = "stone"):
     defaults = vision._get_balance_params()
+    default_rows = evaluate_samples(samples, params=defaults, mode=mode)
+    best_candidate = (rank_results(default_rows), defaults, default_rows)
+    tested_count = 1
+
+    cleanup_grid = {
+        "leading_icon_min_gap": [6, 8, 10],
+        "leading_icon_max_cluster_width": [32, 24, 40],
+        "leading_icon_max_amount_start_x": [75, 60, 90, 45],
+        "trailing_noise_min_gap": [20, 16, 24, 12],
+        "trailing_noise_max_cluster_width": [16, 12, 20],
+    }
+    best_candidate, tested_count = _search_grid(
+        samples,
+        defaults,
+        cleanup_grid,
+        mode,
+        best_candidate,
+        tested_count,
+    )
+
+    if _is_full_score(best_candidate[2]):
+        return best_candidate[1], best_candidate[2], {"tested_count": tested_count}
 
     stage_one_grid = {
         "binary_blur_size": [0, 3, 5],
@@ -166,14 +240,17 @@ def search_best_params(samples: list[BalanceSample]):
         "segment_max_group_size": [2, 3],
     }
 
-    best_stage_one = None
-    for values in itertools.product(*stage_one_grid.values()):
-        params = defaults.copy()
-        params.update(dict(zip(stage_one_grid.keys(), values)))
-        rows = evaluate_samples(samples, params=params)
-        candidate = (rank_results(rows), params, rows)
-        if best_stage_one is None or candidate[0] > best_stage_one[0]:
-            best_stage_one = candidate
+    best_candidate, tested_count = _search_grid(
+        samples,
+        best_candidate[1],
+        stage_one_grid,
+        mode,
+        best_candidate,
+        tested_count,
+    )
+
+    if _is_full_score(best_candidate[2]):
+        return best_candidate[1], best_candidate[2], {"tested_count": tested_count}
 
     stage_two_grid = {
         "digit_threshold": [0.40, 0.45, 0.50],
@@ -187,17 +264,16 @@ def search_best_params(samples: list[BalanceSample]):
         "unit_min_width": [10, 12, 14],
     }
 
-    best_stage_two = None
-    base_params = best_stage_one[1]
-    for values in itertools.product(*stage_two_grid.values()):
-        params = base_params.copy()
-        params.update(dict(zip(stage_two_grid.keys(), values)))
-        rows = evaluate_samples(samples, params=params)
-        candidate = (rank_results(rows), params, rows)
-        if best_stage_two is None or candidate[0] > best_stage_two[0]:
-            best_stage_two = candidate
+    best_candidate, tested_count = _search_grid(
+        samples,
+        best_candidate[1],
+        stage_two_grid,
+        mode,
+        best_candidate,
+        tested_count,
+    )
 
-    return best_stage_two[1], best_stage_two[2]
+    return best_candidate[1], best_candidate[2], {"tested_count": tested_count}
 
 
 def print_rows(rows):
@@ -227,20 +303,28 @@ def main():
         action="store_true",
         help="执行批量扫参并输出最优参数",
     )
+    parser.add_argument(
+        "--mode",
+        choices=("auto", "stone", "accessory"),
+        default="auto",
+        help="余额区域模式：auto 会把 samples/jinbi 自动按饰品金币区域评测。",
+    )
     args = parser.parse_args()
 
     sample_dir = Path(args.samples)
+    mode = _resolve_mode(args.mode, sample_dir)
     samples = load_balance_samples(sample_dir)
-    print(json.dumps({"sample_count": len(samples)}, ensure_ascii=False))
+    print(json.dumps({"mode": mode, "sample_count": len(samples)}, ensure_ascii=False))
 
     if args.search:
-        best_params, best_rows = search_best_params(samples)
+        best_params, best_rows, search_stats = search_best_params(samples, mode=mode)
+        print(json.dumps({"search_stats": search_stats}, ensure_ascii=False, sort_keys=True))
         print(json.dumps({"best_params": best_params}, ensure_ascii=False, sort_keys=True))
         print_rows(best_rows)
         print(json.dumps({"summary": summarize_results(best_rows)}, ensure_ascii=False))
         return
 
-    rows = evaluate_samples(samples)
+    rows = evaluate_samples(samples, mode=mode)
     print_rows(rows)
     print(json.dumps({"summary": summarize_results(rows)}, ensure_ascii=False))
 

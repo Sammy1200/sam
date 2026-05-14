@@ -17,6 +17,9 @@ from config import (
     BALANCE_SEGMENT_MERGE_GAP, BALANCE_SEGMENT_MAX_GROUP_SIZE,
     BALANCE_DOT_MAX_WIDTH, BALANCE_DOT_MAX_HEIGHT, BALANCE_DOT_MAX_AREA,
     BALANCE_DOT_BASELINE_OFFSET_RATIO, BALANCE_DOT_MAX_NEIGHBOR_GAP, BALANCE_UNIT_MIN_WIDTH,
+    BALANCE_LEADING_ICON_MIN_GAP, BALANCE_LEADING_ICON_MAX_CLUSTER_WIDTH,
+    BALANCE_LEADING_ICON_MAX_AMOUNT_START_X, BALANCE_TRAILING_NOISE_MIN_GAP,
+    BALANCE_TRAILING_NOISE_MAX_CLUSTER_WIDTH,
     LISTING_TIMER_REGION,
     LISTING_TIMER_UPSCALE, LISTING_TIMER_BLUR_SIZE, LISTING_TIMER_THRESHOLD_SHIFT,
     LISTING_TIMER_CLOSE_KERNEL_SIZE, LISTING_TIMER_MIN_COMPONENT_AREA,
@@ -500,10 +503,15 @@ def _get_balance_params(overrides=None):
         "dot_max_neighbor_gap": BALANCE_DOT_MAX_NEIGHBOR_GAP,
         "dot_max_width": BALANCE_DOT_MAX_WIDTH,
         "dot_threshold": BALANCE_TEMPLATE_DOT_MATCH_THRESHOLD,
+        "leading_icon_max_amount_start_x": BALANCE_LEADING_ICON_MAX_AMOUNT_START_X,
+        "leading_icon_max_cluster_width": BALANCE_LEADING_ICON_MAX_CLUSTER_WIDTH,
+        "leading_icon_min_gap": BALANCE_LEADING_ICON_MIN_GAP,
         "min_component_area": BALANCE_SEGMENT_MIN_COMPONENT_AREA,
         "segment_close_kernel_size": BALANCE_SEGMENT_CLOSE_KERNEL_SIZE,
         "segment_max_group_size": BALANCE_SEGMENT_MAX_GROUP_SIZE,
         "segment_merge_gap": BALANCE_SEGMENT_MERGE_GAP,
+        "trailing_noise_max_cluster_width": BALANCE_TRAILING_NOISE_MAX_CLUSTER_WIDTH,
+        "trailing_noise_min_gap": BALANCE_TRAILING_NOISE_MIN_GAP,
         "unit_min_width": BALANCE_UNIT_MIN_WIDTH,
         "unit_threshold": BALANCE_TEMPLATE_UNIT_MATCH_THRESHOLD,
     }
@@ -523,6 +531,11 @@ def _get_balance_params(overrides=None):
     params["dot_max_area"] = max(1, int(params["dot_max_area"]))
     params["dot_max_neighbor_gap"] = max(0, int(params["dot_max_neighbor_gap"]))
     params["unit_min_width"] = max(1, int(params["unit_min_width"]))
+    params["leading_icon_min_gap"] = max(0, int(params["leading_icon_min_gap"]))
+    params["leading_icon_max_cluster_width"] = max(1, int(params["leading_icon_max_cluster_width"]))
+    params["leading_icon_max_amount_start_x"] = max(0, int(params["leading_icon_max_amount_start_x"]))
+    params["trailing_noise_min_gap"] = max(0, int(params["trailing_noise_min_gap"]))
+    params["trailing_noise_max_cluster_width"] = max(1, int(params["trailing_noise_max_cluster_width"]))
     params["dot_baseline_offset_ratio"] = max(0.0, float(params["dot_baseline_offset_ratio"]))
     return params
 
@@ -912,6 +925,7 @@ def _match_balance_text(gray, params=None):
     if not blocks:
         return None
     blocks = _drop_leading_balance_icon_blocks(blocks, params)
+    blocks = _trim_trailing_balance_noise_blocks(blocks, params)
     return _search_balance_sequence(blocks, params)
 
 
@@ -933,10 +947,11 @@ def _drop_leading_balance_icon_blocks(blocks, params=None):
         return blocks
 
     params = _get_balance_params(params)
-    min_icon_gap = max(6, int(params["segment_merge_gap"]) + 5)
-    max_icon_cluster_width = 32
-    max_amount_start_x = 45
+    min_icon_gap = max(int(params["leading_icon_min_gap"]), int(params["segment_merge_gap"]) + 5)
+    max_icon_cluster_width = int(params["leading_icon_max_cluster_width"])
+    max_amount_start_x = int(params["leading_icon_max_amount_start_x"])
     max_split_index = min(3, len(blocks) - 2)
+    saw_icon_like_cluster = False
 
     for split_index in range(1, max_split_index + 1):
         previous_block = blocks[split_index - 1]
@@ -953,10 +968,48 @@ def _drop_leading_balance_icon_blocks(blocks, params=None):
         if int(next_block["x"]) > max_amount_start_x:
             continue
 
+        saw_icon_like_cluster = True
         remaining_blocks = blocks[split_index:]
-        if _sanitize_balance_text(_search_balance_sequence(remaining_blocks, params)):
-            return remaining_blocks
+        cleaned_remaining_blocks = _trim_trailing_balance_noise_blocks(remaining_blocks, params)
+        if _sanitize_balance_text(_search_balance_sequence(cleaned_remaining_blocks, params)):
+            return cleaned_remaining_blocks
 
+    if saw_icon_like_cluster:
+        return []
+    return blocks
+
+
+def _trim_trailing_balance_noise_blocks(blocks, params=None):
+    if len(blocks) < 3:
+        return blocks
+
+    params = _get_balance_params(params)
+    min_noise_gap = int(params["trailing_noise_min_gap"])
+    max_noise_cluster_width = int(params["trailing_noise_max_cluster_width"])
+    min_split_index = max(1, len(blocks) - 3)
+    saw_trailing_noise = False
+
+    for split_index in range(len(blocks) - 1, min_split_index - 1, -1):
+        prefix_blocks = blocks[:split_index]
+        trailing_blocks = blocks[split_index:]
+        prefix_right = int(prefix_blocks[-1]["x"]) + int(prefix_blocks[-1]["width"])
+        trailing_left = int(trailing_blocks[0]["x"])
+        gap = trailing_left - prefix_right
+        if gap < min_noise_gap:
+            continue
+
+        trailing_right = int(trailing_blocks[-1]["x"]) + int(trailing_blocks[-1]["width"])
+        trailing_width = trailing_right - trailing_left
+        if trailing_width > max_noise_cluster_width:
+            continue
+
+        saw_trailing_noise = True
+        prefix_text = _sanitize_balance_text(_search_balance_sequence(prefix_blocks, params))
+        if prefix_text and prefix_text.endswith(("万", "亿")):
+            return prefix_blocks
+
+    if saw_trailing_noise:
+        return []
     return blocks
 
 
