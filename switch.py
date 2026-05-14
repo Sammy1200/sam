@@ -314,8 +314,12 @@ def _get_window_text(hwnd):
     return str(buffer.value or "").strip()
 
 
-def _find_wegame_window():
+def _find_window_by_title_fragment(title_fragment, prefer_exact_title=None):
     if os.name != "nt":
+        return None, ""
+
+    title_fragment = str(title_fragment or "").strip()
+    if not title_fragment:
         return None, ""
 
     user32 = ctypes.windll.user32
@@ -328,7 +332,7 @@ def _find_wegame_window():
             return True
 
         title = _get_window_text(hwnd)
-        if "wegame" in title.lower():
+        if title_fragment.lower() in title.lower():
             matches.append((hwnd, title))
         return True
 
@@ -336,17 +340,18 @@ def _find_wegame_window():
     if not matches:
         return None, ""
 
-    matches.sort(key=lambda item: (0 if item[1] == "WeGame" else 1, len(item[1])))
+    exact_title = str(prefer_exact_title or "").strip()
+    matches.sort(key=lambda item: (0 if exact_title and item[1] == exact_title else 1, len(item[1])))
     return matches[0]
 
 
-def _try_bring_wegame_to_front():
+def _try_bring_window_to_front(title_fragment, label, prefer_exact_title=None, wait_seconds=None):
     if os.name != "nt":
         return False
 
-    hwnd, title = _find_wegame_window()
+    hwnd, title = _find_window_by_title_fragment(title_fragment, prefer_exact_title=prefer_exact_title)
     if hwnd is None:
-        logger.info("[切换流程] 未找到 WeGame 启动页窗口。")
+        logger.info("[切换流程] 未找到%s窗口：title_fragment=%s", label, title_fragment)
         return False
 
     user32 = ctypes.windll.user32
@@ -357,19 +362,33 @@ def _try_bring_wegame_to_front():
     swp_showwindow = 0x0040
 
     try:
-        logger.info("[切换流程] 尝试将 WeGame 窗口拉到前台：title=%s hwnd=%s", title, hwnd)
+        logger.info("[切换流程] 尝试将%s窗口拉到前台：title=%s hwnd=%s", label, title, hwnd)
         user32.ShowWindow(hwnd, sw_restore)
         user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, swp_nomove | swp_nosize | swp_showwindow)
         user32.SetWindowPos(hwnd, -2, 0, 0, 0, 0, swp_nomove | swp_nosize | swp_showwindow)
         user32.BringWindowToTop(hwnd)
         user32.SetForegroundWindow(hwnd)
         user32.ShowWindow(hwnd, sw_showmaximized)
-        safe_sleep(config.SWITCH_MAXIMIZE_WAIT_SECONDS)
-        logger.info("[切换流程] 已尝试将 WeGame 窗口拉到前台。")
+        if wait_seconds is None:
+            wait_seconds = config.SWITCH_MAXIMIZE_WAIT_SECONDS
+        safe_sleep(wait_seconds)
+        logger.info("[切换流程] 已尝试将%s窗口拉到前台。", label)
         return True
     except Exception as exc:
-        logger.warning("[切换流程] 拉起 WeGame 窗口失败：%s", exc)
+        logger.warning("[切换流程] 拉起%s窗口失败：%s", label, exc)
         return False
+
+
+def _try_bring_wegame_to_front():
+    return _try_bring_window_to_front("wegame", "WeGame", prefer_exact_title="WeGame")
+
+
+def _try_bring_game_window_to_front():
+    return _try_bring_window_to_front(
+        config.SWITCH_GAME_WINDOW_TITLE,
+        "游戏",
+        wait_seconds=config.SWITCH_GAME_WINDOW_FOREGROUND_WAIT_SECONDS,
+    )
 
 
 def _tpl(key):
@@ -1523,6 +1542,25 @@ def _step04_launch(camera, suppress_failure_output=False):
 def _step05_space(camera, suppress_failure_output=False):
     """步骤5：处理启动弹窗。"""
     update_overlay_mini("启动中：处理空格弹窗")
+
+    def _retry_space_after_game_foreground(reason):
+        logger.warning("[切换流程] %s，尝试拉起游戏窗口后重试空格弹窗识别。", reason)
+        update_overlay_mini("拉起游戏窗")
+        if not _try_bring_game_window_to_front():
+            logger.warning("[切换流程] 游戏窗口拉起失败或未找到，继续原空格弹窗重试节奏。")
+            return None
+        center_after_foreground = _wait_for_match_center(
+            camera,
+            "kg",
+            config.RGN_KG,
+            timeout=1.0,
+        )
+        if center_after_foreground is not None:
+            logger.info("[切换流程] 拉起游戏窗口后已识别到空格弹窗。")
+        else:
+            logger.warning("[切换流程] 拉起游戏窗口后仍未识别到空格弹窗。")
+        return center_after_foreground
+
     center = _wait_for_match_center(
         camera,
         "kg",
@@ -1530,7 +1568,10 @@ def _step05_space(camera, suppress_failure_output=False):
         timeout=config.SWITCH_SPACE_MATCH_TIMEOUT_SECONDS,
     )
     if center is None:
-        logger.warning("[切换流程] 首次未识别到空格弹窗，准备按 10 秒间隔重试。")
+        center = _retry_space_after_game_foreground("首次未识别到空格弹窗")
+
+    if center is None:
+        logger.warning("[切换流程] 空格弹窗仍未识别到，准备按 10 秒间隔重试。")
         for retry_index in range(1, config.SWITCH_SPACE_RETRY_COUNT + 1):
             update_overlay_mini(f"空格重试{retry_index}")
             safe_sleep(config.SWITCH_SPACE_RETRY_INTERVAL_SECONDS)
@@ -1542,6 +1583,12 @@ def _step05_space(camera, suppress_failure_output=False):
             )
             if center is not None:
                 logger.info("[切换流程] 空格弹窗在第 %s 次补重试后识别成功。", retry_index)
+                break
+            center = _retry_space_after_game_foreground(
+                f"第 {retry_index} 次补重试仍未识别到空格弹窗"
+            )
+            if center is not None:
+                logger.info("[切换流程] 空格弹窗在第 %s 次拉起游戏窗口后识别成功。", retry_index)
                 break
 
         if center is None:
