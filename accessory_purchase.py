@@ -10,6 +10,7 @@ from config import (
     ACCESSORY_BUY_COLOR_CLICK_OFFSET,
     ACCESSORY_BUY_COLOR_RGB,
     ACCESSORY_BUY_COLOR_X_RANGES,
+    ACCESSORY_BUY_COLOR_X_RANGES_BY_ITEM,
     ACCESSORY_BUY_COLOR_Y_RANGE,
     ACCESSORY_COLOR_CLICK_INTERVAL_SECONDS,
     ACCESSORY_COLOR_CLICK_WINDOW_SECONDS,
@@ -105,14 +106,19 @@ def _is_accessory_purchase_frame(frame):
     return _pixel_matches_rgb(frame, ACCESSORY_PAGE_GUARD_POS, ACCESSORY_PAGE_GUARD_RGB)
 
 
-def _find_accessory_buy_color_point(frame):
+def _get_accessory_buy_color_x_ranges(item_number):
+    return ACCESSORY_BUY_COLOR_X_RANGES_BY_ITEM.get(int(item_number or 0), ACCESSORY_BUY_COLOR_X_RANGES)
+
+
+def _find_accessory_buy_color_point(frame, item_number=None):
     if frame is None:
         return None
     y1, y2 = ACCESSORY_BUY_COLOR_Y_RANGE
+    x_ranges = _get_accessory_buy_color_x_ranges(item_number)
     target_r, target_g, target_b = tuple(int(value) for value in ACCESSORY_BUY_COLOR_RGB)
     max_y = min(int(y2), frame.shape[0] - 1)
     for y in range(max(0, int(y1)), max_y + 1):
-        for x1, x2 in ACCESSORY_BUY_COLOR_X_RANGES:
+        for x1, x2 in x_ranges:
             max_x = min(int(x2), frame.shape[1] - 1)
             for x in range(max(0, int(x1)), max_x + 1):
                 b, g, r = (int(value) for value in frame[y, x][:3])
@@ -611,7 +617,8 @@ def run_accessory_purchase_loop(camera, temp_success):
                     return
                 continue
 
-            color_point = _find_accessory_buy_color_point(frame)
+            item_number = _get_accessory_item_number()
+            color_point = _find_accessory_buy_color_point(frame, item_number)
             if color_point is None:
                 ui_print("饰品未命中", is_replace=True, show_console=False)
                 cycle_started_at = getattr(state, "accessory_item_click_started_at", None)
