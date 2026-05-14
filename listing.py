@@ -47,7 +47,10 @@ from config import (
 )
 from overlay import move_overlay, toggle_pause, ui_print, update_score_text
 from round_persistence import (
+    has_tradable_inventory_for_listing,
     persist_minimal_item_balance_sync,
+    record_stone_listing_success_for_current_account,
+    record_stone_unlist_recovered_for_current_account,
     record_daily_listing_success,
     refresh_account_limit_reached_at,
 )
@@ -366,7 +369,7 @@ def _wait_unlist_capacity_change(camera_obj, expected_available):
 
 
 def _sync_unlist_inventory_recovered():
-    state.baseline_item_count += 1
+    record_stone_unlist_recovered_for_current_account()
     if state.overlay_root:
         try:
             state.overlay_root.after(0, update_score_text)
@@ -543,11 +546,17 @@ def _disable_periodic_listing(reason):
 
 def _sync_listing_success_for_current_account():
     """上架成功后扣减库存并立即同步真源。"""
-    if state.baseline_item_count > 0:
-        state.baseline_item_count -= 1
-    else:
-        state.baseline_item_count = 0
-        ui_print("库存已为0", save_log=True)
+    inventory_result = record_stone_listing_success_for_current_account()
+    if inventory_result.status == "insufficient_tradable":
+        ui_print("可交易不足", save_log=True)
+        if not state.IS_PAUSED:
+            toggle_pause()
+        return
+    if inventory_result.status not in ("success", "skipped"):
+        ui_print("库存扣减失败", save_log=True)
+        if not state.IS_PAUSED:
+            toggle_pause()
+        return
 
     if state.overlay_root:
         try:
@@ -686,6 +695,15 @@ def execute_startup_listing_batch(camera_obj, target_success_count):
                 "reason": "目标上架数无效",
                 "listed_count": 0,
             }
+        if not has_tradable_inventory_for_listing():
+            ui_print("可交易不足", save_log=True)
+            if not state.IS_PAUSED:
+                toggle_pause()
+            return {
+                "status": "failed",
+                "reason": "可交易库存不足",
+                "listed_count": 0,
+            }
 
         if not _open_listing_panel(camera_obj):
             return {
@@ -704,6 +722,13 @@ def execute_startup_listing_batch(camera_obj, target_success_count):
 
         ui_print(f"目标{target_success_count}", save_log=True)
         while batch_listed < int(target_success_count):
+            if not has_tradable_inventory_for_listing():
+                ui_print("可交易不足", save_log=True)
+                if not state.IS_PAUSED:
+                    toggle_pause()
+                final_status = "failed"
+                final_reason = "可交易库存不足"
+                break
             wait_capacity_result = _wait_startup_listing_capacity_available(camera_obj, current_capacity)
             if wait_capacity_result.get("status") != "success":
                 final_status = "failed"
@@ -889,11 +914,17 @@ def execute_listing_routine(camera_obj, is_periodic=False, force_balance_check_a
 
     def _sync_listing_success():
         """上架成功后立即扣减真实库存并同步网页读取源。"""
-        if state.baseline_item_count > 0:
-            state.baseline_item_count -= 1
-        else:
-            state.baseline_item_count = 0
-            ui_print("上架成功后库存已为 0，核对真实库存。", save_log=True)
+        inventory_result = record_stone_listing_success_for_current_account()
+        if inventory_result.status == "insufficient_tradable":
+            ui_print("可交易不足", save_log=True)
+            if not state.IS_PAUSED:
+                toggle_pause()
+            return False
+        if inventory_result.status not in ("success", "skipped"):
+            ui_print("库存扣减失败", save_log=True)
+            if not state.IS_PAUSED:
+                toggle_pause()
+            return False
 
         if state.overlay_root:
             try:
@@ -905,6 +936,7 @@ def execute_listing_routine(camera_obj, is_periodic=False, force_balance_check_a
         sync_result = persist_minimal_item_balance_sync()
         if sync_result.status not in ("success", "skipped"):
             ui_print(f"实时库存同步失败：{sync_result.reason}", save_log=True)
+        return True
 
     def _record_listing_success(current_capacity, cycle_listed, total_listed, remaining):
         nonlocal first_popup_checked
@@ -934,6 +966,11 @@ def execute_listing_routine(camera_obj, is_periodic=False, force_balance_check_a
         if _should_skip_listing_by_last_valid_balance():
             return
         if _should_disable_listing_by_round_success_limit():
+            return
+        if not has_tradable_inventory_for_listing():
+            ui_print("可交易不足", save_log=True)
+            if not state.IS_PAUSED:
+                toggle_pause()
             return
 
         ui_print("开始进入背包并执行上架流程。")
@@ -1158,7 +1195,7 @@ def execute_listing_routine(camera_obj, is_periodic=False, force_balance_check_a
                 break
             if cycle_listed < remaining:
                 break
-            if state.baseline_item_count <= 0:
+            if not has_tradable_inventory_for_listing():
                 break
 
             latest_capacity = _read_capacity_with_retry(camera_obj, retry_count=3, interval_seconds=0.08)

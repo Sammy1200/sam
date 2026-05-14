@@ -107,6 +107,7 @@ from account_db import (
     restore_ready_account_status_if_needed,
 )
 from round_persistence import (
+    mature_stone_unlocks_for_current_account,
     persist_item_balance_and_schedule_snapshot,
     persist_accessory_round_status_snapshot,
     persist_temporary_account_snapshot,
@@ -442,6 +443,9 @@ def _restore_current_account_ready_status(reason):
 
     state.current_nickname = restored_record.nickname
     state.baseline_item_count = restored_record.baseline_item_count
+    state.locked_item_count = restored_record.locked_item_count
+    state.tradable_item_count = restored_record.tradable_item_count
+    state.next_tradable_at = restored_record.next_tradable_at
     state.last_limit_time = restored_record.last_limit_time
     state.last_account_end_time = restored_record.last_account_end_time
     state.updated_at = restored_record.updated_at
@@ -485,6 +489,9 @@ def _set_account_state_defaults():
     state.current_balance = "获取中..."
     state.last_valid_balance = ""
     state.baseline_item_count = 0
+    state.locked_item_count = 0
+    state.tradable_item_count = 0
+    state.next_tradable_at = None
     state.last_limit_time = None
     state.last_account_end_time = None
     state.updated_at = None
@@ -799,6 +806,9 @@ def _load_current_account_context():
 
     state.current_nickname = record.nickname
     state.baseline_item_count = record.baseline_item_count
+    state.locked_item_count = record.locked_item_count
+    state.tradable_item_count = record.tradable_item_count
+    state.next_tradable_at = record.next_tradable_at
     state.last_limit_time = record.last_limit_time
     state.last_account_end_time = record.last_account_end_time
     state.updated_at = record.updated_at
@@ -819,6 +829,7 @@ def _load_current_account_context():
     state.account_db_table_name = table_name
     state.account_db_mode = account_db_mode
     state.account_record_loaded = True
+    mature_stone_unlocks_for_current_account("读取账号后")
     runtime_window_sync_result = restore_runtime_window_state()
     now = datetime.now()
     allow_start_time = now

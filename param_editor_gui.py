@@ -354,6 +354,16 @@ def _create_editor():
             _show_msg("✗ 库存必须是整数", _ERROR)
             return
         try:
+            if (
+                str(getattr(state, "account_db_mode", "stone") or "stone") == "stone"
+                and not bool(getattr(state, "accessory_purchase_mode", False))
+                and not bool(getattr(state, "temporary_purchase_mode", False))
+            ):
+                locked_count = int(getattr(state, "locked_item_count", 0) or 0)
+                if new_val < locked_count:
+                    _show_msg("✗ 库存小于不可交易", _ERROR)
+                    return
+                state.tradable_item_count = new_val - locked_count
             state.baseline_item_count = new_val
             result = persist_minimal_item_balance_sync()
             if not result:

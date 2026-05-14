@@ -317,6 +317,8 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         nickname = ((form.get("nickname") or [""])[0] or "").strip()
         baseline_item_delta = ((form.get("baseline_item_delta") or [""])[0] or "").strip()
         baseline_item_count = ((form.get("baseline_item_count") or [""])[0] or "").strip()
+        locked_item_count = ((form.get("locked_item_count") or [""])[0] or "").strip()
+        tradable_item_count = ((form.get("tradable_item_count") or [""])[0] or "").strip()
         round_status = ((form.get("round_status") or [""])[0] or "").strip()
         current_balance_wan = ((form.get("current_balance_wan") or [""])[0] or "").strip()
         db_mode = self._parse_db_mode(form)
@@ -332,6 +334,8 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
             balance_wan_text=current_balance_wan,
             baseline_update_mode=return_to,
             db_mode=db_mode,
+            locked_item_count_text=locked_item_count,
+            tradable_item_count_text=tradable_item_count,
         )
         update_result["scope"] = "local"
         status_code = 200 if update_result.get("status") == "success" else 400

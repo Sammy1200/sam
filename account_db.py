@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 import json
+import logging
 import os
 import sqlite3
 
@@ -24,6 +25,7 @@ from local_switch_account_config import (
 )
 
 
+logger = logging.getLogger(__name__)
 _DB_SUFFIXES = (".db", ".sqlite", ".sqlite3")
 _DB_HINT_NAMES = (
     "accounts",
@@ -206,9 +208,22 @@ ROUND_STATUS_VALUE_ALIASES = {
 }
 
 CANONICAL_ACCOUNT_STATS_TABLE = "account_stats"
+STONE_ITEM_UNLOCK_BATCHES_TABLE = "stone_item_unlock_batches"
+STONE_ITEM_LOCK_HOURS = 72
+STONE_UNLOCK_STATUS_PENDING = "pending"
+STONE_UNLOCK_STATUS_MATURED = "matured"
+STONE_UNLOCK_STATUS_CANCELLED = "cancelled"
+STONE_UNLOCK_STATUS_VALUES = (
+    STONE_UNLOCK_STATUS_PENDING,
+    STONE_UNLOCK_STATUS_MATURED,
+    STONE_UNLOCK_STATUS_CANCELLED,
+)
 CANONICAL_ACCOUNT_STATS_COLUMNS = (
     "nickname",
     "baseline_item_count",
+    "locked_item_count",
+    "tradable_item_count",
+    "next_tradable_at",
     "last_limit_time",
     "last_account_end_time",
     "updated_at",
@@ -374,6 +389,9 @@ class AccountRoundWritePayload:
 class AccountStatsRecord:
     nickname: str
     baseline_item_count: int = 0
+    locked_item_count: int = 0
+    tradable_item_count: int = 0
+    next_tradable_at: datetime | None = None
     last_limit_time: datetime | None = None
     last_account_end_time: datetime | None = None
     updated_at: datetime | None = None
@@ -392,6 +410,10 @@ class AccountWriteResult:
     status: str
     reason: str
     new_baseline_item_count: int | None = None
+    new_locked_item_count: int | None = None
+    new_tradable_item_count: int | None = None
+    next_tradable_at: datetime | None = None
+    changed_quantity: int = 0
 
 
 _SYNC_FIELD_MISSING = object()
@@ -428,6 +450,9 @@ def build_canonical_account_stats_table_sql(table_name=CANONICAL_ACCOUNT_STATS_T
         CREATE TABLE IF NOT EXISTS {_quote_identifier(table_name)} (
             nickname TEXT PRIMARY KEY,
             baseline_item_count INTEGER NOT NULL DEFAULT 0,
+            locked_item_count INTEGER NOT NULL DEFAULT 0,
+            tradable_item_count INTEGER NOT NULL DEFAULT 0,
+            next_tradable_at TEXT,
             last_limit_time TEXT,
             last_account_end_time TEXT,
             updated_at TEXT,
@@ -440,6 +465,25 @@ def build_canonical_account_stats_table_sql(table_name=CANONICAL_ACCOUNT_STATS_T
             runtime_window_start_time TEXT,
             round_status TEXT NOT NULL DEFAULT '{ROUND_STATUS_MANUAL_PAUSE}'
                 CHECK (round_status IN ({escaped_status_values}))
+        )
+    """
+
+
+def build_stone_item_unlock_batches_table_sql(table_name=STONE_ITEM_UNLOCK_BATCHES_TABLE):
+    escaped_status_values = ", ".join(
+        "'" + value.replace("'", "''") + "'" for value in STONE_UNLOCK_STATUS_VALUES
+    )
+    return f"""
+        CREATE TABLE IF NOT EXISTS {_quote_identifier(table_name)} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nickname TEXT NOT NULL,
+            quantity INTEGER NOT NULL DEFAULT 1,
+            acquired_at TEXT NOT NULL,
+            tradable_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT '{STONE_UNLOCK_STATUS_PENDING}'
+                CHECK (status IN ({escaped_status_values})),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         )
     """
 
@@ -1111,10 +1155,22 @@ def _row_to_account_stats_record(row):
     round_status = normalize_round_status_value(row["round_status"])
     if round_status not in ROUND_STATUS_VALUES:
         round_status = ROUND_STATUS_MANUAL_PAUSE
+    baseline_item_count = _parse_int(row["baseline_item_count"])
+    locked_raw = row["locked_item_count"]
+    tradable_raw = row["tradable_item_count"]
+    locked_item_count = _parse_int(locked_raw) if locked_raw not in (None, "") else 0
+    tradable_item_count = (
+        _parse_int(tradable_raw)
+        if tradable_raw not in (None, "")
+        else baseline_item_count
+    )
 
     return AccountStatsRecord(
         nickname=str(row["nickname"] or "").strip(),
-        baseline_item_count=_parse_int(row["baseline_item_count"]),
+        baseline_item_count=baseline_item_count,
+        locked_item_count=locked_item_count,
+        tradable_item_count=tradable_item_count,
+        next_tradable_at=_parse_datetime(row["next_tradable_at"]),
         last_limit_time=_parse_datetime(row["last_limit_time"]),
         last_account_end_time=_parse_datetime(row["last_account_end_time"]),
         updated_at=_parse_datetime(row["updated_at"]),
@@ -1157,6 +1213,9 @@ def _account_stats_record_to_row_values(record):
     return (
         str(record.nickname).strip(),
         int(record.baseline_item_count),
+        max(0, int(record.locked_item_count)),
+        max(0, int(record.tradable_item_count)),
+        _serialize_datetime(record.next_tradable_at),
         _serialize_datetime(record.last_limit_time),
         _serialize_datetime(record.last_account_end_time),
         _serialize_datetime(record.updated_at),
@@ -1193,6 +1252,71 @@ def _canonical_status_schema_requires_rebuild(conn, table_name):
         or ROUND_STATUS_MANUAL_PAUSE not in create_sql
         or ROUND_STATUS_RUNTIME_REACHED not in create_sql
         or ROUND_STATUS_READY not in create_sql
+    )
+
+
+def _ensure_stone_inventory_split_columns(conn, table_name):
+    existing_columns = set(_get_table_column_names(conn, table_name))
+    column_sql = {
+        "locked_item_count": "INTEGER",
+        "tradable_item_count": "INTEGER",
+        "next_tradable_at": "TEXT",
+    }
+    for column_name, column_type in column_sql.items():
+        if column_name not in existing_columns:
+            conn.execute(
+                f"ALTER TABLE {_quote_identifier(table_name)} "
+                f"ADD COLUMN {_quote_identifier(column_name)} {column_type}"
+            )
+
+
+def _initialize_stone_inventory_split_fields(conn, table_name):
+    summary = conn.execute(
+        f"""
+        SELECT
+            SUM(CASE WHEN {_quote_identifier('locked_item_count')} IS NOT NULL THEN 1 ELSE 0 END) AS locked_ready_count,
+            SUM(CASE WHEN {_quote_identifier('tradable_item_count')} IS NOT NULL THEN 1 ELSE 0 END) AS tradable_ready_count,
+            SUM(CASE WHEN {_quote_identifier('locked_item_count')} IS NULL THEN 1 ELSE 0 END) AS locked_null_count,
+            SUM(CASE WHEN {_quote_identifier('tradable_item_count')} IS NULL THEN 1 ELSE 0 END) AS tradable_null_count
+        FROM {_quote_identifier(table_name)}
+        """
+    ).fetchone()
+    locked_ready_count = _parse_int(summary["locked_ready_count"] if summary else 0)
+    tradable_ready_count = _parse_int(summary["tradable_ready_count"] if summary else 0)
+    locked_null_count = _parse_int(summary["locked_null_count"] if summary else 0)
+    tradable_null_count = _parse_int(summary["tradable_null_count"] if summary else 0)
+    if (locked_ready_count > 0 or tradable_ready_count > 0) and (
+        locked_null_count > 0 or tradable_null_count > 0
+    ):
+        logger.warning(
+            "[石头库存] 检测到已初始化拆分字段：locked=%s tradable=%s，迁移不会覆盖这些非空值。",
+            locked_ready_count,
+            tradable_ready_count,
+        )
+
+    conn.execute(
+        f"UPDATE {_quote_identifier(table_name)} "
+        f"SET {_quote_identifier('locked_item_count')} = 0 "
+        f"WHERE {_quote_identifier('locked_item_count')} IS NULL"
+    )
+    conn.execute(
+        f"UPDATE {_quote_identifier(table_name)} "
+        f"SET {_quote_identifier('tradable_item_count')} = {_quote_identifier('baseline_item_count')} "
+        f"WHERE {_quote_identifier('tradable_item_count')} IS NULL"
+    )
+    conn.execute(
+        f"UPDATE {_quote_identifier(table_name)} "
+        f"SET {_quote_identifier('next_tradable_at')} = NULL "
+        f"WHERE {_quote_identifier('next_tradable_at')} = ''"
+    )
+
+
+def _ensure_stone_item_unlock_batches_table(conn):
+    conn.execute(build_stone_item_unlock_batches_table_sql())
+    conn.execute(
+        f"CREATE INDEX IF NOT EXISTS {_quote_identifier('idx_stone_unlock_batches_due')} "
+        f"ON {_quote_identifier(STONE_ITEM_UNLOCK_BATCHES_TABLE)} ("
+        f"{_quote_identifier('nickname')}, {_quote_identifier('status')}, {_quote_identifier('tradable_at')})"
     )
 
 
@@ -1569,6 +1693,9 @@ def ensure_canonical_account_stats_table(
                 f"ALTER TABLE {_quote_identifier(table_name)} "
                 f"ADD COLUMN {_quote_identifier('runtime_window_start_time')} TEXT"
             )
+        _ensure_stone_inventory_split_columns(conn, table_name)
+        _initialize_stone_inventory_split_fields(conn, table_name)
+        _ensure_stone_item_unlock_batches_table(conn)
         conn.commit()
     finally:
         conn.close()
@@ -2223,6 +2350,9 @@ def save_canonical_account_stats_record(
         )
         ON CONFLICT({_quote_identifier('nickname')}) DO UPDATE SET
             {_quote_identifier('baseline_item_count')} = excluded.{_quote_identifier('baseline_item_count')},
+            {_quote_identifier('locked_item_count')} = excluded.{_quote_identifier('locked_item_count')},
+            {_quote_identifier('tradable_item_count')} = excluded.{_quote_identifier('tradable_item_count')},
+            {_quote_identifier('next_tradable_at')} = excluded.{_quote_identifier('next_tradable_at')},
             {_quote_identifier('last_limit_time')} = excluded.{_quote_identifier('last_limit_time')},
             {_quote_identifier('last_account_end_time')} = excluded.{_quote_identifier('last_account_end_time')},
             {_quote_identifier('updated_at')} = excluded.{_quote_identifier('updated_at')},
@@ -2238,6 +2368,9 @@ def save_canonical_account_stats_record(
     values = (
         str(record.nickname).strip(),
         int(record.baseline_item_count),
+        max(0, int(record.locked_item_count)),
+        max(0, int(record.tradable_item_count)),
+        _serialize_datetime(record.next_tradable_at),
         _serialize_datetime(record.last_limit_time),
         _serialize_datetime(record.last_account_end_time),
         _serialize_datetime(record.updated_at),
@@ -2390,6 +2523,9 @@ def update_canonical_account_item_balance_fields(
     runtime_window_start_time=None,
     last_limit_time=None,
     update_last_limit_time=False,
+    locked_item_count=None,
+    tradable_item_count=None,
+    next_tradable_at=_SYNC_FIELD_MISSING,
 ):
     """最小高频同步：直接更新真实库存字段与余额。"""
     normalized_nickname = str(nickname or "").strip()
@@ -2406,6 +2542,22 @@ def update_canonical_account_item_balance_fields(
             "invalid_item_quantity",
             f"道具数量为负数: {desired_item_quantity}",
         )
+    normalized_locked_item_count = None
+    if locked_item_count is not None:
+        try:
+            normalized_locked_item_count = int(locked_item_count)
+        except (TypeError, ValueError):
+            return AccountWriteResult("invalid_locked_item_count", f"不可交易数量无效: {locked_item_count}")
+        if normalized_locked_item_count < 0:
+            return AccountWriteResult("invalid_locked_item_count", f"不可交易数量为负数: {normalized_locked_item_count}")
+    normalized_tradable_item_count = None
+    if tradable_item_count is not None:
+        try:
+            normalized_tradable_item_count = int(tradable_item_count)
+        except (TypeError, ValueError):
+            return AccountWriteResult("invalid_tradable_item_count", f"可交易数量无效: {tradable_item_count}")
+        if normalized_tradable_item_count < 0:
+            return AccountWriteResult("invalid_tradable_item_count", f"可交易数量为负数: {normalized_tradable_item_count}")
 
     if not database_path or not os.path.isfile(database_path):
         return AccountWriteResult("db_unavailable", f"数据库文件不存在: {database_path}")
@@ -2452,6 +2604,15 @@ def update_canonical_account_item_balance_fields(
             f"{_quote_identifier('updated_at')} = ?",
         ]
         params = [desired_item_quantity, normalized_updated_at]
+        if normalized_locked_item_count is not None:
+            set_clauses.append(f"{_quote_identifier('locked_item_count')} = ?")
+            params.append(normalized_locked_item_count)
+        if normalized_tradable_item_count is not None:
+            set_clauses.append(f"{_quote_identifier('tradable_item_count')} = ?")
+            params.append(normalized_tradable_item_count)
+        if next_tradable_at is not _SYNC_FIELD_MISSING:
+            set_clauses.append(f"{_quote_identifier('next_tradable_at')} = ?")
+            params.append(_serialize_datetime(next_tradable_at))
         if normalized_running_seconds is not None:
             set_clauses.append(f"{_quote_identifier('purchase_running_seconds')} = ?")
             params.append(normalized_running_seconds)
@@ -2499,13 +2660,432 @@ def update_canonical_account_item_balance_fields(
                 ),
                 updated_at=updated_at,
             )
-        return AccountWriteResult("success", "", desired_item_quantity)
+        return AccountWriteResult(
+            "success",
+            "",
+            desired_item_quantity,
+            normalized_locked_item_count,
+            normalized_tradable_item_count,
+            next_tradable_at if next_tradable_at is not _SYNC_FIELD_MISSING else None,
+        )
     except sqlite3.Error as exc:
         try:
             conn.rollback()
         except sqlite3.Error:
             pass
         return AccountWriteResult("write_failed", f"写入失败: {exc}")
+    finally:
+        conn.close()
+
+
+def _read_stone_inventory_row(conn, table_name, nickname):
+    return conn.execute(
+        f"SELECT "
+        f"{_quote_identifier('baseline_item_count')}, "
+        f"{_quote_identifier('locked_item_count')}, "
+        f"{_quote_identifier('tradable_item_count')}, "
+        f"{_quote_identifier('next_tradable_at')} "
+        f"FROM {_quote_identifier(table_name)} "
+        f"WHERE {_quote_identifier('nickname')} = ? "
+        f"LIMIT 1",
+        (nickname,),
+    ).fetchone()
+
+
+def _get_next_pending_stone_tradable_at(conn, nickname):
+    row = conn.execute(
+        f"SELECT MIN({_quote_identifier('tradable_at')}) AS next_tradable_at "
+        f"FROM {_quote_identifier(STONE_ITEM_UNLOCK_BATCHES_TABLE)} "
+        f"WHERE {_quote_identifier('nickname')} = ? "
+        f"AND {_quote_identifier('status')} = ?",
+        (nickname, STONE_UNLOCK_STATUS_PENDING),
+    ).fetchone()
+    return _parse_datetime(row["next_tradable_at"] if row else None)
+
+
+def record_stone_item_purchase_success(
+    database_path,
+    nickname,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+    acquired_at=None,
+    quantity=1,
+):
+    normalized_nickname = str(nickname or "").strip()
+    if not normalized_nickname:
+        return AccountWriteResult("nickname_missing", "当前昵称为空")
+    if not database_path or not os.path.isfile(database_path):
+        return AccountWriteResult("db_unavailable", f"数据库文件不存在: {database_path}")
+
+    try:
+        normalized_quantity = int(quantity)
+    except (TypeError, ValueError):
+        return AccountWriteResult("invalid_quantity", f"锁定批次数量无效: {quantity}")
+    if normalized_quantity <= 0:
+        return AccountWriteResult("invalid_quantity", f"锁定批次数量必须大于 0: {normalized_quantity}")
+
+    ensure_canonical_account_stats_table(database_path, table_name)
+    acquired_time = acquired_at or datetime.now()
+    tradable_time = acquired_time + timedelta(hours=STONE_ITEM_LOCK_HOURS)
+    write_time = datetime.now()
+
+    conn = sqlite3.connect(database_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = _read_stone_inventory_row(conn, table_name, normalized_nickname)
+        if row is None:
+            conn.rollback()
+            return AccountWriteResult("account_not_found", f"未找到昵称为 {normalized_nickname} 的账号记录")
+
+        baseline_item_count = _parse_int(row["baseline_item_count"])
+        locked_item_count = _parse_int(row["locked_item_count"])
+        tradable_item_count = _parse_int(row["tradable_item_count"])
+        new_baseline_item_count = baseline_item_count + normalized_quantity
+        new_locked_item_count = locked_item_count + normalized_quantity
+
+        conn.execute(
+            f"INSERT INTO {_quote_identifier(STONE_ITEM_UNLOCK_BATCHES_TABLE)} ("
+            f"{_quote_identifier('nickname')}, "
+            f"{_quote_identifier('quantity')}, "
+            f"{_quote_identifier('acquired_at')}, "
+            f"{_quote_identifier('tradable_at')}, "
+            f"{_quote_identifier('status')}, "
+            f"{_quote_identifier('created_at')}, "
+            f"{_quote_identifier('updated_at')}"
+            f") VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                normalized_nickname,
+                normalized_quantity,
+                _serialize_datetime(acquired_time),
+                _serialize_datetime(tradable_time),
+                STONE_UNLOCK_STATUS_PENDING,
+                _serialize_datetime(write_time),
+                _serialize_datetime(write_time),
+            ),
+        )
+        next_tradable_at = _get_next_pending_stone_tradable_at(conn, normalized_nickname)
+        conn.execute(
+            f"UPDATE {_quote_identifier(table_name)} "
+            f"SET {_quote_identifier('baseline_item_count')} = ?, "
+            f"{_quote_identifier('locked_item_count')} = ?, "
+            f"{_quote_identifier('tradable_item_count')} = ?, "
+            f"{_quote_identifier('next_tradable_at')} = ?, "
+            f"{_quote_identifier('updated_at')} = ? "
+            f"WHERE {_quote_identifier('nickname')} = ?",
+            (
+                new_baseline_item_count,
+                new_locked_item_count,
+                tradable_item_count,
+                _serialize_datetime(next_tradable_at),
+                _serialize_datetime(write_time),
+                normalized_nickname,
+            ),
+        )
+        conn.commit()
+        return AccountWriteResult(
+            "success",
+            "",
+            new_baseline_item_count,
+            new_locked_item_count,
+            tradable_item_count,
+            next_tradable_at,
+            normalized_quantity,
+        )
+    except sqlite3.Error as exc:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return AccountWriteResult("write_failed", f"锁定库存写入失败: {exc}")
+    finally:
+        conn.close()
+
+
+def update_stone_inventory_split_manual(
+    database_path,
+    nickname,
+    locked_item_count,
+    tradable_item_count,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+    now=None,
+):
+    normalized_nickname = str(nickname or "").strip()
+    if not normalized_nickname:
+        return AccountWriteResult("nickname_missing", "当前昵称为空")
+    if not database_path or not os.path.isfile(database_path):
+        return AccountWriteResult("db_unavailable", f"数据库文件不存在: {database_path}")
+
+    try:
+        normalized_locked = int(locked_item_count)
+    except (TypeError, ValueError):
+        return AccountWriteResult("invalid_locked_item_count", f"不可交易数量无效: {locked_item_count}")
+    try:
+        normalized_tradable = int(tradable_item_count)
+    except (TypeError, ValueError):
+        return AccountWriteResult("invalid_tradable_item_count", f"可交易数量无效: {tradable_item_count}")
+    if normalized_locked < 0:
+        return AccountWriteResult("invalid_locked_item_count", f"不可交易数量不能为负数: {normalized_locked}")
+    if normalized_tradable < 0:
+        return AccountWriteResult("invalid_tradable_item_count", f"可交易数量不能为负数: {normalized_tradable}")
+
+    ensure_canonical_account_stats_table(database_path, table_name)
+    write_time = now or datetime.now()
+    tradable_time = write_time + timedelta(hours=STONE_ITEM_LOCK_HOURS)
+    new_baseline = normalized_locked + normalized_tradable
+
+    conn = sqlite3.connect(database_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = _read_stone_inventory_row(conn, table_name, normalized_nickname)
+        if row is None:
+            conn.rollback()
+            return AccountWriteResult("account_not_found", f"未找到昵称为 {normalized_nickname} 的账号记录")
+
+        current_locked = _parse_int(row["locked_item_count"])
+        locked_delta = normalized_locked - current_locked
+
+        if locked_delta > 0:
+            batch_rows = [
+                (
+                    normalized_nickname,
+                    1,
+                    _serialize_datetime(write_time),
+                    _serialize_datetime(tradable_time),
+                    STONE_UNLOCK_STATUS_PENDING,
+                    _serialize_datetime(write_time),
+                    _serialize_datetime(write_time),
+                )
+                for _ in range(locked_delta)
+            ]
+            conn.executemany(
+                f"INSERT INTO {_quote_identifier(STONE_ITEM_UNLOCK_BATCHES_TABLE)} ("
+                f"{_quote_identifier('nickname')}, "
+                f"{_quote_identifier('quantity')}, "
+                f"{_quote_identifier('acquired_at')}, "
+                f"{_quote_identifier('tradable_at')}, "
+                f"{_quote_identifier('status')}, "
+                f"{_quote_identifier('created_at')}, "
+                f"{_quote_identifier('updated_at')}"
+                f") VALUES (?, ?, ?, ?, ?, ?, ?)",
+                batch_rows,
+            )
+        elif locked_delta < 0:
+            cancel_quantity = abs(locked_delta)
+            batches = conn.execute(
+                f"SELECT {_quote_identifier('id')}, {_quote_identifier('quantity')} "
+                f"FROM {_quote_identifier(STONE_ITEM_UNLOCK_BATCHES_TABLE)} "
+                f"WHERE {_quote_identifier('nickname')} = ? "
+                f"AND {_quote_identifier('status')} = ? "
+                f"ORDER BY {_quote_identifier('tradable_at')} ASC, {_quote_identifier('id')} ASC",
+                (normalized_nickname, STONE_UNLOCK_STATUS_PENDING),
+            ).fetchall()
+
+            cancel_ids = []
+            cancellable_quantity = 0
+            for batch in batches:
+                batch_quantity = _parse_int(batch["quantity"])
+                if batch_quantity <= 0:
+                    continue
+                cancel_ids.append(batch["id"])
+                cancellable_quantity += batch_quantity
+                if cancellable_quantity >= cancel_quantity:
+                    break
+
+            if cancellable_quantity < cancel_quantity:
+                conn.rollback()
+                return AccountWriteResult(
+                    "insufficient_pending_batches",
+                    f"pending 批次数量不足，无法作废 {cancel_quantity} 个不可交易库存",
+                    _parse_int(row["baseline_item_count"]),
+                    current_locked,
+                    _parse_int(row["tradable_item_count"]),
+                    _parse_datetime(row["next_tradable_at"]),
+                    0,
+                )
+
+            placeholders = ", ".join("?" for _ in cancel_ids)
+            conn.execute(
+                f"UPDATE {_quote_identifier(STONE_ITEM_UNLOCK_BATCHES_TABLE)} "
+                f"SET {_quote_identifier('status')} = ?, {_quote_identifier('updated_at')} = ? "
+                f"WHERE {_quote_identifier('id')} IN ({placeholders})",
+                (
+                    STONE_UNLOCK_STATUS_CANCELLED,
+                    _serialize_datetime(write_time),
+                    *cancel_ids,
+                ),
+            )
+
+        next_tradable_at = _get_next_pending_stone_tradable_at(conn, normalized_nickname)
+        conn.execute(
+            f"UPDATE {_quote_identifier(table_name)} "
+            f"SET {_quote_identifier('baseline_item_count')} = ?, "
+            f"{_quote_identifier('locked_item_count')} = ?, "
+            f"{_quote_identifier('tradable_item_count')} = ?, "
+            f"{_quote_identifier('next_tradable_at')} = ?, "
+            f"{_quote_identifier('updated_at')} = ? "
+            f"WHERE {_quote_identifier('nickname')} = ?",
+            (
+                new_baseline,
+                normalized_locked,
+                normalized_tradable,
+                _serialize_datetime(next_tradable_at),
+                _serialize_datetime(write_time),
+                normalized_nickname,
+            ),
+        )
+        conn.commit()
+        return AccountWriteResult(
+            "success",
+            "",
+            new_baseline,
+            normalized_locked,
+            normalized_tradable,
+            next_tradable_at,
+            abs(locked_delta),
+        )
+    except sqlite3.Error as exc:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return AccountWriteResult("write_failed", f"手动库存调整失败: {exc}")
+    finally:
+        conn.close()
+
+
+def mature_stone_item_unlock_batches(
+    database_path,
+    nickname,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+    now=None,
+):
+    normalized_nickname = str(nickname or "").strip()
+    if not normalized_nickname:
+        return AccountWriteResult("nickname_missing", "当前昵称为空")
+    if not database_path or not os.path.isfile(database_path):
+        return AccountWriteResult("db_unavailable", f"数据库文件不存在: {database_path}")
+
+    ensure_canonical_account_stats_table(database_path, table_name)
+    current_time = now or datetime.now()
+    current_time_text = _serialize_datetime(current_time)
+    write_time = datetime.now()
+
+    conn = sqlite3.connect(database_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = _read_stone_inventory_row(conn, table_name, normalized_nickname)
+        if row is None:
+            conn.rollback()
+            return AccountWriteResult("account_not_found", f"未找到昵称为 {normalized_nickname} 的账号记录")
+
+        baseline_item_count = _parse_int(row["baseline_item_count"])
+        locked_item_count = _parse_int(row["locked_item_count"])
+        tradable_item_count = _parse_int(row["tradable_item_count"])
+        next_tradable_at = _parse_datetime(row["next_tradable_at"])
+        if next_tradable_at is None:
+            conn.rollback()
+            return AccountWriteResult(
+                "skipped",
+                "没有待解锁批次",
+                baseline_item_count,
+                locked_item_count,
+                tradable_item_count,
+                None,
+            )
+        if current_time < next_tradable_at:
+            conn.rollback()
+            return AccountWriteResult(
+                "skipped",
+                "未到最早解锁时间",
+                baseline_item_count,
+                locked_item_count,
+                tradable_item_count,
+                next_tradable_at,
+            )
+
+        batches = conn.execute(
+            f"SELECT {_quote_identifier('id')}, {_quote_identifier('quantity')} "
+            f"FROM {_quote_identifier(STONE_ITEM_UNLOCK_BATCHES_TABLE)} "
+            f"WHERE {_quote_identifier('nickname')} = ? "
+            f"AND {_quote_identifier('status')} = ? "
+            f"AND {_quote_identifier('tradable_at')} <= ? "
+            f"ORDER BY {_quote_identifier('tradable_at')} ASC, {_quote_identifier('id')} ASC",
+            (normalized_nickname, STONE_UNLOCK_STATUS_PENDING, current_time_text),
+        ).fetchall()
+
+        matured_ids = []
+        matured_quantity = 0
+        inventory_mismatch = False
+        for batch in batches:
+            batch_quantity = _parse_int(batch["quantity"])
+            if batch_quantity <= 0:
+                logger.warning("[石头库存] 批次数量异常，跳过：nickname=%s batch_id=%s quantity=%s", normalized_nickname, batch["id"], batch_quantity)
+                continue
+            if locked_item_count < batch_quantity:
+                inventory_mismatch = True
+                logger.warning(
+                    "[石头库存] 到期批次与不可交易库存不一致，停止结转：nickname=%s locked=%s batch_id=%s quantity=%s",
+                    normalized_nickname,
+                    locked_item_count,
+                    batch["id"],
+                    batch_quantity,
+                )
+                break
+            locked_item_count -= batch_quantity
+            tradable_item_count += batch_quantity
+            matured_quantity += batch_quantity
+            matured_ids.append(batch["id"])
+
+        if matured_ids:
+            placeholders = ", ".join("?" for _ in matured_ids)
+            conn.execute(
+                f"UPDATE {_quote_identifier(STONE_ITEM_UNLOCK_BATCHES_TABLE)} "
+                f"SET {_quote_identifier('status')} = ?, {_quote_identifier('updated_at')} = ? "
+                f"WHERE {_quote_identifier('id')} IN ({placeholders})",
+                (
+                    STONE_UNLOCK_STATUS_MATURED,
+                    _serialize_datetime(write_time),
+                    *matured_ids,
+                ),
+            )
+
+        refreshed_next_tradable_at = _get_next_pending_stone_tradable_at(conn, normalized_nickname)
+        conn.execute(
+            f"UPDATE {_quote_identifier(table_name)} "
+            f"SET {_quote_identifier('locked_item_count')} = ?, "
+            f"{_quote_identifier('tradable_item_count')} = ?, "
+            f"{_quote_identifier('next_tradable_at')} = ?, "
+            f"{_quote_identifier('updated_at')} = ? "
+            f"WHERE {_quote_identifier('nickname')} = ?",
+            (
+                locked_item_count,
+                tradable_item_count,
+                _serialize_datetime(refreshed_next_tradable_at),
+                _serialize_datetime(write_time),
+                normalized_nickname,
+            ),
+        )
+        conn.commit()
+
+        status = "inventory_mismatch" if inventory_mismatch else "success"
+        reason = "到期批次数量超过不可交易库存" if inventory_mismatch else ""
+        return AccountWriteResult(
+            status,
+            reason,
+            baseline_item_count,
+            locked_item_count,
+            tradable_item_count,
+            refreshed_next_tradable_at,
+            matured_quantity,
+        )
+    except sqlite3.Error as exc:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return AccountWriteResult("write_failed", f"到期结转失败: {exc}")
     finally:
         conn.close()
 
@@ -2524,6 +3104,9 @@ def update_canonical_account_status_fields(
     round_purchase_success_count=None,
     round_listing_success_count=None,
     round_purchase_fail_count=None,
+    locked_item_count=None,
+    tradable_item_count=None,
+    next_tradable_at=_SYNC_FIELD_MISSING,
 ):
     """按昵称最小更新状态相关字段，可选带当前状态前置条件。"""
     normalized_nickname = str(nickname or "").strip()
@@ -2546,6 +3129,22 @@ def update_canonical_account_status_fields(
             return AccountWriteResult("invalid_item_quantity", f"道具数量无效: {item_quantity}")
         if normalized_item_quantity < 0:
             return AccountWriteResult("invalid_item_quantity", f"道具数量为负数: {normalized_item_quantity}")
+    normalized_locked_item_count = None
+    if locked_item_count is not None:
+        try:
+            normalized_locked_item_count = int(locked_item_count)
+        except (TypeError, ValueError):
+            return AccountWriteResult("invalid_locked_item_count", f"不可交易数量无效: {locked_item_count}")
+        if normalized_locked_item_count < 0:
+            return AccountWriteResult("invalid_locked_item_count", f"不可交易数量为负数: {normalized_locked_item_count}")
+    normalized_tradable_item_count = None
+    if tradable_item_count is not None:
+        try:
+            normalized_tradable_item_count = int(tradable_item_count)
+        except (TypeError, ValueError):
+            return AccountWriteResult("invalid_tradable_item_count", f"可交易数量无效: {tradable_item_count}")
+        if normalized_tradable_item_count < 0:
+            return AccountWriteResult("invalid_tradable_item_count", f"可交易数量为负数: {normalized_tradable_item_count}")
 
     normalized_balance = None
     if current_balance is not None:
@@ -2633,6 +3232,15 @@ def update_canonical_account_status_fields(
         if normalized_item_quantity is not None:
             set_clauses.append(f"{_quote_identifier('baseline_item_count')} = ?")
             params.append(normalized_item_quantity)
+        if normalized_locked_item_count is not None:
+            set_clauses.append(f"{_quote_identifier('locked_item_count')} = ?")
+            params.append(normalized_locked_item_count)
+        if normalized_tradable_item_count is not None:
+            set_clauses.append(f"{_quote_identifier('tradable_item_count')} = ?")
+            params.append(normalized_tradable_item_count)
+        if next_tradable_at is not _SYNC_FIELD_MISSING:
+            set_clauses.append(f"{_quote_identifier('next_tradable_at')} = ?")
+            params.append(_serialize_datetime(next_tradable_at))
         if normalized_balance:
             set_clauses.append(f"{_quote_identifier('current_balance')} = ?")
             params.append(normalized_balance)
@@ -2702,6 +3310,9 @@ def update_canonical_account_listing_pause_fields(
     current_balance="",
     round_listing_success_count=0,
     table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+    locked_item_count=None,
+    tradable_item_count=None,
+    next_tradable_at=_SYNC_FIELD_MISSING,
 ):
     """启动页上架模式 F12 专用：只更新库存、余额、本轮上架成功数。"""
     normalized_nickname = str(nickname or "").strip()
@@ -2714,6 +3325,22 @@ def update_canonical_account_listing_pause_fields(
         return AccountWriteResult("invalid_item_quantity", f"道具数量无效: {item_quantity}")
     if normalized_item_quantity < 0:
         return AccountWriteResult("invalid_item_quantity", f"道具数量为负数: {normalized_item_quantity}")
+    normalized_locked_item_count = None
+    if locked_item_count is not None:
+        try:
+            normalized_locked_item_count = int(locked_item_count)
+        except (TypeError, ValueError):
+            return AccountWriteResult("invalid_locked_item_count", f"不可交易数量无效: {locked_item_count}")
+        if normalized_locked_item_count < 0:
+            return AccountWriteResult("invalid_locked_item_count", f"不可交易数量为负数: {normalized_locked_item_count}")
+    normalized_tradable_item_count = None
+    if tradable_item_count is not None:
+        try:
+            normalized_tradable_item_count = int(tradable_item_count)
+        except (TypeError, ValueError):
+            return AccountWriteResult("invalid_tradable_item_count", f"可交易数量无效: {tradable_item_count}")
+        if normalized_tradable_item_count < 0:
+            return AccountWriteResult("invalid_tradable_item_count", f"可交易数量为负数: {normalized_tradable_item_count}")
 
     try:
         normalized_listing_success_count = max(0, int(round_listing_success_count))
@@ -2756,6 +3383,15 @@ def update_canonical_account_listing_pause_fields(
             f"{_quote_identifier('round_listing_success_count')} = ?",
         ]
         params = [normalized_item_quantity, normalized_listing_success_count]
+        if normalized_locked_item_count is not None:
+            set_clauses.append(f"{_quote_identifier('locked_item_count')} = ?")
+            params.append(normalized_locked_item_count)
+        if normalized_tradable_item_count is not None:
+            set_clauses.append(f"{_quote_identifier('tradable_item_count')} = ?")
+            params.append(normalized_tradable_item_count)
+        if next_tradable_at is not _SYNC_FIELD_MISSING:
+            set_clauses.append(f"{_quote_identifier('next_tradable_at')} = ?")
+            params.append(_serialize_datetime(next_tradable_at))
         if normalized_balance:
             set_clauses.append(f"{_quote_identifier('current_balance')} = ?")
             params.append(normalized_balance)

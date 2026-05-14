@@ -36,6 +36,7 @@ from account_db import (
     read_temporary_account_snapshot,
     restore_ready_account_status_if_needed,
     save_canonical_account_stats_record,
+    update_stone_inventory_split_manual,
 )
 from config import (
     ACCOUNT_MAX_PURCHASE_SECONDS,
@@ -265,6 +266,20 @@ def _parse_baseline_item_count_input(baseline_item_count_text):
     return value
 
 
+def _parse_locked_item_count_input(locked_item_count_text):
+    value = _parse_integer_input(locked_item_count_text, "不可交易数量")
+    if value < 0:
+        raise ValueError("不可交易数量不能为负数")
+    return value
+
+
+def _parse_tradable_item_count_input(tradable_item_count_text):
+    value = _parse_integer_input(tradable_item_count_text, "可交易数量")
+    if value < 0:
+        raise ValueError("可交易数量不能为负数")
+    return value
+
+
 def _format_updated_at_relative(updated_at, now):
     if updated_at is None:
         return ""
@@ -391,6 +406,9 @@ def _row_to_canonical_account_record(row):
     return AccountStatsRecord(
         nickname=str(_row_value(row, "nickname") or "").strip(),
         baseline_item_count=_parse_int(_row_value(row, "baseline_item_count")),
+        locked_item_count=_parse_int(_row_value(row, "locked_item_count")),
+        tradable_item_count=_parse_int(_row_value(row, "tradable_item_count")),
+        next_tradable_at=_parse_datetime(_row_value(row, "next_tradable_at")),
         last_limit_time=_parse_datetime(_row_value(row, "last_limit_time")),
         last_account_end_time=_parse_datetime(_row_value(row, "last_account_end_time")),
         updated_at=_parse_datetime(_row_value(row, "updated_at")),
@@ -450,6 +468,9 @@ def _account_stats_record_to_view_record(record, now):
     view_record = {
         "nickname": str(record.nickname or "").strip(),
         "baseline_item_count": _parse_int(record.baseline_item_count),
+        "locked_item_count": _parse_int(record.locked_item_count),
+        "tradable_item_count": _parse_int(record.tradable_item_count),
+        "next_tradable_at": _serialize_datetime(record.next_tradable_at),
         "last_limit_time": _serialize_datetime(last_limit_time),
         "last_account_end_time": _serialize_datetime(last_account_end_time),
         "updated_at": _serialize_datetime(updated_at),
@@ -761,12 +782,39 @@ def _row_to_view_record(row, now):
 def _build_edit_meta(record=None, db_mode=ACCOUNT_DB_MODE_STONE):
     record = record or {}
     normalized_mode = normalize_account_db_mode(db_mode)
-    return {
-        "editable_fields": (
+    default_baseline = _parse_int(record.get("baseline_item_count"))
+    default_locked = _parse_int(record.get("locked_item_count"))
+    if record.get("tradable_item_count") in (None, ""):
+        default_tradable = default_baseline
+    else:
+        default_tradable = _parse_int(record.get("tradable_item_count"))
+    if normalized_mode == ACCOUNT_DB_MODE_STONE:
+        editable_fields = (
+            "locked_item_count",
+            "tradable_item_count",
+            "round_status",
+            "current_balance_wan",
+        )
+        column_mapping = {
+            "locked_item_count": "locked_item_count",
+            "tradable_item_count": "tradable_item_count",
+            "baseline_item_count": "baseline_item_count",
+            "round_status": "round_status",
+            "current_balance_wan": "current_balance",
+        }
+    else:
+        editable_fields = (
             "baseline_item_count",
             "round_status",
             "current_balance_wan",
-        ),
+        )
+        column_mapping = {
+            "baseline_item_count": "baseline_item_count",
+            "round_status": "round_status",
+            "current_balance_wan": "current_balance",
+        }
+    return {
+        "editable_fields": editable_fields,
         "db_mode": normalized_mode,
         "db_label": get_account_db_mode_label(normalized_mode),
         "alternate_db_mode": get_alternate_account_db_mode(normalized_mode),
@@ -775,13 +823,11 @@ def _build_edit_meta(record=None, db_mode=ACCOUNT_DB_MODE_STONE):
         "balance_label": "金币（万）" if normalized_mode == ACCOUNT_DB_MODE_ACCESSORY else "余额（万）",
         "status_options": list(ROUND_STATUS_VALUES),
         "balance_input_unit": BALANCE_INPUT_UNIT,
-        "column_mapping": {
-            "baseline_item_count": "baseline_item_count",
-            "round_status": "round_status",
-            "current_balance_wan": "current_balance",
-        },
+        "column_mapping": column_mapping,
         "form_defaults": {
-            "baseline_item_count": str(record.get("baseline_item_count") or 0),
+            "baseline_item_count": str(default_baseline),
+            "locked_item_count": str(default_locked),
+            "tradable_item_count": str(default_tradable),
             "round_status": str(record.get("round_status") or ""),
             "current_balance_wan": str(record.get("current_balance_wan") or ""),
         },
@@ -1002,8 +1048,6 @@ def get_account_view_rows(db_mode=ACCOUNT_DB_MODE_STONE):
     real_record_count = _count_canonical_records(database_path, table_name)
     if not database_path or not os.path.isfile(database_path):
         view_rows = []
-        if normalized_mode == ACCOUNT_DB_MODE_STONE:
-            _append_temporary_snapshot_row(view_rows, generated_at)
         result = _build_canonical_result("", table_name, view_rows, generated_at, normalized_mode)
         result["health"] = {
             **_build_duplicate_slot_health(view_rows),
@@ -1040,8 +1084,6 @@ def get_account_view_rows(db_mode=ACCOUNT_DB_MODE_STONE):
                 generated_at,
             )
             view_rows.append(_account_stats_record_to_view_record(canonical_record, generated_at))
-        if normalized_mode == ACCOUNT_DB_MODE_STONE:
-            _append_temporary_snapshot_row(view_rows, generated_at)
         result = _build_canonical_result(database_path, table_name, view_rows, generated_at, normalized_mode)
         result["health"] = {
             **_build_duplicate_slot_health(view_rows),
@@ -1178,6 +1220,8 @@ def update_account_view_record(
     balance_wan_text,
     baseline_update_mode="detail",
     db_mode=ACCOUNT_DB_MODE_STONE,
+    locked_item_count_text=None,
+    tradable_item_count_text=None,
 ):
     """最小单账号写接口：仅允许更新道具库存、状态和余额。"""
     normalized_mode = normalize_account_db_mode(db_mode)
@@ -1185,6 +1229,8 @@ def update_account_view_record(
     form_values = {
         "nickname": normalized_nickname,
         "baseline_item_count": str(baseline_item_count_text or "").strip(),
+        "locked_item_count": str(locked_item_count_text or "").strip(),
+        "tradable_item_count": str(tradable_item_count_text or "").strip(),
         "round_status": str(round_status or "").strip(),
         "current_balance_wan": str(balance_wan_text or "").strip(),
         "db_mode": normalized_mode,
@@ -1217,13 +1263,40 @@ def update_account_view_record(
         result["detail_result"] = get_account_view_detail(nickname=normalized_nickname, db_mode=normalized_mode)
         return result
 
-    try:
-        recalculated_baseline = _parse_baseline_item_count_input(baseline_item_count_text)
-    except ValueError as exc:
-        result["field_errors"]["baseline_item_count"] = str(exc)
-        recalculated_baseline = None
+    if normalized_mode == ACCOUNT_DB_MODE_STONE:
+        try:
+            locked_item_count = _parse_locked_item_count_input(locked_item_count_text)
+        except ValueError as exc:
+            result["field_errors"]["locked_item_count"] = str(exc)
+            locked_item_count = None
+        else:
+            form_values["locked_item_count"] = str(locked_item_count)
+
+        try:
+            tradable_item_count = _parse_tradable_item_count_input(tradable_item_count_text)
+        except ValueError as exc:
+            result["field_errors"]["tradable_item_count"] = str(exc)
+            tradable_item_count = None
+        else:
+            form_values["tradable_item_count"] = str(tradable_item_count)
+
+        recalculated_baseline = (
+            locked_item_count + tradable_item_count
+            if locked_item_count is not None and tradable_item_count is not None
+            else None
+        )
+        if recalculated_baseline is not None:
+            form_values["baseline_item_count"] = str(recalculated_baseline)
     else:
-        form_values["baseline_item_count"] = str(recalculated_baseline)
+        try:
+            recalculated_baseline = _parse_baseline_item_count_input(baseline_item_count_text)
+        except ValueError as exc:
+            result["field_errors"]["baseline_item_count"] = str(exc)
+            recalculated_baseline = None
+        else:
+            form_values["baseline_item_count"] = str(recalculated_baseline)
+        locked_item_count = current_record.locked_item_count
+        tradable_item_count = current_record.tradable_item_count
 
     normalized_round_status = str(round_status or "").strip()
     if normalized_round_status not in ROUND_STATUS_VALUES:
@@ -1241,9 +1314,36 @@ def update_account_view_record(
         result["detail_result"] = get_account_view_detail(nickname=normalized_nickname, db_mode=normalized_mode)
         return result
 
+    next_tradable_at = current_record.next_tradable_at
+    if normalized_mode == ACCOUNT_DB_MODE_STONE:
+        inventory_result = update_stone_inventory_split_manual(
+            database_path,
+            normalized_nickname,
+            locked_item_count,
+            tradable_item_count,
+            table_name=table_name,
+        )
+        if inventory_result.status != "success":
+            if inventory_result.status == "insufficient_pending_batches":
+                result["field_errors"]["locked_item_count"] = inventory_result.reason
+            elif inventory_result.status == "invalid_locked_item_count":
+                result["field_errors"]["locked_item_count"] = inventory_result.reason
+            elif inventory_result.status == "invalid_tradable_item_count":
+                result["field_errors"]["tradable_item_count"] = inventory_result.reason
+            result["message"] = inventory_result.reason or "库存拆分保存失败。"
+            result["detail_result"] = get_account_view_detail(nickname=normalized_nickname, db_mode=normalized_mode)
+            return result
+        recalculated_baseline = int(inventory_result.new_baseline_item_count or 0)
+        locked_item_count = int(inventory_result.new_locked_item_count or 0)
+        tradable_item_count = int(inventory_result.new_tradable_item_count or 0)
+        next_tradable_at = inventory_result.next_tradable_at
+
     updated_record = AccountStatsRecord(
         nickname=current_record.nickname,
         baseline_item_count=recalculated_baseline,
+        locked_item_count=locked_item_count,
+        tradable_item_count=tradable_item_count,
+        next_tradable_at=next_tradable_at,
         last_limit_time=current_record.last_limit_time,
         last_account_end_time=current_record.last_account_end_time,
         updated_at=datetime.now(),
@@ -1278,6 +1378,8 @@ def update_account_view_record(
 
     if (
         int(reloaded_record.baseline_item_count) != int(updated_record.baseline_item_count)
+        or int(reloaded_record.locked_item_count) != int(updated_record.locked_item_count)
+        or int(reloaded_record.tradable_item_count) != int(updated_record.tradable_item_count)
         or str(reloaded_record.round_status or "").strip() != normalized_round_status
         or str(reloaded_record.current_balance or "").strip() != storage_balance_text
     ):
@@ -1291,6 +1393,8 @@ def update_account_view_record(
     result["form_values"] = {
         "nickname": normalized_nickname,
         "baseline_item_count": str(recalculated_baseline),
+        "locked_item_count": str(locked_item_count),
+        "tradable_item_count": str(tradable_item_count),
         "round_status": normalized_round_status,
         "current_balance_wan": normalized_balance_wan,
         "db_mode": normalized_mode,

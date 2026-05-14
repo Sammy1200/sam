@@ -18,10 +18,13 @@ from account_db import (
     ROUND_STATUS_RUNTIME_REACHED,
     ROUND_STATUS_RUNNING,
     ROUND_STATUS_UNKNOWN,
+    ACCOUNT_DB_MODE_STONE,
     find_canonical_account_stats_store,
     increment_machine_daily_summary_event,
+    mature_stone_item_unlock_batches,
     read_canonical_account_stats_record,
     read_preferred_canonical_account_stats_record_by_execution_slot,
+    record_stone_item_purchase_success,
     reset_temporary_account_snapshot,
     save_canonical_account_stats_record,
     save_temporary_account_snapshot,
@@ -51,6 +54,166 @@ def _clear_round_counters():
     state.round_purchase_success_count = 0
     state.round_listing_success_count = 0
     state.round_purchase_fail_count = 0
+
+
+def _is_stone_inventory_split_active():
+    return (
+        not bool(getattr(state, "temporary_purchase_mode", False))
+        and not bool(getattr(state, "accessory_purchase_mode", False))
+        and str(getattr(state, "account_db_mode", ACCOUNT_DB_MODE_STONE) or ACCOUNT_DB_MODE_STONE)
+        == ACCOUNT_DB_MODE_STONE
+    )
+
+
+def _apply_stone_inventory_result(result):
+    if result is None:
+        return
+    if result.new_baseline_item_count is not None:
+        state.baseline_item_count = max(0, int(result.new_baseline_item_count))
+    if result.new_locked_item_count is not None:
+        state.locked_item_count = max(0, int(result.new_locked_item_count))
+    if result.new_tradable_item_count is not None:
+        state.tradable_item_count = max(0, int(result.new_tradable_item_count))
+    state.next_tradable_at = result.next_tradable_at
+
+
+def mature_stone_unlocks_for_current_account(reason=""):
+    """低成本触发石头 pending 批次结转；饰品/临时模式跳过。"""
+    if not _is_stone_inventory_split_active():
+        return AccountWriteResult("skipped", "非石头库存拆分模式")
+    if not state.account_record_loaded or not state.account_db_path or not state.current_nickname:
+        return AccountWriteResult("skipped", "当前账号未加载")
+
+    next_tradable_at = getattr(state, "next_tradable_at", None)
+    now = datetime.now()
+    if next_tradable_at is None:
+        return AccountWriteResult(
+            "skipped",
+            "没有待解锁批次",
+            int(state.baseline_item_count),
+            int(state.locked_item_count),
+            int(state.tradable_item_count),
+            None,
+        )
+    if now < next_tradable_at:
+        return AccountWriteResult(
+            "skipped",
+            "未到最早解锁时间",
+            int(state.baseline_item_count),
+            int(state.locked_item_count),
+            int(state.tradable_item_count),
+            next_tradable_at,
+        )
+
+    result = mature_stone_item_unlock_batches(
+        state.account_db_path,
+        state.current_nickname,
+        table_name=state.account_db_table_name or CANONICAL_ACCOUNT_STATS_TABLE,
+        now=now,
+    )
+    if result.status in ("success", "inventory_mismatch", "skipped"):
+        _apply_stone_inventory_result(result)
+    if result.status == "success" and result.changed_quantity > 0:
+        logger.info(
+            "[石头库存] 到期结转完成：reason=%s nickname=%s quantity=%s locked=%s tradable=%s",
+            reason,
+            state.current_nickname,
+            result.changed_quantity,
+            state.locked_item_count,
+            state.tradable_item_count,
+        )
+    elif result.status == "inventory_mismatch":
+        logger.warning("[石头库存] 到期结转异常：reason=%s nickname=%s %s", reason, state.current_nickname, result.reason)
+    elif result.status not in ("success", "skipped"):
+        logger.warning("[石头库存] 到期结转失败：reason=%s nickname=%s %s", reason, state.current_nickname, result.reason)
+    return result
+
+
+def record_stone_purchase_success_for_current_account():
+    """石头抢购成功：锁定库存 +1，并生成 72 小时 pending 批次。"""
+    if not _is_stone_inventory_split_active():
+        state.baseline_item_count += 1
+        return AccountWriteResult("skipped", "非石头库存拆分模式", int(state.baseline_item_count))
+    if not state.account_record_loaded or not state.account_db_path or not state.current_nickname:
+        return AccountWriteResult("skipped", "当前账号未加载")
+
+    result = record_stone_item_purchase_success(
+        state.account_db_path,
+        state.current_nickname,
+        table_name=state.account_db_table_name or CANONICAL_ACCOUNT_STATS_TABLE,
+    )
+    if result.status == "success":
+        _apply_stone_inventory_result(result)
+    else:
+        logger.warning("[石头库存] 抢购成功入锁定库存失败：nickname=%s reason=%s", state.current_nickname, result.reason)
+    return result
+
+
+def record_stone_listing_success_for_current_account():
+    """石头上架成功：只扣可交易库存，不允许用不可交易库存抵扣。"""
+    if not _is_stone_inventory_split_active():
+        if state.baseline_item_count > 0:
+            state.baseline_item_count -= 1
+        else:
+            state.baseline_item_count = 0
+        return AccountWriteResult("skipped", "非石头库存拆分模式", int(state.baseline_item_count))
+
+    mature_stone_unlocks_for_current_account("上架扣库存前")
+    if int(state.tradable_item_count) <= 0:
+        logger.warning(
+            "[石头库存] 可交易库存不足，禁止扣不可交易库存：nickname=%s locked=%s tradable=%s",
+            state.current_nickname,
+            state.locked_item_count,
+            state.tradable_item_count,
+        )
+        return AccountWriteResult(
+            "insufficient_tradable",
+            "可交易库存不足",
+            int(state.baseline_item_count),
+            int(state.locked_item_count),
+            int(state.tradable_item_count),
+            state.next_tradable_at,
+        )
+
+    state.tradable_item_count = max(0, int(state.tradable_item_count) - 1)
+    state.baseline_item_count = int(state.locked_item_count) + int(state.tradable_item_count)
+    return AccountWriteResult(
+        "success",
+        "",
+        int(state.baseline_item_count),
+        int(state.locked_item_count),
+        int(state.tradable_item_count),
+        state.next_tradable_at,
+        1,
+    )
+
+
+def record_stone_unlist_recovered_for_current_account():
+    """石头下架回补库存：回到可交易库存，不生成 pending。"""
+    if not _is_stone_inventory_split_active():
+        state.baseline_item_count += 1
+        return AccountWriteResult("skipped", "非石头库存拆分模式", int(state.baseline_item_count))
+
+    mature_stone_unlocks_for_current_account("下架回补库存前")
+    state.tradable_item_count = max(0, int(state.tradable_item_count) + 1)
+    state.baseline_item_count = int(state.locked_item_count) + int(state.tradable_item_count)
+    return AccountWriteResult(
+        "success",
+        "",
+        int(state.baseline_item_count),
+        int(state.locked_item_count),
+        int(state.tradable_item_count),
+        state.next_tradable_at,
+        1,
+    )
+
+
+def has_tradable_inventory_for_listing():
+    """上架前守卫：石头只看可交易库存，饰品/旧逻辑仍看总库存。"""
+    if _is_stone_inventory_split_active():
+        mature_stone_unlocks_for_current_account("上架前")
+        return int(state.tradable_item_count) > 0
+    return int(state.baseline_item_count) > 0
 
 
 def _resolve_current_canonical_target():
@@ -164,6 +327,9 @@ def _reload_current_account_state_from_canonical():
 
     state.current_nickname = record.nickname
     state.baseline_item_count = int(record.baseline_item_count)
+    state.locked_item_count = int(record.locked_item_count)
+    state.tradable_item_count = int(record.tradable_item_count)
+    state.next_tradable_at = record.next_tradable_at
     state.last_limit_time = record.last_limit_time
     state.last_account_end_time = record.last_account_end_time
     state.updated_at = record.updated_at
@@ -524,6 +690,7 @@ def _build_record(is_final, round_status):
         allow_legacy_fallback=False,
     )
     refresh_account_limit_reached_at()
+    mature_stone_unlocks_for_current_account("写回前")
     state.round_purchase_running_seconds = float(get_current_elapsed())
     new_baseline_item_count = int(state.baseline_item_count)
     if new_baseline_item_count < 0:
@@ -553,6 +720,9 @@ def _build_record(is_final, round_status):
     record = AccountStatsRecord(
         nickname=nickname,
         baseline_item_count=new_baseline_item_count,
+        locked_item_count=int(getattr(state, "locked_item_count", 0)),
+        tradable_item_count=int(getattr(state, "tradable_item_count", new_baseline_item_count)),
+        next_tradable_at=getattr(state, "next_tradable_at", None),
         last_limit_time=last_limit_time,
         last_account_end_time=last_account_end_time,
         updated_at=updated_at,
@@ -582,6 +752,9 @@ def _save_record(record):
     state.updated_at = record.updated_at
     state.runtime_window_start_time = record.runtime_window_start_time
     state.round_status = record.round_status
+    state.locked_item_count = int(record.locked_item_count)
+    state.tradable_item_count = int(record.tradable_item_count)
+    state.next_tradable_at = record.next_tradable_at
     return result
 
 
@@ -599,6 +772,7 @@ def persist_minimal_item_balance_sync():
     if not nickname:
         return AccountWriteResult("nickname_missing", "当前昵称为空")
 
+    mature_stone_unlocks_for_current_account("实时同步前")
     runtime_item_quantity = int(state.baseline_item_count)
     if runtime_item_quantity < 0:
         return AccountWriteResult(
@@ -628,6 +802,15 @@ def persist_minimal_item_balance_sync():
         last_limit_time=reached_time,
         update_last_limit_time=(
             reached_time is not None and state.last_limit_time != reached_time
+        ),
+        locked_item_count=(
+            int(state.locked_item_count) if _is_stone_inventory_split_active() else None
+        ),
+        tradable_item_count=(
+            int(state.tradable_item_count) if _is_stone_inventory_split_active() else None
+        ),
+        next_tradable_at=(
+            state.next_tradable_at if _is_stone_inventory_split_active() else None
         ),
     )
 
@@ -694,10 +877,14 @@ def persist_startup_listing_mode_account_snapshot(
     if update_last_limit_time:
         normalized_limit_time = last_limit_time or write_time
 
+    mature_stone_unlocks_for_current_account("启动页上架收尾前")
     effective_balance = _get_effective_balance()
     record = AccountStatsRecord(
         nickname=existing_record.nickname,
         baseline_item_count=int(state.baseline_item_count),
+        locked_item_count=int(getattr(state, "locked_item_count", existing_record.locked_item_count)),
+        tradable_item_count=int(getattr(state, "tradable_item_count", existing_record.tradable_item_count)),
+        next_tradable_at=getattr(state, "next_tradable_at", existing_record.next_tradable_at),
         last_limit_time=normalized_limit_time,
         last_account_end_time=write_time,
         updated_at=write_time,
@@ -772,6 +959,7 @@ def _persist_startup_listing_mode_pause_resume_snapshot(event_name):
     if not database_path:
         return AccountWriteResult("skipped", "canonical database path is empty")
 
+    mature_stone_unlocks_for_current_account(f"{event_name}前")
     effective_balance = _get_effective_balance()
     result = update_canonical_account_listing_pause_fields(
         database_path,
@@ -780,6 +968,15 @@ def _persist_startup_listing_mode_pause_resume_snapshot(event_name):
         current_balance=effective_balance,
         round_listing_success_count=int(state.round_listing_success_count),
         table_name=table_name,
+        locked_item_count=(
+            int(state.locked_item_count) if _is_stone_inventory_split_active() else None
+        ),
+        tradable_item_count=(
+            int(state.tradable_item_count) if _is_stone_inventory_split_active() else None
+        ),
+        next_tradable_at=(
+            state.next_tradable_at if _is_stone_inventory_split_active() else None
+        ),
     )
     if result.status == "success":
         _schedule_remote_snapshot_event(event_name)
@@ -820,6 +1017,7 @@ def persist_pause_snapshot():
         return AccountWriteResult("skipped", "canonical database path is empty")
 
     table_name = target.get("table_name") or CANONICAL_ACCOUNT_STATS_TABLE
+    mature_stone_unlocks_for_current_account("F12暂停前")
     sync_runtime_window_state(
         persist_if_changed=False,
         initialize_if_missing=False,
@@ -841,6 +1039,15 @@ def persist_pause_snapshot():
         round_purchase_success_count=state.round_purchase_success_count,
         round_listing_success_count=state.round_listing_success_count,
         round_purchase_fail_count=state.round_purchase_fail_count,
+        locked_item_count=(
+            int(state.locked_item_count) if _is_stone_inventory_split_active() else None
+        ),
+        tradable_item_count=(
+            int(state.tradable_item_count) if _is_stone_inventory_split_active() else None
+        ),
+        next_tradable_at=(
+            state.next_tradable_at if _is_stone_inventory_split_active() else None
+        ),
     )
     if result.status == "success":
         state.updated_at = write_time

@@ -140,6 +140,8 @@ def _ensure_remote_sync_table(conn):
             region TEXT NOT NULL DEFAULT '',
             sort_order INTEGER NOT NULL DEFAULT 0,
             baseline_item_count INTEGER NOT NULL DEFAULT 0,
+            locked_item_count INTEGER NOT NULL DEFAULT 0,
+            tradable_item_count INTEGER NOT NULL DEFAULT 0,
             current_balance TEXT NOT NULL DEFAULT '',
             round_status TEXT NOT NULL DEFAULT '',
             updated_at TEXT,
@@ -170,6 +172,18 @@ def _ensure_remote_sync_table(conn):
             f"ALTER TABLE {REMOTE_SYNC_TABLE} "
             "ADD COLUMN db_mode TEXT NOT NULL DEFAULT 'stone'"
         )
+    if "locked_item_count" not in existing_columns:
+        conn.execute(
+            f"ALTER TABLE {REMOTE_SYNC_TABLE} "
+            "ADD COLUMN locked_item_count INTEGER NOT NULL DEFAULT 0"
+        )
+        existing_columns.add("locked_item_count")
+    if "tradable_item_count" not in existing_columns:
+        conn.execute(
+            f"ALTER TABLE {REMOTE_SYNC_TABLE} "
+            "ADD COLUMN tradable_item_count INTEGER NOT NULL DEFAULT 0"
+        )
+        existing_columns.add("tradable_item_count")
     pk_columns = [
         str(row[1]).strip()
         for row in sorted(
@@ -192,6 +206,8 @@ def _ensure_remote_sync_table(conn):
                 region TEXT NOT NULL DEFAULT '',
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 baseline_item_count INTEGER NOT NULL DEFAULT 0,
+                locked_item_count INTEGER NOT NULL DEFAULT 0,
+                tradable_item_count INTEGER NOT NULL DEFAULT 0,
                 current_balance TEXT NOT NULL DEFAULT '',
                 round_status TEXT NOT NULL DEFAULT '',
                 updated_at TEXT,
@@ -211,7 +227,8 @@ def _ensure_remote_sync_table(conn):
             f"""
             INSERT OR REPLACE INTO {temp_table} (
                 machine_id, db_mode, machine_display_name, current_execution_slot,
-                nickname, region, sort_order, baseline_item_count, current_balance,
+                nickname, region, sort_order, baseline_item_count, locked_item_count,
+                tradable_item_count, current_balance,
                 round_status, updated_at, last_account_end_time, last_limit_time,
                 allow_purchase, runtime_window_remaining_seconds, cooldown_remaining_seconds,
                 report_time, source_client_ip, received_at
@@ -219,7 +236,7 @@ def _ensure_remote_sync_table(conn):
             SELECT
                 machine_id, COALESCE(NULLIF(db_mode, ''), 'stone'), machine_display_name,
                 current_execution_slot, nickname, region, sort_order, baseline_item_count,
-                current_balance, round_status, updated_at, last_account_end_time,
+                locked_item_count, tradable_item_count, current_balance, round_status, updated_at, last_account_end_time,
                 last_limit_time, allow_purchase, runtime_window_remaining_seconds,
                 cooldown_remaining_seconds, report_time, source_client_ip, received_at
             FROM {REMOTE_SYNC_TABLE}
@@ -329,6 +346,8 @@ def _normalize_snapshot_entry(item, report_time):
         "region": str(item.get("region") or item.get("server") or "").strip(),
         "sort_order": sort_order,
         "baseline_item_count": max(0, _parse_int(item.get("baseline_item_count"), default=0)),
+        "locked_item_count": max(0, _parse_int(item.get("locked_item_count"), default=0)),
+        "tradable_item_count": max(0, _parse_int(item.get("tradable_item_count"), default=0)),
         "current_balance": str(item.get("current_balance") or "").strip(),
         "round_status": str(item.get("round_status") or "").strip(),
         "updated_at": _serialize_datetime(item.get("updated_at")),
@@ -429,6 +448,8 @@ def save_remote_sync_report(payload, client_ip=""):
                     region,
                     sort_order,
                     baseline_item_count,
+                    locked_item_count,
+                    tradable_item_count,
                     current_balance,
                     round_status,
                     updated_at,
@@ -440,7 +461,7 @@ def save_remote_sync_report(payload, client_ip=""):
                     report_time,
                     source_client_ip,
                     received_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     machine_id,
@@ -451,6 +472,8 @@ def save_remote_sync_report(payload, client_ip=""):
                     account["region"],
                     account["sort_order"],
                     account["baseline_item_count"],
+                    account["locked_item_count"],
+                    account["tradable_item_count"],
                     account["current_balance"],
                     account["round_status"],
                     account["updated_at"],
@@ -960,6 +983,8 @@ def build_local_snapshot_payload(db_mode=None):
                 "region": region,
                 "sort_order": sort_order,
                 "baseline_item_count": max(0, _parse_int(row.get("baseline_item_count"), default=0)),
+                "locked_item_count": max(0, _parse_int(row.get("locked_item_count"), default=0)),
+                "tradable_item_count": max(0, _parse_int(row.get("tradable_item_count"), default=0)),
                 "current_balance": str(row.get("current_balance") or "").strip(),
                 "round_status": str(row.get("round_status") or "").strip(),
                 "updated_at": _serialize_datetime(row.get("updated_at")),
@@ -1369,6 +1394,8 @@ def get_remote_machine_sections(exclude_machine_id=None, db_mode=ACCOUNT_DB_MODE
                 region,
                 sort_order,
                 baseline_item_count,
+                locked_item_count,
+                tradable_item_count,
                 current_balance,
                 round_status,
                 updated_at,
@@ -1451,6 +1478,8 @@ def get_remote_machine_sections(exclude_machine_id=None, db_mode=ACCOUNT_DB_MODE
                 "region": str(row["region"] or "").strip(),
                 "sort_order": _parse_int(row["sort_order"]),
                 "baseline_item_count": _parse_int(row["baseline_item_count"]),
+                "locked_item_count": _parse_int(row["locked_item_count"]),
+                "tradable_item_count": _parse_int(row["tradable_item_count"]),
                 "current_balance": str(row["current_balance"] or "").strip(),
                 "current_balance_wan": _format_balance_for_wan_input(row["current_balance"]),
                 "round_status": str(row["round_status"] or "").strip(),

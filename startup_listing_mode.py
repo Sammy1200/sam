@@ -23,6 +23,7 @@ from overlay import ui_print, update_score_text
 from purchase import parse_balance_text_to_value, recognize_latest_balance_at_trade
 from purchase import clear_live_listing_count_for_account_switch
 from round_persistence import (
+    mature_stone_unlocks_for_current_account,
     persist_startup_listing_mode_listing_count_clear,
     persist_startup_listing_mode_account_snapshot,
     reset_round_runtime_state,
@@ -229,6 +230,9 @@ def _find_next_candidate(processed_slots, skipped_slots=None):
 def _hydrate_state_from_record(record):
     state.current_nickname = record.nickname
     state.baseline_item_count = int(record.baseline_item_count)
+    state.locked_item_count = int(record.locked_item_count)
+    state.tradable_item_count = int(record.tradable_item_count)
+    state.next_tradable_at = record.next_tradable_at
     state.last_limit_time = record.last_limit_time
     state.last_account_end_time = record.last_account_end_time
     state.updated_at = record.updated_at
@@ -275,6 +279,7 @@ def _prepare_listing_account_context(slot_number):
     )
     state.current_nickname = record.nickname
     state.current_execution_slot = int(record.current_execution_slot or slot_number)
+    mature_stone_unlocks_for_current_account("启动页上架读账号后")
     state.current_balance = str(record.current_balance or "").strip() or "获取中..."
     state.last_valid_balance = str(record.current_balance or "").strip()
     state.round_current_balance = ""

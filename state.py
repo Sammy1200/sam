@@ -78,6 +78,9 @@ slot_nicknames = {}
 # --- 线程 2：基线字段 ---
 current_nickname = ""
 baseline_item_count = 0
+locked_item_count = 0
+tradable_item_count = 0
+next_tradable_at = None
 current_execution_slot = 1
 
 # --- 线程 2：本轮过程字段 ---

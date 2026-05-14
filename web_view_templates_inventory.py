@@ -415,9 +415,16 @@ def _format_time_without_year(text):
 
 
 def _build_list_form_values(row, edit_result):
+    baseline_value = str(row.get("baseline_item_count") or row.get("inventory_quantity") or 0)
     form_values = {
         "nickname": str(row.get("nickname") or "").strip(),
-        "baseline_item_count": str(row.get("baseline_item_count") or row.get("inventory_quantity") or 0),
+        "baseline_item_count": baseline_value,
+        "locked_item_count": str(row.get("locked_item_count") or 0),
+        "tradable_item_count": str(
+            row.get("tradable_item_count")
+            if row.get("tradable_item_count") not in (None, "")
+            else baseline_value
+        ),
         "round_status": str(row.get("round_status") or "").strip(),
         "current_balance_wan": str(row.get("current_balance_wan") or "").strip(),
         "db_mode": str(row.get("db_mode") or "stone").strip() or "stone",
@@ -430,6 +437,210 @@ def _build_list_form_values(row, edit_result):
 def _normalize_db_mode_from_view(source):
     mode = str((source or {}).get("db_mode") or "").strip().lower()
     return "accessory" if mode == "accessory" else "stone"
+
+
+def _is_stone_mode_value(value):
+    return str(value or "").strip().lower() != "accessory"
+
+
+def _format_int_text(value):
+    try:
+        return str(max(0, int(value or 0)))
+    except (TypeError, ValueError):
+        return "0"
+
+
+def _render_inventory_split_display(row, db_mode="stone"):
+    if not _is_stone_mode_value(db_mode):
+        return _format_value(row.get("inventory_quantity") or row.get("baseline_item_count"))
+    if "locked_item_count" not in (row or {}) and "tradable_item_count" not in (row or {}):
+        return _format_value(row.get("inventory_quantity") or row.get("baseline_item_count"))
+
+    locked_text = _format_int_text(row.get("locked_item_count"))
+    tradable_text = _format_int_text(row.get("tradable_item_count"))
+    baseline_text = _format_int_text(row.get("baseline_item_count") or row.get("inventory_quantity"))
+    return (
+        '<span class="inventory-locked" style="color:#dc2626;font-weight:700;">'
+        f'{escape(locked_text)}</span>'
+        '<span class="inventory-op"> + </span>'
+        '<span class="inventory-tradable" style="color:#15803d;font-weight:700;">'
+        f'{escape(tradable_text)}</span>'
+        '<span class="inventory-op"> = </span>'
+        f'<span class="inventory-total">{escape(baseline_text)}</span>'
+    )
+
+
+def _render_home_table_layout_style():
+    return """
+<style>
+.page-shell-home .stage-primary .account-table-local {
+  table-layout: fixed;
+  width: 100%;
+  min-width: 0;
+}
+.page-shell-home .stage-primary .account-table-local .col-name { width: 6%; }
+.page-shell-home .stage-primary .account-table-local .col-inventory { width: 29%; }
+.page-shell-home .stage-primary .account-table-local .col-balance { width: 12%; }
+.page-shell-home .stage-primary .account-table-local .col-runtime { width: 12%; }
+.page-shell-home .stage-primary .account-table-local .col-status { width: 11%; }
+.page-shell-home .stage-primary .account-table-local .col-cooldown { width: 12%; }
+.page-shell-home .stage-primary .account-table-local .col-action { width: 18%; }
+.page-shell-home .stage-primary .account-table-local th,
+.page-shell-home .stage-primary .account-table-local td {
+  padding: 8px;
+}
+.page-shell-home .stage-primary .account-table-local th {
+  text-align: center;
+}
+.page-shell-home .stage-primary .account-table-local th.col-inventory {
+  text-align: left;
+  padding-left: calc(8px + 7ch + 22px);
+}
+.page-shell-home .stage-primary .account-table-local .display-field {
+  min-width: 0;
+  width: 100%;
+  white-space: nowrap;
+}
+.page-shell-home .stage-primary .account-table-local .col-name .display-field {
+  width: 6ch;
+  min-width: 6ch;
+  max-width: 6ch;
+  justify-content: center;
+  margin: 0 auto;
+  padding-left: 0;
+  padding-right: 0;
+  text-align: center;
+}
+.page-shell-home .stage-primary .account-table-local .col-inventory .inventory-inline-row {
+  justify-content: flex-start;
+}
+.page-shell-home .stage-primary .account-table-local .display-field,
+.page-shell-home .stage-primary .account-table-local .inventory-input,
+.page-shell-home .stage-primary .account-table-local .inventory-value,
+.page-shell-home .stage-primary .account-table-local .readonly-value,
+.page-shell-home .stage-primary .account-table-local .inline-balance input,
+.page-shell-home .stage-primary .account-table-local .inline-field select,
+.page-shell-home .stage-primary .account-table-local .unit-tag,
+.page-shell-home .stage-primary .account-table-local .inline-save button {
+  height: 36px;
+  min-height: 36px;
+  line-height: 1;
+  border-radius: var(--radius-sm);
+  box-sizing: border-box;
+}
+.page-shell-home .stage-primary .account-table-local .display-field,
+.page-shell-home .stage-primary .account-table-local .inventory-value,
+.page-shell-home .stage-primary .account-table-local .readonly-value,
+.page-shell-home .stage-primary .account-table-local .unit-tag,
+.page-shell-home .stage-primary .account-table-local .inline-save button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.page-shell-home .stage-primary .account-table-local .display-field {
+  justify-content: flex-start;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.page-shell-home .stage-primary .account-table-local .inventory-input,
+.page-shell-home .stage-primary .account-table-local .inline-balance input,
+.page-shell-home .stage-primary .account-table-local .inline-field select {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.page-shell-home .stage-primary .account-table-local .inventory-split-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  white-space: nowrap;
+  width: 100%;
+  min-width: 0;
+}
+.page-shell-home .stage-primary .account-table-local .inventory-split-row .inventory-input,
+.page-shell-home .stage-primary .account-table-local .inventory-split-row .inventory-value {
+  width: 7ch;
+  min-width: 7ch;
+  max-width: 7ch;
+  flex: 0 0 7ch;
+  padding-left: 7px;
+  padding-right: 7px;
+  text-align: center;
+}
+.page-shell-home .stage-primary .account-table-local .inventory-split-row .inventory-op {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  font-weight: 590;
+}
+.page-shell-home .stage-primary .account-table-local .inventory-split-display {
+  width: auto;
+  min-width: 0;
+  max-width: none;
+  padding-left: 8px;
+  padding-right: 8px;
+  white-space: nowrap;
+}
+.page-shell-home .stage-primary .account-table-local .inventory-field .inventory-updated {
+  margin-top: 0;
+  margin-left: 2px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  line-height: 1;
+}
+.page-shell-home .stage-primary .account-table-local .col-balance .inline-balance {
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.page-shell-home .stage-primary .account-table-local .col-balance .inline-balance input {
+  width: 8ch;
+  min-width: 8ch;
+  max-width: 8ch;
+  padding-left: 8px;
+  padding-right: 8px;
+}
+.page-shell-home .stage-primary .account-table-local .col-runtime,
+.page-shell-home .stage-primary .account-table-local .col-cooldown,
+.page-shell-home .stage-primary .account-table-local .col-status {
+  white-space: nowrap;
+}
+.page-shell-home .stage-primary .account-table-local .col-runtime .display-field,
+.page-shell-home .stage-primary .account-table-local .col-cooldown .display-field,
+.page-shell-home .stage-primary .account-table-local .col-status .display-field {
+  justify-content: center;
+  padding-left: 10px;
+  padding-right: 10px;
+}
+.page-shell-home .stage-primary .account-table-local .col-action .inline-save-main {
+  gap: 8px;
+  justify-content: center;
+  flex-wrap: nowrap;
+}
+.page-shell-home .stage-primary .account-table-local .col-action .inline-save button {
+  min-width: 54px;
+  padding-left: 9px;
+  padding-right: 9px;
+}
+.page-shell-home .stage-primary .account-table-local .col-action .inline-save a {
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+}
+</style>
+"""
+
+
+def _render_kv_table_html(items):
+    rows = []
+    for key, value in items:
+        if isinstance(value, dict) and "html" in value:
+            rendered_value = str(value.get("html") or "-")
+        else:
+            rendered_value = _format_value(value)
+        rows.append((escape(str(key)), rendered_value))
+    return _render_table(("字段", "值"), rows)
 
 
 def _db_mode_labels(db_mode):
@@ -710,15 +921,21 @@ def _build_refresh_button_state_script(refresh_result):
 """
 
 
-def _render_local_read_only_cells(row):
-    inventory_text = _format_value(row.get("inventory_quantity") or row.get("baseline_item_count"))
+def _render_local_read_only_cells(row, db_mode="stone"):
+    is_split_inventory = not row.get("is_temporary_account") and _is_stone_mode_value(db_mode)
+    if row.get("is_temporary_account"):
+        inventory_text = _format_value(row.get("inventory_quantity") or row.get("baseline_item_count"))
+    else:
+        inventory_text = _render_inventory_split_display(row, db_mode)
     update_tip = _render_local_relative_time(
         row.get("updated_at_relative") or "-",
         row.get("updated_at"),
     )
+    value_class = "readonly-value inventory-split-display" if is_split_inventory else "readonly-value inventory-value"
+    row_class = "inventory-inline-row inventory-split-row" if is_split_inventory else "inventory-inline-row"
     inventory_cell = (
-        f'<div class="inline-field inventory-field"><div class="inventory-inline-row">'
-        f'<div class="readonly-value inventory-value">{inventory_text}</div>'
+        f'<div class="inline-field inventory-field"><div class="{row_class}">'
+        f'<div class="{value_class}">{inventory_text}</div>'
         f'<div class="muted-text inventory-updated">{update_tip}</div>'
         f"</div></div>"
     )
@@ -738,7 +955,7 @@ def _render_local_read_only_cells(row):
 
 def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
     if row.get("is_temporary_account"):
-        return _render_local_read_only_cells(row)
+        return _render_local_read_only_cells(row, "accessory")
 
     nickname = str(row.get("nickname") or "").strip()
     if not nickname:
@@ -762,7 +979,29 @@ def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
         row.get("updated_at"),
     )
 
-    inventory_cell = f"""
+    if _is_stone_mode_value(db_mode):
+        locked_value = str(form_values.get("locked_item_count") or "")
+        tradable_value = str(form_values.get("tradable_item_count") or "")
+        try:
+            total_value = str(max(0, int(locked_value or 0)) + max(0, int(tradable_value or 0)))
+        except (TypeError, ValueError):
+            total_value = str(form_values.get("baseline_item_count") or row.get("baseline_item_count") or 0)
+        inventory_cell = f"""
+<div class="inline-field inventory-field">
+  <div class="inventory-inline-row inventory-split-row">
+    <input class="inventory-input" style="color:#dc2626;font-weight:700;" form="{escape(form_id, quote=True)}" type="number" name="locked_item_count" step="1" min="0" required value="{escape(locked_value, quote=True)}" title="不可交易">
+    <span class="inventory-op">+</span>
+    <input class="inventory-input" style="color:#15803d;font-weight:700;" form="{escape(form_id, quote=True)}" type="number" name="tradable_item_count" step="1" min="0" required value="{escape(tradable_value, quote=True)}" title="可交易">
+    <span class="inventory-op">=</span>
+    <div class="readonly-value inventory-value">{escape(total_value)}</div>
+    <div class="muted-text inventory-updated">{update_tip}</div>
+  </div>
+  {_render_field_error(field_errors, "locked_item_count")}
+  {_render_field_error(field_errors, "tradable_item_count")}
+</div>
+"""
+    else:
+        inventory_cell = f"""
 <div class="inline-field inventory-field">
   <div class="inventory-inline-row">
     <input class="inventory-input" form="{escape(form_id, quote=True)}" type="number" name="baseline_item_count" step="1" min="0" required value="{escape(str(form_values.get('baseline_item_count') or ''), quote=True)}">
@@ -813,9 +1052,10 @@ def _build_account_list_rows(rows, edit_meta=None, edit_result=None, read_only_m
     effective_rows = rows if rows else _build_demo_account_rows()
 
     row_items = []
+    db_mode = str((edit_meta or {}).get("db_mode") or "stone").strip() or "stone"
     for row_index, row in enumerate(effective_rows, start=1):
         if using_demo_rows or read_only_mode:
-            inventory_cell, balance_cell, status_cell, action_cell = _render_local_read_only_cells(row)
+            inventory_cell, balance_cell, status_cell, action_cell = _render_local_read_only_cells(row, db_mode)
         else:
             inventory_cell, balance_cell, status_cell, action_cell = _render_inline_edit_cells(
                 row,
@@ -866,13 +1106,14 @@ def _render_remote_refresh_result(section, refresh_result):
     return f'<div class="{css_class}"><strong>刷新结果：</strong>{message}</div>'
 
 
-def _build_remote_account_list_rows(section):
+def _build_remote_account_list_rows(section, db_mode=None):
+    effective_db_mode = db_mode or section.get("db_mode") or "stone"
     row_items = []
     for row in section.get("rows") or []:
         status_text = str(row.get("round_status") or "").strip()
         cells = (
             _format_value(row.get("nickname")),
-            _format_value(row.get("baseline_item_count")),
+            _render_inventory_split_display(row, effective_db_mode),
             _format_balance_wan_display(row.get("current_balance_wan")),
             _render_remote_countdown_cell(row, "runtime_window_remaining_seconds"),
             _render_remote_countdown_cell(row, "cooldown_remaining_seconds"),
@@ -886,14 +1127,14 @@ def _build_remote_account_list_rows(section):
     return row_items
 
 
-def _build_public_local_snapshot_rows(rows):
+def _build_public_local_snapshot_rows(rows, db_mode="stone"):
     row_items = []
     for row in rows or []:
         status_text = str(row.get("round_status") or "").strip()
         cells = (
             _format_value(row.get("current_execution_slot")),
             _format_value(row.get("nickname")),
-            _format_value(row.get("baseline_item_count") or row.get("inventory_quantity")),
+            _render_inventory_split_display(row, db_mode),
             _format_balance_wan_display(row.get("current_balance_wan")),
             _format_runtime_remaining_text(row.get("runtime_window_remaining_text")),
             _format_cooldown_remaining_time(row.get("cooldown_remaining_seconds")),
@@ -1022,7 +1263,7 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None, 
         ("账号状态", record.get("round_status")),
         (labels["balance_label"], _format_balance_wan_display(record.get("current_balance_wan"))),
         (labels["balance_label"].replace("（万）", "原始存储"), record.get("current_balance")),
-        (labels["inventory_label"], record.get("baseline_item_count")),
+        (labels["inventory_label"], {"html": _render_inventory_split_display(record, labels["db_mode"])}),
         ("更新", record.get("updated_at_relative")),
         ("更新时间原值", record.get("updated_at")),
         ("本轮抢购成功数", record.get("round_purchase_success_count")),
@@ -1061,7 +1302,7 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None, 
 
 <div class="section">
   <h2>基础字段</h2>
-  {_render_kv_table(base_items)}
+  {_render_kv_table_html(base_items)}
 </div>
 
 <div class="section">
@@ -1109,6 +1350,7 @@ def render_message_page(title, message, detail_items=None, back_href="/", back_l
 
 def render_account_detail_page(detail_result, runtime_result, edit_result=None, read_only_mode=True):
     del edit_result, read_only_mode
+    labels = _db_mode_labels(_normalize_db_mode_from_view(detail_result))
     record = detail_result.get("record")
     health = detail_result.get("health") or {}
     lookup = detail_result.get("lookup") or {}
@@ -1136,7 +1378,7 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None, 
         ("账号状态", record.get("round_status")),
         ("余额（万）", _format_balance_wan_display(record.get("current_balance_wan"))),
         ("余额原始存储", record.get("current_balance")),
-        ("道具库存", record.get("baseline_item_count")),
+        (labels["inventory_label"], {"html": _render_inventory_split_display(record, labels["db_mode"])}),
         ("更新", record.get("updated_at_relative")),
         ("更新时间原值", record.get("updated_at")),
         ("本轮抢购成功数", record.get("round_purchase_success_count")),
@@ -1173,7 +1415,7 @@ def render_account_detail_page(detail_result, runtime_result, edit_result=None, 
 
 <div class="section">
   <h2>基础字段</h2>
-  {_render_kv_table(base_items)}
+  {_render_kv_table_html(base_items)}
 </div>
 
 <div class="section">
@@ -1320,6 +1562,7 @@ def render_index_page(
 {remote_sections_html}
 {_render_more_info_entry()}
 {page_edit_result_html}
+{_render_home_table_layout_style()}
 {_build_restore_scroll_script(edit_result)}
 {_build_inline_save_scroll_script() if not read_only_mode and not using_demo_rows else ""}
 {_build_refresh_scroll_script()}
@@ -1380,7 +1623,7 @@ def _render_remote_refresh_toolbar(section, refresh_result=None):
 def _render_remote_machine_section(section, refresh_result=None, labels=None):
     labels = labels or _db_mode_labels(section.get("db_mode"))
     rows = section.get("rows") or []
-    row_items = _build_remote_account_list_rows(section)
+    row_items = _build_remote_account_list_rows(section, labels["db_mode"])
     summary_html = _build_linear_summary_cards(section.get("machine_daily_summaries"), labels["summary_change_label"])
     empty_html = f'<p class="muted-text">{escape(str(section.get("message") or "暂无远端镜像数据。"))}</p>' if not rows else ""
 
@@ -1452,7 +1695,7 @@ def _render_public_remote_refresh_toolbar(section, refresh_result=None):
 
 def _render_public_remote_machine_section(section, grid_index, refresh_result=None, labels=None):
     labels = labels or _db_mode_labels(section.get("db_mode"))
-    row_items = _build_remote_account_list_rows(section)
+    row_items = _build_remote_account_list_rows(section, labels["db_mode"])
     summary_html = _build_linear_summary_cards(section.get("machine_daily_summaries"), labels["summary_change_label"])
     empty_message = str(section.get("message") or "暂无远端快照数据。")
     empty_html = (
@@ -1500,7 +1743,7 @@ def render_public_snapshot_page(view_rows_result, remote_machine_sections=None, 
         view_rows_result.get("machine_daily_summaries"),
         labels["summary_change_label"],
     )
-    local_row_items = _build_public_local_snapshot_rows(rows)
+    local_row_items = _build_public_local_snapshot_rows(rows, labels["db_mode"])
 
     remote_machine_sections = list(remote_machine_sections or [])
     if not remote_machine_sections:

@@ -51,6 +51,7 @@ from local_switch_account_config import (
     resolve_account_switch_source_slot_for_execution_slot,
     resolve_execution_slot_account_index,
 )
+from round_persistence import mature_stone_unlocks_for_current_account
 from overlay import toggle_pause, ui_print
 from utils import (
     async_push_msg,
@@ -187,6 +188,9 @@ def _apply_verified_slot_record_to_state(record, allow_start_time=None, allow_pu
         return
     state.current_nickname = record.nickname
     state.baseline_item_count = record.baseline_item_count
+    state.locked_item_count = record.locked_item_count
+    state.tradable_item_count = record.tradable_item_count
+    state.next_tradable_at = record.next_tradable_at
     state.last_limit_time = record.last_limit_time
     state.last_account_end_time = record.last_account_end_time
     state.updated_at = record.updated_at
@@ -198,6 +202,7 @@ def _apply_verified_slot_record_to_state(record, allow_start_time=None, allow_pu
     state.account_allow_start_time = allow_start_time or datetime.now()
     state.account_read_status = "ready" if allow_purchase else "waiting_limit_time"
     state.account_is_waiting = not allow_purchase
+    mature_stone_unlocks_for_current_account("换号读账号后")
     state.account_read_error = ""
     state.overlay_status = "抢购中" if allow_purchase else "等待抢购时间"
 

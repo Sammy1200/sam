@@ -15,15 +15,17 @@
 - 不改变主线真源规则
 - 不引入双向同步语义
 
-当前网页最小修改只允许以下 3 个字段：
-- 道具数量（实际写入 `baseline_item_count`）
+当前网页最小修改只允许以下字段：
+- 石头库库存：只允许修改 `locked_item_count` 和 `tradable_item_count`，页面按“不可交易 + 可交易 = 总库存”展示，总库存 `baseline_item_count` 只读并由两者相加计算
+- 饰品库库存：继续旧口径，允许修改 `baseline_item_count`
 - 账号状态（`round_status`）
 - 余额（`current_balance`，页面按“万”为单位输入和展示）
 
 当前网页支持 `石头库 / 饰品库` 切换：
 - 石头库对应 `C:\py666\account_stats.sqlite3`，页面显示 `道具库存`、`余额（万）`
 - 饰品库对应 `C:\py666\accessory_account_stats.sqlite3`，页面显示 `饰品库存`、`金币（万）`
-- 本机查看页切到哪个库就保存到哪个库；保存字段、校验规则和回读确认沿用同一套逻辑
+- 本机查看页切到哪个库就保存到哪个库；石头库保存拆分库存，饰品库保存旧库存字段，状态与余额仍沿用同一套校验和回读确认逻辑
+- 公网页 `/public-snapshot` 只读展示同样按 `db_mode` 区分库存口径：石头库显示 `locked_item_count + tradable_item_count = baseline_item_count`，饰品库继续显示旧 `baseline_item_count`
 - `账号状态`、`可运行时间`、`冷却剩余时间` 是两库通用数据；网页或脚本在任意一边修改后，会同步到底层另一边的 `round_status`、`purchase_running_seconds`、`runtime_window_start_time`、`last_limit_time`
 - 库存、余额/金币、抢购数、上架数仍按库隔离：石头库保存石头数据，饰品库保存饰品数据，不能互相覆盖
 

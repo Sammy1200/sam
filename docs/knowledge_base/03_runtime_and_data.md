@@ -28,6 +28,7 @@ canonical SQLite 是当前系统的唯一真实数据源。
 它负责承载当前主线认可的账号事实，包括：
 
 - 道具库存基线
+- 石头模式不可交易库存、可交易库存和最早解锁时间
 - 当前执行位
 - 当前轮次成功/失败/上架计数
 - 当前余额
@@ -36,6 +37,45 @@ canonical SQLite 是当前系统的唯一真实数据源。
 - 时间锚点字段
 
 网页、悬浮窗、远端镜像都可以引用它，但不能替代它。
+
+## 石头道具 72 小时不可交易库存
+
+石头道具库存第一阶段已经完成数据模型与核心入库口径，第二阶段已经完成网页展示与手动修改口径，待统一实机验收。石头库中 `baseline_item_count` 继续作为兼容总库存字段存在，同时新增：
+
+- `locked_item_count`：不可交易数量
+- `tradable_item_count`：可交易数量
+- `next_tradable_at`：当前账号最早 pending 批次到期时间，可为空
+
+石头模式下固定满足：
+
+- `baseline_item_count = locked_item_count + tradable_item_count`
+- 旧记录迁移时，原 `baseline_item_count` 全部进入 `tradable_item_count`
+- 旧记录的 `locked_item_count` 初始化为 `0`
+- 旧库存不生成 pending 批次
+- 新抢购成功的石头进入 `locked_item_count`，同时生成 72 小时 pending 批次
+- 到期结转时，pending 批次从 `pending` 变为 `matured`，库存从不可交易转入可交易，总库存不变
+- 上架成功只能扣 `tradable_item_count`，不得用 `locked_item_count` 抵扣
+
+pending 批次表为 `stone_item_unlock_batches`，核心字段包括：
+
+- `nickname`
+- `quantity`
+- `acquired_at`
+- `tradable_at`
+- `status`：`pending` / `matured` / `cancelled`
+- `created_at`
+- `updated_at`
+
+网页查看页在石头库下按“不可交易 + 可交易 = 总库存”展示，例如 `150 + 200 = 350`：
+
+- 不可交易数量对应 `locked_item_count`，网页显示为红色，可手动修改
+- 可交易数量对应 `tradable_item_count`，网页显示为绿色，可手动修改
+- 总库存对应 `baseline_item_count`，只读展示，保存时由 `locked_item_count + tradable_item_count` 自动计算
+- 手动调大不可交易数量时，只给新增部分生成 72 小时 `pending` 批次
+- 手动调小不可交易数量时，按 `tradable_at` 最近到期优先把对应数量的 `pending` 批次改为 `cancelled`
+- 如果 pending 批次数量不足以作废，本次网页保存失败，不允许制造负库存或静默改坏数据
+
+饰品模式不启用这套拆分逻辑。饰品库继续使用旧库存口径，饰品库存仍按 `baseline_item_count` 理解。
 
 ## 为什么昵称是唯一键
 
@@ -57,7 +97,7 @@ canonical SQLite 是当前系统的唯一真实数据源。
 
 默认执行位数量仍是 `1-8`。如果真实本机 `local_switch_account_config.json` 显式声明 `execution_slot_count` 以及对应的大区索引、昵称模板、下一执行位映射和跨账号边界，脚本会按该本机配置扩展执行位范围，例如 4号电脑可使用 `1-9`。
 
-临时号不写入 canonical `account_stats`，它的展示执行位按“当前本机执行位数量 + 1”派生；因此 9 执行位机器上的临时号展示位是 10，默认 8 执行位机器仍是 9。
+临时号不写入 canonical `account_stats`，网页账号列表也不再追加展示临时号辅助快照。
 
 ## `updated_at` 与 `last_account_end_time` 的区别
 
@@ -217,7 +257,7 @@ canonical SQLite 是当前系统的唯一真实数据源。
 下面这些值是辅助快照，不应替代 canonical：
 
 - `thread6_runtime.sqlite3` 中的当前执行位与当前昵称
-- `thread6_runtime.sqlite3` 中的 `临时号` 辅助快照；它只用于查看页和公网 Snapshot 栏目展示，不写入 canonical `account_stats`
+- `thread6_runtime.sqlite3` 中的 `临时号` 辅助快照不写入 canonical `account_stats`，也不追加到网页账号列表
 - `remote_sync_mirror.sqlite3` 中的远端镜像行
 - 网页上的相对时间、剩余时间、健康摘要
 

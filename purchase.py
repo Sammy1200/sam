@@ -36,9 +36,11 @@ from config import (
 from overlay import toggle_pause, ui_print, update_score_text
 from round_persistence import (
     ensure_active_runtime_window_state,
+    mature_stone_unlocks_for_current_account,
     persist_account_limit_reached_if_needed,
     persist_temporary_account_snapshot,
     persist_minimal_item_balance_sync,
+    record_stone_purchase_success_for_current_account,
     record_daily_purchase_fail,
     record_daily_purchase_success,
 )
@@ -310,10 +312,10 @@ def parse_balance_text_to_value(balance_text):
         return None
 
 
-def wait_and_recognize_balance(wait_time, camera):
+def wait_and_recognize_balance(wait_time, camera, start_total=None):
     """等待回到交易行，并在此阶段检查余额是否不足。"""
     gc_checkpoint()
-    start_total = time.time()
+    start_total = start_total or time.time()
     while time.time() - start_total < 1.4:
         if state.IS_PAUSED:
             return False
@@ -551,6 +553,7 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
     else:
         state.last_resume_time = None
     ensure_active_runtime_window_state()
+    mature_stone_unlocks_for_current_account("抢购开始前")
 
     last_refresh = time.time()
     last_frame = None
@@ -659,7 +662,6 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                         if frame_after is not None and is_image_present(frame_after, MONITOR_SUCCESS, temp_success):
                             state.success_count += 1
                             state.round_purchase_success_count += 1
-                            state.baseline_item_count += 1
                             record_daily_purchase_success()
                             purchase_succeeded = True
                             last_success_time = last_idle_push_time = time.time()
@@ -679,7 +681,21 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
                             ui_print(f"抢购失败，价格：{price}", save_log=True, show_console=False)
                             click_exit()
 
-                        if wait_and_recognize_balance(EXIT_DELAY, camera):
+                        wait_window_started_at = time.time()
+                        inventory_write_failed = False
+                        if purchase_succeeded:
+                            stone_inventory_result = record_stone_purchase_success_for_current_account()
+                            if stone_inventory_result.status not in ("success", "skipped"):
+                                logger.warning("[石头库存] 抢购成功后锁定库存写入失败：%s", stone_inventory_result.reason)
+                                ui_print("锁定库存失败", save_log=True)
+                                inventory_write_failed = True
+                                if not state.IS_PAUSED:
+                                    toggle_pause()
+                            write_elapsed = time.time() - wait_window_started_at
+                            if write_elapsed > EXIT_DELAY:
+                                logger.warning("[石头库存] 抢购成功后写库耗时 %.3f 秒，超过等待窗口 %.3f 秒。", write_elapsed, EXIT_DELAY)
+
+                        if wait_and_recognize_balance(EXIT_DELAY, camera, start_total=wait_window_started_at):
                             if purchase_succeeded:
                                 sync_result = persist_minimal_item_balance_sync()
                                 if sync_result.status not in ("success", "skipped"):
