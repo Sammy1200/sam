@@ -45,6 +45,8 @@ def _extract_answer(raw_answer: str) -> str | None:
         return true_match.group("value")
 
     tokens = [match.group("value") for match in ANSWER_TOKEN_RE.finditer(text)]
+    if "错误识别成" in text and tokens:
+        return tokens[0]
     if tokens:
         return tokens[-1]
     return None

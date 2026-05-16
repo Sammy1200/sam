@@ -4,6 +4,7 @@ import time
 from datetime import datetime
 
 import state
+from account_db import ROUND_STATUS_BALANCE_LOW
 from config import (
     ACCOUNT_MAX_PURCHASE_SECONDS,
     ACCESSORY_ACTION_DELAY_SECONDS,
@@ -37,6 +38,7 @@ from config import (
     ACCESSORY_TRADE_PAGE_MONITOR,
     ACCESSORY_TRADE_READY_CONFIRM_DELAY_SECONDS,
     ACCESSORY_TRACE_ENABLED,
+    BALANCE_INSUFFICIENT_THRESHOLD,
     BUY_POS,
     CONFIRM_DELAY,
     CONFIRM_POS,
@@ -153,17 +155,7 @@ def _accessory_trace(step, **fields):
     if not ACCESSORY_TRACE_ENABLED:
         return
     now = time.perf_counter()
-    base_time = getattr(_accessory_trace, "base_time", now)
-    last_time = getattr(_accessory_trace, "last_time", now)
     _accessory_trace.last_time = now
-    details = " ".join(f"{key}={value}" for key, value in fields.items())
-    logger.info(
-        "[饰品追踪] +%.1fms total=%.3fs %s%s",
-        (now - last_time) * 1000,
-        now - base_time,
-        step,
-        f" {details}" if details else "",
-    )
 
 
 def _clear_accessory_live_round_triplet_for_account_switch(reason):
@@ -207,6 +199,27 @@ def _mark_accessory_account_limited(reason):
     ui_print("饰品账号限制", save_log=True)
     print(f"[饰品抢购] {reason}，已判定账号限制。")
     logger.info("[饰品抢购] %s，已判定账号限制。", reason)
+
+
+def _mark_accessory_balance_insufficient(balance_text):
+    if state.need_switch_server and state.account_round_end_status == ROUND_STATUS_BALANCE_LOW:
+        return
+    now = datetime.now()
+    balance_text = str(balance_text or "").strip()
+    state.account_round_end_status = ROUND_STATUS_BALANCE_LOW
+    state.round_status = ROUND_STATUS_BALANCE_LOW
+    state.overlay_status = ROUND_STATUS_BALANCE_LOW
+    state.account_limit_reached_at = now
+    state.last_limit_time = now
+    state.need_switch_server = True
+    state.purchase_timer_active = False
+    state.last_resume_time = None
+    state.accessory_skip_trade_ready_wait_once = False
+    state.accessory_next_item_click_not_before = None
+    _clear_accessory_live_round_triplet_for_account_switch("饰品余额不足触发换号前")
+    ui_print("饰品余额不足", save_log=True)
+    print(f"[饰品抢购] 金币余额低于 1000 万：{balance_text}，已触发自动换号。")
+    logger.info("[饰品抢购] 金币余额低于 1000 万：%s，已触发自动换号。", balance_text)
 
 
 def _recover_accessory_trade_page(camera):
@@ -391,9 +404,23 @@ def _update_accessory_balance_state_from_recognition(recognition):
     }
 
 
+def _check_accessory_balance_limit(balance_info):
+    if state.need_switch_server:
+        return False
+    effective_balance_value = balance_info.get("effective_value")
+    if effective_balance_value is None:
+        return True
+    if effective_balance_value < BALANCE_INSUFFICIENT_THRESHOLD:
+        _mark_accessory_balance_insufficient(balance_info.get("effective_text"))
+        return False
+    return True
+
+
 def _recognize_accessory_balance_from_frame(frame):
     recognition = get_balance_recognition(frame) if frame is not None else {}
-    return _update_accessory_balance_state_from_recognition(recognition)
+    balance_info = _update_accessory_balance_state_from_recognition(recognition)
+    _check_accessory_balance_limit(balance_info)
+    return balance_info
 
 
 def _run_if_before_accessory_deadline(deadline, callback, *args):
@@ -601,6 +628,8 @@ def run_accessory_purchase_loop(camera, temp_success):
                 if not initial_balance_synced:
                     _sync_initial_accessory_balance(safe_get_frame(camera))
                     initial_balance_synced = True
+                    if state.need_switch_server:
+                        return
                 _wait_accessory_next_item_click_deadline()
                 if not _open_next_accessory_item_page(camera):
                     if state.need_switch_server:

@@ -25,6 +25,7 @@ from account_db import (
     read_canonical_account_stats_record,
     read_preferred_canonical_account_stats_record_by_execution_slot,
     record_stone_item_purchase_success,
+    record_startup_listing_item_success,
     reset_temporary_account_snapshot,
     save_canonical_account_stats_record,
     save_temporary_account_snapshot,
@@ -186,6 +187,30 @@ def record_stone_listing_success_for_current_account():
         state.next_tradable_at,
         1,
     )
+
+
+def record_startup_listing_success_for_current_account():
+    """启动页上架成功：可交易优先，不足时扣最近到期的不可交易 pending。"""
+    if not _is_stone_inventory_split_active():
+        if state.baseline_item_count > 0:
+            state.baseline_item_count -= 1
+        else:
+            state.baseline_item_count = 0
+        return AccountWriteResult("skipped", "非石头库存拆分模式", int(state.baseline_item_count))
+    if not state.account_record_loaded or not state.account_db_path or not state.current_nickname:
+        return AccountWriteResult("skipped", "当前账号未加载")
+
+    mature_stone_unlocks_for_current_account("启动页上架扣库存前")
+    result = record_startup_listing_item_success(
+        state.account_db_path,
+        state.current_nickname,
+        table_name=state.account_db_table_name or CANONICAL_ACCOUNT_STATS_TABLE,
+    )
+    if result.status == "success":
+        _apply_stone_inventory_result(result)
+    else:
+        logger.warning("[石头库存] 启动页上架扣库存失败：nickname=%s reason=%s", state.current_nickname, result.reason)
+    return result
 
 
 def record_stone_unlist_recovered_for_current_account():

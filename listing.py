@@ -49,6 +49,7 @@ from overlay import move_overlay, toggle_pause, ui_print, update_score_text
 from round_persistence import (
     has_tradable_inventory_for_listing,
     persist_minimal_item_balance_sync,
+    record_startup_listing_success_for_current_account,
     record_stone_listing_success_for_current_account,
     record_stone_unlist_recovered_for_current_account,
     record_daily_listing_success,
@@ -544,19 +545,23 @@ def _disable_periodic_listing(reason):
     ui_print(reason, save_log=True)
 
 
-def _sync_listing_success_for_current_account():
-    """上架成功后扣减库存并立即同步真源。"""
-    inventory_result = record_stone_listing_success_for_current_account()
-    if inventory_result.status == "insufficient_tradable":
-        ui_print("可交易不足", save_log=True)
+def _has_startup_listing_inventory():
+    return int(getattr(state, "baseline_item_count", 0) or 0) > 0
+
+
+def _sync_startup_listing_success_for_current_account():
+    """启动页上架成功后扣减库存并立即同步真源。"""
+    inventory_result = record_startup_listing_success_for_current_account()
+    if inventory_result.status in ("insufficient_inventory", "insufficient_pending_batches", "invalid_pending_batch"):
+        ui_print("库存扣减失败", save_log=True)
         if not state.IS_PAUSED:
             toggle_pause()
-        return
+        return False
     if inventory_result.status not in ("success", "skipped"):
         ui_print("库存扣减失败", save_log=True)
         if not state.IS_PAUSED:
             toggle_pause()
-        return
+        return False
 
     if state.overlay_root:
         try:
@@ -569,6 +574,7 @@ def _sync_listing_success_for_current_account():
     if sync_result.status not in ("success", "skipped"):
         logger.warning("[上架] 实时库存同步失败：%s", sync_result.reason)
         ui_print("库存同步失败", save_log=True)
+    return True
 
 
 def _open_listing_panel(camera_obj):
@@ -695,13 +701,13 @@ def execute_startup_listing_batch(camera_obj, target_success_count):
                 "reason": "目标上架数无效",
                 "listed_count": 0,
             }
-        if not has_tradable_inventory_for_listing():
-            ui_print("可交易不足", save_log=True)
+        if not _has_startup_listing_inventory():
+            ui_print("库存不足", save_log=True)
             if not state.IS_PAUSED:
                 toggle_pause()
             return {
                 "status": "failed",
-                "reason": "可交易库存不足",
+                "reason": "道具库存不足",
                 "listed_count": 0,
             }
 
@@ -722,12 +728,12 @@ def execute_startup_listing_batch(camera_obj, target_success_count):
 
         ui_print(f"目标{target_success_count}", save_log=True)
         while batch_listed < int(target_success_count):
-            if not has_tradable_inventory_for_listing():
-                ui_print("可交易不足", save_log=True)
+            if not _has_startup_listing_inventory():
+                ui_print("库存不足", save_log=True)
                 if not state.IS_PAUSED:
                     toggle_pause()
                 final_status = "failed"
-                final_reason = "可交易库存不足"
+                final_reason = "道具库存不足"
                 break
             wait_capacity_result = _wait_startup_listing_capacity_available(camera_obj, current_capacity)
             if wait_capacity_result.get("status") != "success":
@@ -808,7 +814,10 @@ def execute_startup_listing_batch(camera_obj, target_success_count):
                         batch_listed += 1
                         state.total_listed_count += 1
                         state.round_listing_success_count += 1
-                        _sync_listing_success_for_current_account()
+                        if not _sync_startup_listing_success_for_current_account():
+                            final_status = "failed"
+                            final_reason = "库存扣减失败"
+                            break
                         fail_strike = 0
                         ui_print(f"上架{batch_listed}", save_log=True)
                         continue
@@ -833,7 +842,10 @@ def execute_startup_listing_batch(camera_obj, target_success_count):
             batch_listed += 1
             state.total_listed_count += 1
             state.round_listing_success_count += 1
-            _sync_listing_success_for_current_account()
+            if not _sync_startup_listing_success_for_current_account():
+                final_status = "failed"
+                final_reason = "库存扣减失败"
+                break
             fail_strike = 0
             ui_print(f"上架{batch_listed}", save_log=True)
             continue
@@ -863,7 +875,10 @@ def execute_startup_listing_batch(camera_obj, target_success_count):
             batch_listed += 1
             state.total_listed_count += 1
             state.round_listing_success_count += 1
-            _sync_listing_success_for_current_account()
+            if not _sync_startup_listing_success_for_current_account():
+                final_status = "failed"
+                final_reason = "库存扣减失败"
+                break
             fail_strike = 0
             ui_print(f"上架{batch_listed}", save_log=True)
 

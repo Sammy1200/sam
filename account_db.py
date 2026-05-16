@@ -2801,6 +2801,162 @@ def record_stone_item_purchase_success(
         conn.close()
 
 
+def record_startup_listing_item_success(
+    database_path,
+    nickname,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+):
+    normalized_nickname = str(nickname or "").strip()
+    if not normalized_nickname:
+        return AccountWriteResult("nickname_missing", "当前昵称为空")
+    if not database_path or not os.path.isfile(database_path):
+        return AccountWriteResult("db_unavailable", f"数据库文件不存在: {database_path}")
+
+    ensure_canonical_account_stats_table(database_path, table_name)
+    write_time = datetime.now()
+
+    conn = sqlite3.connect(database_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = _read_stone_inventory_row(conn, table_name, normalized_nickname)
+        if row is None:
+            conn.rollback()
+            return AccountWriteResult("account_not_found", f"未找到昵称为 {normalized_nickname} 的账号记录")
+
+        locked_item_count = _parse_int(row["locked_item_count"])
+        tradable_item_count = _parse_int(row["tradable_item_count"])
+        if locked_item_count + tradable_item_count <= 0:
+            conn.rollback()
+            return AccountWriteResult(
+                "insufficient_inventory",
+                "道具库存不足",
+                _parse_int(row["baseline_item_count"]),
+                locked_item_count,
+                tradable_item_count,
+                _parse_datetime(row["next_tradable_at"]),
+            )
+
+        if tradable_item_count > 0:
+            new_locked_item_count = locked_item_count
+            new_tradable_item_count = tradable_item_count - 1
+        elif locked_item_count > 0:
+            batch = conn.execute(
+                f"SELECT {_quote_identifier('id')}, {_quote_identifier('quantity')} "
+                f"FROM {_quote_identifier(STONE_ITEM_UNLOCK_BATCHES_TABLE)} "
+                f"WHERE {_quote_identifier('nickname')} = ? "
+                f"AND {_quote_identifier('status')} = ? "
+                f"ORDER BY {_quote_identifier('tradable_at')} ASC, {_quote_identifier('id')} ASC "
+                f"LIMIT 1",
+                (normalized_nickname, STONE_UNLOCK_STATUS_PENDING),
+            ).fetchone()
+            if batch is None:
+                conn.rollback()
+                return AccountWriteResult(
+                    "insufficient_pending_batches",
+                    "pending 批次数量不足，无法扣减不可交易库存",
+                    _parse_int(row["baseline_item_count"]),
+                    locked_item_count,
+                    tradable_item_count,
+                    _parse_datetime(row["next_tradable_at"]),
+                )
+
+            batch_quantity = _parse_int(batch["quantity"])
+            if batch_quantity <= 0:
+                conn.rollback()
+                return AccountWriteResult(
+                    "invalid_pending_batch",
+                    f"pending 批次数量异常: {batch_quantity}",
+                    _parse_int(row["baseline_item_count"]),
+                    locked_item_count,
+                    tradable_item_count,
+                    _parse_datetime(row["next_tradable_at"]),
+                )
+            if batch_quantity > locked_item_count:
+                conn.rollback()
+                return AccountWriteResult(
+                    "inventory_mismatch",
+                    "pending 批次数量超过不可交易库存",
+                    _parse_int(row["baseline_item_count"]),
+                    locked_item_count,
+                    tradable_item_count,
+                    _parse_datetime(row["next_tradable_at"]),
+                )
+
+            if batch_quantity == 1:
+                conn.execute(
+                    f"UPDATE {_quote_identifier(STONE_ITEM_UNLOCK_BATCHES_TABLE)} "
+                    f"SET {_quote_identifier('status')} = ?, {_quote_identifier('updated_at')} = ? "
+                    f"WHERE {_quote_identifier('id')} = ?",
+                    (
+                        STONE_UNLOCK_STATUS_CANCELLED,
+                        _serialize_datetime(write_time),
+                        batch["id"],
+                    ),
+                )
+            else:
+                conn.execute(
+                    f"UPDATE {_quote_identifier(STONE_ITEM_UNLOCK_BATCHES_TABLE)} "
+                    f"SET {_quote_identifier('quantity')} = ?, {_quote_identifier('updated_at')} = ? "
+                    f"WHERE {_quote_identifier('id')} = ?",
+                    (
+                        batch_quantity - 1,
+                        _serialize_datetime(write_time),
+                        batch["id"],
+                    ),
+                )
+            new_locked_item_count = locked_item_count - 1
+            new_tradable_item_count = 0
+        else:
+            conn.rollback()
+            return AccountWriteResult(
+                "insufficient_inventory",
+                "道具库存不足",
+                _parse_int(row["baseline_item_count"]),
+                locked_item_count,
+                tradable_item_count,
+                _parse_datetime(row["next_tradable_at"]),
+            )
+
+        new_baseline_item_count = new_locked_item_count + new_tradable_item_count
+        next_tradable_at = _get_next_pending_stone_tradable_at(conn, normalized_nickname)
+        conn.execute(
+            f"UPDATE {_quote_identifier(table_name)} "
+            f"SET {_quote_identifier('baseline_item_count')} = ?, "
+            f"{_quote_identifier('locked_item_count')} = ?, "
+            f"{_quote_identifier('tradable_item_count')} = ?, "
+            f"{_quote_identifier('next_tradable_at')} = ?, "
+            f"{_quote_identifier('updated_at')} = ? "
+            f"WHERE {_quote_identifier('nickname')} = ?",
+            (
+                new_baseline_item_count,
+                new_locked_item_count,
+                new_tradable_item_count,
+                _serialize_datetime(next_tradable_at),
+                _serialize_datetime(write_time),
+                normalized_nickname,
+            ),
+        )
+        conn.commit()
+        return AccountWriteResult(
+            "success",
+            "",
+            new_baseline_item_count,
+            new_locked_item_count,
+            new_tradable_item_count,
+            next_tradable_at,
+            1,
+        )
+    except sqlite3.Error as exc:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return AccountWriteResult("write_failed", f"启动页上架库存扣减失败: {exc}")
+    finally:
+        conn.close()
+
+
 def update_stone_inventory_split_manual(
     database_path,
     nickname,

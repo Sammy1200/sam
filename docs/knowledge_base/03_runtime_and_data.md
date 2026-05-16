@@ -54,7 +54,8 @@ canonical SQLite 是当前系统的唯一真实数据源。
 - 旧库存不生成 pending 批次
 - 新抢购成功的石头进入 `locked_item_count`，同时生成 72 小时 pending 批次
 - 到期结转时，pending 批次从 `pending` 变为 `matured`，库存从不可交易转入可交易，总库存不变
-- 上架成功只能扣 `tradable_item_count`，不得用 `locked_item_count` 抵扣
+- 普通预上架、换号后预上架与周期上架成功只能扣 `tradable_item_count`，不得用 `locked_item_count` 抵扣
+- 启动页上架模式是唯一例外：可交易为 `0` 但游戏已验证上架成功时，允许按 `tradable_at ASC, id ASC` 扣最近到期的 pending 不可交易库存；批次数量为 `1` 时标记 `cancelled`，大于 `1` 时只把该批次 `quantity - 1`
 
 pending 批次表为 `stone_item_unlock_batches`，核心字段包括：
 
@@ -180,7 +181,7 @@ pending 批次表为 `stone_item_unlock_batches`，核心字段包括：
   - `round_purchase_success_count`
   - `round_listing_success_count`
   - `round_purchase_fail_count`
-- 饰品抢购模式中，如果当前账号命中 `账号限制` 或 `抢购时长已到` 并准备换号，也沿用同一套三项即时清零口径。
+- 饰品抢购模式中，如果当前账号命中 `余额不足`、`账号限制` 或 `抢购时长已到` 并准备换号，也沿用同一套三项即时清零口径。
 - 但 canonical SQLite 仍沿用最终收尾步骤统一写零，不在状态命中瞬间额外新增一轮“三项立即清库”。
 - 启动页上架模式中，每个账号成功下号并确认回到启动页后，当前进程里的 `round_listing_success_count` 与兼容显示字段会立刻清零；同时，当前账号在 canonical SQLite 里的 `round_listing_success_count` 也会被清零。
 - 启动页上架模式最终微信汇总使用“下号前快照”生成，不受下号后清零动作影响。

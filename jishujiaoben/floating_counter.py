@@ -376,17 +376,25 @@ class FloatingCounter:
         self.quick_trade_mouse_user32 = user32
         self._poll_quick_trade_hotkey()
 
+    def _is_text_input_focused(self) -> bool:
+        try:
+            focused_widget = self.root.focus_get()
+        except Exception:
+            return False
+        return isinstance(focused_widget, tk.Entry)
+
     def _poll_quick_trade_hotkey(self) -> None:
         if self.is_closed or self.quick_trade_user32 is None:
             return
 
         try:
             is_add_down = bool(self.quick_trade_user32.GetAsyncKeyState(_VK_NUMPAD_ADD) & 0x8000)
-            if is_add_down and not self.quick_trade_last_add_down:
+            input_focused = self._is_text_input_focused()
+            if is_add_down and not self.quick_trade_last_add_down and not input_focused:
                 self._toggle_quick_trade()
             self.quick_trade_last_add_down = is_add_down
             is_subtract_down = bool(self.quick_trade_user32.GetAsyncKeyState(_VK_NUMPAD_SUBTRACT) & 0x8000)
-            if is_subtract_down and not self.quick_trade_last_subtract_down:
+            if is_subtract_down and not self.quick_trade_last_subtract_down and not input_focused:
                 self._run_quick_trade_test_step()
             self.quick_trade_last_subtract_down = is_subtract_down
             self.quick_trade_hotkey_after_id = self.root.after(50, self._poll_quick_trade_hotkey)
