@@ -21,6 +21,7 @@ from account_db import (
     ACCOUNT_DB_MODE_STONE,
     find_canonical_account_stats_store,
     increment_machine_daily_summary_event,
+    mature_all_stone_item_unlock_batches,
     mature_stone_item_unlock_batches,
     read_canonical_account_stats_record,
     read_preferred_canonical_account_stats_record_by_execution_slot,
@@ -127,6 +128,34 @@ def mature_stone_unlocks_for_current_account(reason=""):
         logger.warning("[石头库存] 到期结转异常：reason=%s nickname=%s %s", reason, state.current_nickname, result.reason)
     elif result.status not in ("success", "skipped"):
         logger.warning("[石头库存] 到期结转失败：reason=%s nickname=%s %s", reason, state.current_nickname, result.reason)
+    return result
+
+
+def mature_all_stone_unlocks(reason=""):
+    """触发石头库全账号 pending 批次结转，供启动、F12 和网页刷新使用。"""
+    database_path, table_name = find_canonical_account_stats_store()
+    if not database_path:
+        return AccountWriteResult("skipped", "未找到石头 canonical 主库")
+
+    result = mature_all_stone_item_unlock_batches(
+        database_path,
+        table_name=table_name or CANONICAL_ACCOUNT_STATS_TABLE,
+    )
+    if result.status == "success":
+        logger.info(
+            "[石头库存] 全账号到期结转完成：reason=%s quantity=%s detail=%s",
+            reason,
+            result.changed_quantity,
+            result.reason,
+        )
+    elif result.status != "skipped":
+        logger.warning(
+            "[石头库存] 全账号到期结转异常：reason=%s status=%s detail=%s quantity=%s",
+            reason,
+            result.status,
+            result.reason,
+            result.changed_quantity,
+        )
     return result
 
 
@@ -1021,6 +1050,7 @@ def persist_pause_snapshot():
     """F12 暂停后只补当前账号最小必要字段，并写入人工暂停状态。"""
     if state.brutal_purchase_mode:
         return AccountWriteResult("skipped", "暴力模式不写入任何持久化数据")
+    mature_all_stone_unlocks("F12暂停全账号")
     if state.temporary_purchase_mode:
         return AccountWriteResult("skipped", "临时模式不写入 canonical SQLite")
     if state.startup_listing_mode_active:

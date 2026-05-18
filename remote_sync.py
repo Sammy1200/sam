@@ -19,6 +19,7 @@ from account_db import (
 from account_view_repo import get_account_view_rows, update_account_view_record
 from config import REMOTE_SYNC_MIRROR_DB_PATH, WEB_VIEW_PORT
 from machine_sync_config import get_machine_sync_runtime_context
+from round_persistence import mature_all_stone_unlocks
 
 
 REMOTE_SYNC_SOURCE_TYPE = "remote_sync_mirror"
@@ -944,6 +945,14 @@ def build_local_snapshot_payload(db_mode=None):
             "status": "error",
             "message": f"本机网页同步配置不可用：{runtime_context.get('config_error')}",
         }
+
+    if normalized_mode == ACCOUNT_DB_MODE_STONE:
+        mature_result = mature_all_stone_unlocks("远端快照刷新")
+        if mature_result.status not in ("success", "skipped"):
+            return {
+                "status": "error",
+                "message": f"生成快照前全账号结转异常：{mature_result.reason}",
+            }
 
     view_rows_result = get_account_view_rows(db_mode=normalized_mode)
     rows = view_rows_result.get("rows") or []

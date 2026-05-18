@@ -27,6 +27,7 @@ from remote_sync import (
     handle_remote_sync_report_payload,
     refresh_remote_machine_snapshot,
 )
+from round_persistence import mature_all_stone_unlocks
 from web_view_templates_inventory import (
     render_account_detail_page,
     render_index_page,
@@ -428,12 +429,19 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         db_mode = self._parse_db_mode(form)
 
         if target_scope == "local":
+            mature_result = None
             refresh_result = {
                 "status": "success",
                 "scope": "public_local_refresh",
                 "db_mode": db_mode,
                 "message": "已刷新 1号快照显示。",
             }
+            if normalize_account_db_mode(db_mode) == "stone":
+                mature_result = mature_all_stone_unlocks("公网快照页本机刷新")
+                refresh_result["message"] = f"已刷新 1号快照显示，到期结转 {mature_result.changed_quantity} 个。"
+                if mature_result.status not in ("success", "skipped"):
+                    refresh_result["status"] = "error"
+                    refresh_result["message"] = f"刷新前全账号结转异常：{mature_result.reason}"
             self._handle_public_snapshot(refresh_result=refresh_result, query={"db": [db_mode]})
             return
 

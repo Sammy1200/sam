@@ -3246,6 +3246,66 @@ def mature_stone_item_unlock_batches(
         conn.close()
 
 
+def mature_all_stone_item_unlock_batches(
+    database_path,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+    now=None,
+):
+    """按账号逐个触发石头 72 小时 pending 批次结转。"""
+    if not database_path or not os.path.isfile(database_path):
+        return AccountWriteResult("db_unavailable", f"数据库文件不存在: {database_path}")
+
+    ensure_canonical_account_stats_table(database_path, table_name)
+    current_time = now or datetime.now()
+
+    conn = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            f"SELECT {_quote_identifier('nickname')} "
+            f"FROM {_quote_identifier(table_name)} "
+            f"WHERE {_quote_identifier('nickname')} IS NOT NULL "
+            f"AND TRIM({_quote_identifier('nickname')}) <> '' "
+            f"ORDER BY CASE WHEN {_quote_identifier('current_execution_slot')} IS NULL THEN 1 ELSE 0 END, "
+            f"{_quote_identifier('current_execution_slot')}, "
+            f"{_quote_identifier('nickname')}"
+        ).fetchall()
+    except sqlite3.Error as exc:
+        return AccountWriteResult("read_failed", f"读取账号列表失败: {exc}")
+    finally:
+        conn.close()
+
+    total_changed_quantity = 0
+    failed_items = []
+    processed_count = 0
+    for row in rows:
+        nickname = str(row["nickname"] or "").strip()
+        if not nickname:
+            continue
+        processed_count += 1
+        result = mature_stone_item_unlock_batches(
+            database_path,
+            nickname,
+            table_name=table_name,
+            now=current_time,
+        )
+        total_changed_quantity += int(result.changed_quantity or 0)
+        if result.status not in ("success", "skipped"):
+            failed_items.append(f"{nickname}:{result.status}")
+
+    if failed_items:
+        return AccountWriteResult(
+            "partial_failed",
+            f"全账号结转部分失败：处理账号={processed_count}，失败={'; '.join(failed_items)}",
+            changed_quantity=total_changed_quantity,
+        )
+    return AccountWriteResult(
+        "success",
+        f"全账号结转完成：处理账号={processed_count}",
+        changed_quantity=total_changed_quantity,
+    )
+
+
 def update_canonical_account_status_fields(
     database_path,
     nickname,

@@ -107,6 +107,7 @@ from account_db import (
     restore_ready_account_status_if_needed,
 )
 from round_persistence import (
+    mature_all_stone_unlocks,
     mature_stone_unlocks_for_current_account,
     persist_item_balance_and_schedule_snapshot,
     persist_accessory_round_status_snapshot,
@@ -671,6 +672,17 @@ def _prepare_canonical_cleanup_once():
         _format_canonical_status_counts(after_summary["status_counts"]),
     )
     state.canonical_cleanup_completed = True
+
+
+def _mature_all_stone_unlocks_on_startup():
+    result = mature_all_stone_unlocks("脚本启动时")
+    if result.status == "success":
+        print(f"[石头库存] 脚本启动全账号结转完成：到期数量={result.changed_quantity}")
+        logger.info("[石头库存] 脚本启动全账号结转完成：到期数量=%s", result.changed_quantity)
+    elif result.status != "skipped":
+        print(f"[石头库存] 脚本启动全账号结转异常：{result.reason}")
+        logger.warning("[石头库存] 脚本启动全账号结转异常：%s", result.reason)
+    return result
 
 
 def _clear_runtime_state_after_account_finalize(reason):
@@ -1468,6 +1480,7 @@ def main():
     if not state.brutal_purchase_mode:
         state.brutal_purchase_limit = 0
         state.brutal_purchase_limit_enabled = False
+        _mature_all_stone_unlocks_on_startup()
     start_overlay()
     try:
         if not hide_overlay_until_hidden():

@@ -28,6 +28,7 @@
 - 公网页 `/public-snapshot` 只读展示同样按 `db_mode` 区分库存口径：石头库显示 `locked_item_count + tradable_item_count = baseline_item_count`，饰品库继续显示旧 `baseline_item_count`
 - `账号状态`、`可运行时间`、`冷却剩余时间` 是两库通用数据；网页或脚本在任意一边修改后，会同步到底层另一边的 `round_status`、`purchase_running_seconds`、`runtime_window_start_time`、`last_limit_time`
 - 库存、余额/金币、抢购数、上架数仍按库隔离：石头库保存石头数据，饰品库保存饰品数据，不能互相覆盖
+- 公网快照页点击本机刷新时，会先对本机石头库所有账号执行一次 72 小时 pending 到期结转，再重新展示；远端刷新按钮会让目标机器在生成远端快照前先执行同样的全账号结转
 
 其中账号状态的当前口径必须写清：
 - `已准备` 是新的正式状态值，不是显示映射
