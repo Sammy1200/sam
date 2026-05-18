@@ -753,6 +753,23 @@ def pause_thread6_failure(step_name, detail):
     return False
 
 
+def _notify_thread6_recoverable_failure(step_name, detail):
+    """启动页恢复链路专用：只推送和记录，不暂停脚本。"""
+    message = f"[线程6] 失败步骤：{step_name}；{detail}"
+    state.switch_last_unknown_detail = message
+    state.overlay_status = "启动页恢复中"
+    print(message)
+    logger.error(message)
+    flush_logger_handlers()
+    try:
+        push_msg_sync(f"[线程6] {step_name}失败", f"{message}\n脚本不暂停，进入启动页恢复链路。")
+    except Exception as exc:
+        push_fail_message = f"[线程6] 微信推送发送失败：{exc}"
+        print(push_fail_message)
+        logger.error(push_fail_message)
+        flush_logger_handlers()
+
+
 def _pause_thread6_exception(step_name, exc):
     """线程 6 异常统一失败出口。"""
     logger.error("[线程6] 步骤 %s 出现未处理异常：%s", step_name, exc)
@@ -777,6 +794,34 @@ def _run_thread6_step(step_name, detail, fn):
         return False
 
     return pause_thread6_failure(step_name, detail)
+
+
+def _run_thread6_soft_step(step_name, detail, fn):
+    """启动页恢复链路专用：步骤失败只返回原因，不触发暂停出口。"""
+    logger.info("[线程6] 软步骤开始：%s", step_name)
+    try:
+        result = fn()
+    except Exception as exc:
+        logger.error("[线程6] 软步骤 %s 出现未处理异常：%s", step_name, exc)
+        logger.error(traceback.format_exc())
+        return False, f"出现未处理异常：{exc}"
+
+    result_detail = detail
+    result_ok = bool(result)
+    if isinstance(result, tuple):
+        result_ok = bool(result[0]) if len(result) >= 1 else False
+        if len(result) >= 2 and str(result[1] or "").strip():
+            result_detail = str(result[1]).strip()
+    elif isinstance(result, dict):
+        result_ok = str(result.get("status") or "").strip() == "success"
+        result_detail = str(result.get("detail") or result.get("reason") or detail).strip()
+
+    if result_ok:
+        logger.info("[线程6] 软步骤完成：%s", step_name)
+        return True, ""
+
+    logger.warning("[线程6] 软步骤失败：%s；%s", step_name, result_detail)
+    return False, result_detail
 
 
 def _run_thread6_chain(chain_name, fn):
@@ -2092,7 +2137,7 @@ def refresh_latest_balance_route(camera):
     return {"status": "success", "detail": "已返回交易行。"}
 
 
-def _run_thread6_resume_steps(camera):
+def _run_thread6_resume_steps(camera, pause_on_failure=True):
     resume_steps = [
         ("启动游戏", lambda: _step04_launch(camera, suppress_failure_output=True), "未匹配到启动按钮或启动点击失败。"),
         ("处理空格弹窗", lambda: _step05_space(camera, suppress_failure_output=True), "未匹配到空格弹窗或处理失败。"),
@@ -2100,29 +2145,200 @@ def _run_thread6_resume_steps(camera):
         ("确认古墓大厅", lambda: _step07_gumu(camera, suppress_failure_output=True), "未能进入或确认古墓大厅。"),
     ]
     for step_name, fn, detail in resume_steps:
-        if not _run_thread6_step(step_name, detail, fn):
+        if pause_on_failure:
+            step_ok = _run_thread6_step(step_name, detail, fn)
+        else:
+            step_ok, _step_detail = _run_thread6_soft_step(step_name, detail, fn)
+        if not step_ok:
             return False
 
     gold_step_result = {"value": False}
 
-    def _run_gold_step():
-        gold_step_result["value"] = _step08_gold(camera)
+    def _run_gold_step_wrapper():
+        if pause_on_failure:
+            gold_step_result["value"] = _step08_gold(camera)
+        else:
+            result = _run_gold_step(camera, pause_on_failure=False)
+            if result["status"] == "no_gold":
+                gold_step_result["value"] = _GOLD_STEP_SKIP_CLOSE
+            elif result["status"] == _GOLD_STEP_NEED_CLOSE:
+                gold_step_result["value"] = _GOLD_STEP_NEED_CLOSE
+            else:
+                gold_step_result["value"] = False
+                return False, result["detail"] or "领取金币步骤执行失败。"
         return bool(gold_step_result["value"])
 
-    if not _run_thread6_step("领取金币", "领取金币步骤执行失败。", _run_gold_step):
+    if pause_on_failure:
+        gold_ok = _run_thread6_step("领取金币", "领取金币步骤执行失败。", _run_gold_step_wrapper)
+    else:
+        gold_ok, _gold_detail = _run_thread6_soft_step("领取金币", "领取金币步骤执行失败。", _run_gold_step_wrapper)
+    if not gold_ok:
         return False
 
     if gold_step_result["value"] == _GOLD_STEP_NEED_CLOSE:
-        if not _run_thread6_step(
-            "关闭面板",
-            "关闭面板后未能确认仍在古墓大厅。",
-            lambda: _step09_close(camera, suppress_failure_output=True),
-        ):
+        if pause_on_failure:
+            close_ok = _run_thread6_step(
+                "关闭面板",
+                "关闭面板后未能确认仍在古墓大厅。",
+                lambda: _step09_close(camera, suppress_failure_output=True),
+            )
+        else:
+            close_ok, _close_detail = _run_thread6_soft_step(
+                "关闭面板",
+                "关闭面板后未能确认仍在古墓大厅。",
+                lambda: _close_gold_panel(camera, pause_on_failure=False),
+            )
+        if not close_ok:
             return False
 
-    if not _run_thread6_step("返回交易行", "未能完成返回交易行步骤。", lambda: _step10_trade(camera)):
+    if pause_on_failure:
+        trade_ok = _run_thread6_step("返回交易行", "未能完成返回交易行步骤。", lambda: _step10_trade(camera))
+    else:
+        trade_ok, _trade_detail = _run_thread6_soft_step("返回交易行", "未能完成返回交易行步骤。", lambda: _step10_trade(camera))
+    if not trade_ok:
         return False
     return True
+
+
+def _run_cross_account_launcher_segment(camera, target, pause_on_failure=True):
+    """跨账号换号后，从启动页切号选区并恢复到交易行。"""
+    steps = [
+        (
+            "执行跨账号切换",
+            f"未能切换到账号 {target['account_id']}。",
+            lambda: _switch_account_for_slot(camera, target["account_id"])
+            if pause_on_failure
+            else _switch_account_for_slot_nonblocking(camera, target["account_id"]),
+        ),
+        (
+            "打开大区列表",
+            "跨账号切换后未能打开大区列表。",
+            lambda: _step02_server_list(camera, suppress_failure_output=True),
+        ),
+        (
+            "选择目标大区",
+            f"跨账号切换后未能切换到目标执行位 {target['next_slot']} 对应的大区。",
+            lambda: _step03_select(camera, target["server_coord_index"], suppress_failure_output=True),
+        ),
+        (
+            "昵称模板校验",
+            f"执行位 {target['next_slot']} 的昵称模板校验失败。",
+            lambda: _retry_slot_nickname_verification_from_server_select(
+                camera,
+                target["next_slot"],
+                target["server_coord_index"],
+                sync_running_status=False,
+            )
+            if pause_on_failure
+            else _verify_slot_nickname_nonblocking_from_server_select(
+                camera,
+                target["next_slot"],
+                target["server_coord_index"],
+            ),
+        ),
+        (
+            "启动前冷却等待",
+            f"执行位 {target['next_slot']} 冷却等待失败。",
+            lambda: wait_for_verified_slot_cooldown_before_launch(
+                target["next_slot"],
+                sync_running_status_after_wait=True,
+            ),
+        ),
+        (
+            "恢复进场链路",
+            "跨账号切换后未能完成回到交易行的后续步骤。",
+            lambda: _run_thread6_resume_steps(camera, pause_on_failure=pause_on_failure),
+        ),
+    ]
+
+    for step_name, detail, fn in steps:
+        if pause_on_failure:
+            if not _run_thread6_step(step_name, detail, fn):
+                return {"status": "failed", "step": step_name, "detail": detail}
+        else:
+            step_ok, step_detail = _run_thread6_soft_step(step_name, detail, fn)
+            if not step_ok:
+                return {"status": "failed", "step": step_name, "detail": step_detail}
+    return {"status": "success", "step": "", "detail": ""}
+
+
+def _wait_for_launcher_recovery_check(camera):
+    launcher_ready = _wait_for_launcher_ready_nonblocking(
+        camera,
+        config.SWITCH_LAUNCHER_RECOVERY_RECHECK_TIMEOUT_SECONDS,
+    )
+    if launcher_ready:
+        return True
+
+    logger.info("[启动页恢复] 未识别到启动页，尝试将 WeGame 拉到前台。")
+    if _try_bring_wegame_to_front():
+        launcher_ready = _wait_for_launcher_ready_nonblocking(
+            camera,
+            config.SWITCH_LAUNCHER_RECOVERY_RECHECK_TIMEOUT_SECONDS,
+        )
+    return launcher_ready
+
+
+def _recover_cross_account_launcher_segment(camera, target, initial_failure):
+    _notify_thread6_recoverable_failure(
+        initial_failure.get("step") or "跨账号启动页链路",
+        initial_failure.get("detail") or "跨账号启动页链路失败。",
+    )
+
+    max_attempts = int(config.SWITCH_LAUNCHER_RECOVERY_MAX_ATTEMPTS)
+    wait_seconds = float(config.SWITCH_LAUNCHER_RECOVERY_WAIT_SECONDS)
+    for attempt_index in range(1, max_attempts + 1):
+        update_overlay_mini(f"恢复{attempt_index}/{max_attempts}")
+        logger.info(
+            "[启动页恢复] 第 %s/%s 次恢复等待开始，等待 %s 秒。",
+            attempt_index,
+            max_attempts,
+            int(wait_seconds),
+        )
+        safe_sleep(wait_seconds)
+
+        if not _wait_for_launcher_recovery_check(camera):
+            logger.warning("[启动页恢复] 第 %s/%s 次未确认启动页，继续等待。", attempt_index, max_attempts)
+            continue
+
+        logger.info("[启动页恢复] 第 %s/%s 次已确认启动页，重新切换账号并进场。", attempt_index, max_attempts)
+        result = _run_cross_account_launcher_segment(camera, target, pause_on_failure=False)
+        if result["status"] == "success":
+            logger.info("[启动页恢复] 第 %s/%s 次恢复成功。", attempt_index, max_attempts)
+            return True
+
+        logger.warning(
+            "[启动页恢复] 第 %s/%s 次恢复失败：步骤=%s 原因=%s",
+            attempt_index,
+            max_attempts,
+            result.get("step"),
+            result.get("detail"),
+        )
+
+    return pause_thread6_failure(
+        "启动页恢复链路",
+        f"跨账号换号后启动页链路恢复 {max_attempts} 次仍未成功启动并回到交易行。",
+    )
+
+
+def _finalize_cross_account_switch_success(target):
+    state.current_execution_slot = target["next_slot"]
+    state.current_server_index = target["server_coord_index"]
+    state.current_account_index = resolve_execution_slot_account_index(target["next_slot"])
+    state.current_nickname = str(target["next_slot"])
+    state.need_switch_server = False
+    state.switch_flow_paused = False
+    state.switch_last_unknown_detail = ""
+    restore_overlay()
+    print(
+        f"[切换流程] 边界换号完成：下一执行位={target['next_slot']}，"
+        f"目标账号={target['account_id']}，已回到交易行。"
+    )
+    logger.info(
+        "[切换流程] 边界换号完成：下一执行位=%s 目标账号=%s 已回到交易行。",
+        target["next_slot"],
+        target["account_id"],
+    )
 
 
 def switch_server_within_account_after_slot_boundary(camera, transition=None):
@@ -2240,69 +2456,12 @@ def switch_account_after_slot_boundary(camera):
         if not _run_thread6_step("返回启动页确认", "未能在跨账号切换前确认回到启动页。", lambda: _wait_for_boundary_start_qidong(camera)):
             return False
 
-        if not _run_thread6_step(
-            "执行跨账号切换",
-            f"未能切换到账号 {target['account_id']}。",
-            lambda: _switch_account_for_slot(camera, target["account_id"]),
-        ):
-            return False
+        segment_result = _run_cross_account_launcher_segment(camera, target, pause_on_failure=False)
+        if segment_result["status"] != "success":
+            if not _recover_cross_account_launcher_segment(camera, target, segment_result):
+                return False
 
-        if not _run_thread6_step(
-            "打开大区列表",
-            "跨账号切换后未能打开大区列表。",
-            lambda: _step02_server_list(camera, suppress_failure_output=True),
-        ):
-            return False
-
-        if not _run_thread6_step(
-            "选择目标大区",
-            f"跨账号切换后未能切换到目标执行位 {target['next_slot']} 对应的大区。",
-            lambda: _step03_select(camera, target["server_coord_index"], suppress_failure_output=True),
-        ):
-            return False
-
-        if not _run_thread6_step(
-            "昵称模板校验",
-            f"执行位 {target['next_slot']} 的昵称模板校验失败。",
-            lambda: _retry_slot_nickname_verification_from_server_select(
-                camera,
-                target["next_slot"],
-                target["server_coord_index"],
-                sync_running_status=False,
-            ),
-        ):
-            return False
-
-        if not _run_thread6_step(
-            "启动前冷却等待",
-            f"执行位 {target['next_slot']} 冷却等待失败。",
-            lambda: wait_for_verified_slot_cooldown_before_launch(
-                target["next_slot"],
-                sync_running_status_after_wait=True,
-            ),
-        ):
-            return False
-
-        if not _run_thread6_step("恢复进场链路", "跨账号切换后未能完成回到交易行的后续步骤。", lambda: _run_thread6_resume_steps(camera)):
-            return False
-
-        state.current_execution_slot = target["next_slot"]
-        state.current_server_index = target["server_coord_index"]
-        state.current_account_index = resolve_execution_slot_account_index(target["next_slot"])
-        state.current_nickname = str(target["next_slot"])
-        state.need_switch_server = False
-        state.switch_flow_paused = False
-        state.switch_last_unknown_detail = ""
-        restore_overlay()
-        print(
-            f"[切换流程] 边界换号完成：下一执行位={target['next_slot']}，"
-            f"目标账号={target['account_id']}，已回到交易行。"
-        )
-        logger.info(
-            "[切换流程] 边界换号完成：下一执行位=%s 目标账号=%s 已回到交易行。",
-            target["next_slot"],
-            target["account_id"],
-        )
+        _finalize_cross_account_switch_success(target)
         return True
 
     return _run_thread6_chain("跨账号边界切换链路", _chain_impl)
@@ -2396,8 +2555,13 @@ def _wait_for_launcher_ready_nonblocking(camera, timeout_seconds):
     return launcher_ready
 
 
+def _verify_slot_nickname_nonblocking_from_server_select(camera, target_slot, server_coord_index):
+    """非阻断昵称校验；失败时重登同执行位账号后再重试。"""
+    return _verify_startup_listing_slot_nonblocking(camera, target_slot, server_coord_index)
+
+
 def _switch_account_for_slot_nonblocking(camera, account_id):
-    """启动页上架模式专用：切号失败时只返回失败信息，不进入线程 6 阻断停机。"""
+    """启动页非阻断链路专用：切号失败时只返回失败信息，不进入线程 6 阻断停机。"""
     _log_switch_waits(
         "switch-user entry",
         click_wait=config.SWITCH_ACCOUNT_LIST_CLICK_WAIT_SECONDS,
@@ -2455,7 +2619,7 @@ def _switch_account_for_slot_nonblocking(camera, account_id):
 
 
 def _verify_startup_listing_slot_nonblocking(camera, target_slot, server_coord_index):
-    """启动页上架模式专用：昵称校验失败时重登同执行位账号后再重试。"""
+    """启动页非阻断链路专用：昵称校验失败时重登同执行位账号后再重试。"""
     verified, failure_detail = _try_verify_slot_nickname_once(
         camera,
         target_slot,

@@ -4,10 +4,11 @@ import time
 from datetime import datetime
 
 import state
-from account_db import ROUND_STATUS_BALANCE_LOW
+from account_db import ACCOUNT_DB_MODE_ACCESSORY, ROUND_STATUS_BALANCE_LOW
 from config import (
     ACCOUNT_MAX_PURCHASE_SECONDS,
     ACCESSORY_ACTION_DELAY_SECONDS,
+    ACCESSORY_BALANCE_INSUFFICIENT_THRESHOLD,
     ACCESSORY_BUY_COLOR_CLICK_OFFSET,
     ACCESSORY_BUY_COLOR_RGB,
     ACCESSORY_BUY_COLOR_X_RANGES,
@@ -38,7 +39,6 @@ from config import (
     ACCESSORY_TRADE_PAGE_MONITOR,
     ACCESSORY_TRADE_READY_CONFIRM_DELAY_SECONDS,
     ACCESSORY_TRACE_ENABLED,
-    BALANCE_INSUFFICIENT_THRESHOLD,
     BUY_POS,
     CONFIRM_DELAY,
     CONFIRM_POS,
@@ -407,10 +407,15 @@ def _update_accessory_balance_state_from_recognition(recognition):
 def _check_accessory_balance_limit(balance_info):
     if state.need_switch_server:
         return False
+    if not bool(getattr(state, "accessory_purchase_mode", False)):
+        return True
+    if str(getattr(state, "account_db_mode", "") or "") != ACCOUNT_DB_MODE_ACCESSORY:
+        logger.warning("[饰品抢购] 当前不是饰品库上下文，跳过饰品金币余额不足判定。")
+        return True
     effective_balance_value = balance_info.get("effective_value")
     if effective_balance_value is None:
         return True
-    if effective_balance_value < BALANCE_INSUFFICIENT_THRESHOLD:
+    if effective_balance_value < ACCESSORY_BALANCE_INSUFFICIENT_THRESHOLD:
         _mark_accessory_balance_insufficient(balance_info.get("effective_text"))
         return False
     return True
