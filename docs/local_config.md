@@ -12,10 +12,10 @@
   - `C:\py666\account_stats.sqlite3`
   - `C:\py666\local_switch_account_config.json`
   - `C:\py666\local_web_sync_config.json`
-  - `C:\py666\launcher_preferences.json`
+  - `C:\py666\launcher_preferences.json`（旧启动器偏好文件，仅用于缺少新字段时兼容读取）
   - `C:\py666\nichen`
 - 其中 `account_stats.sqlite3`、`local_switch_account_config.json`、`local_web_sync_config.json` 缺失时，按当前正式口径直接报错，不再回退到项目根目录旧位置
-- 本次只把两个本机 JSON 与 SQLite 收口为唯一路径；昵称模板目录策略维持现状
+- 本机 live 数据与本机配置继续以 `C:\py666` 为主；昵称模板目录策略维持现状
 
 昵称模板目录的当前优先级固定为：
 - 先读 `C:\py666\nichen`
@@ -63,6 +63,7 @@
 当前主线事实：
 - 抢购价格规则已收口到真实本机 `local_switch_account_config.json`
 - `local_web_sync_config.json` 不承接抢购价格规则
+- 启动器“功能设置”打开的是“参数设置”弹窗；后续功能设置统一保存到 `local_switch_account_config.json`
 
 含义：
 - 多台机器抢不同道具时，允许各自维护不同的本机抢购价格策略
@@ -73,9 +74,18 @@
 - 真实生效文件只认 `C:\py666\local_switch_account_config.json`
 - 示例文件只说明字段结构、注释写法和默认示例，不代表真实机器运行值
 - 抢购循环内只使用启动时已加载到内存的价格规则，不在循环里读取 JSON
-- 当前价格区间边界为“不含等于”；当前若配置为 `324999` 和 `2100000`，实际命中范围就是 `325000` 到 `2099999`
+- `listing_enabled` 是全局上架总开关；如果新字段缺失，会兼容读取旧的 `C:\py666\launcher_preferences.json`，保存参数设置后真实来源切到 `local_switch_account_config.json`
+- `stone_purchase_price_mode=prefix` 时使用前缀抢购；当前完整价格区间边界为“不含等于”，若配置为 `324999` 和 `2100000`，实际命中范围就是 `325000` 到 `2099999`
+- `stone_purchase_price_mode=fixed_range` 时忽略前缀，只按固定上下限判断；`stone_fixed_price_min_inclusive` 和 `stone_fixed_price_max_inclusive` 都是含等于边界
+- `equipment_price_min_exclusive` 与 `equipment_price_max_exclusive` 属于“装备设置”；装备模式只按这两个字段判断装备价格，默认等价于 `50000 < 价格 < 4200000`
 
 推荐字段说明：
+- `listing_enabled`：启动器参数设置里的“启用上架”，`false` 时本次启动内所有场景都跳过上架
+- `stone_purchase_price_mode`：石头抢购方式，`prefix` 为前缀抢购，`fixed_range` 为固定上下限抢购
+- `stone_fixed_price_min_inclusive`：固定上下限抢购的石头价格下限，含等于
+- `stone_fixed_price_max_inclusive`：固定上下限抢购的石头价格上限，含等于
+- `equipment_price_min_exclusive`：装备抢购价格下限，不含等于
+- `equipment_price_max_exclusive`：装备抢购价格上限，不含等于
 - `purchase_price_min_exclusive`：完整价格下限，不含等于；只有识别到的完整价格 `>` 这个值时，才可能继续抢购
 - `purchase_price_max_exclusive`：完整价格上限，不含等于；只有识别到的完整价格 `<` 这个值时，才可能继续抢购
 - `purchase_price_direct_accept_prefixes`：支持 1 位或 2 位前缀数组；命中后直接抢，不再看完整价格；系统优先判断两位前缀，再判断一位前缀；这是高风险字段，改错会直接绕过完整价格上下限

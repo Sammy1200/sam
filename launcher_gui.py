@@ -1,16 +1,19 @@
 import ctypes
-import json
-import os
 import sys
 import time
 import tkinter as tk
+from tkinter import messagebox
 
-from live_paths import LIVE_ROOT_DIR
+from local_switch_account_config import (
+    STONE_PRICE_MODE_FIXED_RANGE,
+    STONE_PRICE_MODE_PREFIX,
+    load_launcher_settings,
+    save_launcher_settings,
+)
 
 
 _VK_F9 = 0x78
 _last_f9_toggle_at = 0.0
-_LAUNCHER_PREFERENCES_PATH = os.path.join(LIVE_ROOT_DIR, "launcher_preferences.json")
 
 
 def _close_launcher_counter():
@@ -36,33 +39,20 @@ def _toggle_launcher_counter(root):
         print(f"[启动器] F9计数窗失败：{exc}")
 
 
-def _load_listing_enabled_preference():
+def _load_launcher_settings_for_ui():
     try:
-        with open(_LAUNCHER_PREFERENCES_PATH, "r", encoding="utf-8") as file:
-            data = json.load(file)
-    except FileNotFoundError:
-        return True
+        return load_launcher_settings()
     except Exception as exc:
-        print(f"[启动器] 上架勾选记录读取失败：{exc}")
-        return True
-
-    value = data.get("listing_enabled")
-    if isinstance(value, bool):
-        return value
-    return True
-
-
-def _save_listing_enabled_preference(listing_enabled):
-    try:
-        os.makedirs(os.path.dirname(_LAUNCHER_PREFERENCES_PATH), exist_ok=True)
-        payload = {
-            "listing_enabled": bool(listing_enabled),
-            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        print(f"[启动器] 参数设置读取失败：{exc}")
+        return {
+            "listing_enabled": True,
+            "stone_purchase_price_mode": STONE_PRICE_MODE_PREFIX,
+            "stone_fixed_price_min_inclusive": 325000,
+            "stone_fixed_price_max_inclusive": 2099999,
+            "equipment_price_min_exclusive": 50000,
+            "equipment_price_max_exclusive": 4200000,
+            "source_path": "",
         }
-        with open(_LAUNCHER_PREFERENCES_PATH, "w", encoding="utf-8") as file:
-            json.dump(payload, file, ensure_ascii=False, indent=2)
-    except Exception as exc:
-        print(f"[启动器] 上架勾选记录保存失败：{exc}")
 
 
 def _install_launcher_f9_listener(root):
@@ -152,21 +142,22 @@ def show_launcher():
 
     button_frame = tk.Frame(panel, bg="#151922")
     button_frame.pack(expand=True, fill="x")
-    listing_enabled_var = tk.BooleanVar(master=root, value=_load_listing_enabled_preference())
+    settings = [_load_launcher_settings_for_ui()]
+    listing_enabled_var = tk.BooleanVar(master=root, value=bool(settings[0]["listing_enabled"]))
 
     def _current_listing_enabled():
         return bool(listing_enabled_var.get())
 
     def choose_launcher():
         current_listing_enabled = _current_listing_enabled()
-        _save_listing_enabled_preference(current_listing_enabled)
         cleanup_f9_listener()
         _close_launcher_counter()
         result[0] = ("launcher", current_listing_enabled)
         root.destroy()
 
     def choose_listing_launcher():
-        _save_listing_enabled_preference(True)
+        if not _current_listing_enabled():
+            return
         cleanup_f9_listener()
         _close_launcher_counter()
         result[0] = ("listing_launcher", True)
@@ -174,28 +165,24 @@ def show_launcher():
 
     def choose_temporary_launcher():
         current_listing_enabled = _current_listing_enabled()
-        _save_listing_enabled_preference(current_listing_enabled)
         cleanup_f9_listener()
         _close_launcher_counter()
         result[0] = ("temporary_launcher", current_listing_enabled)
         root.destroy()
 
     def choose_brutal_launcher():
-        _save_listing_enabled_preference(_current_listing_enabled())
         cleanup_f9_listener()
         _close_launcher_counter()
         result[0] = ("brutal_launcher", False)
         root.destroy()
 
     def choose_accessory_launcher():
-        _save_listing_enabled_preference(_current_listing_enabled())
         cleanup_f9_listener()
         _close_launcher_counter()
         result[0] = ("accessory_launcher", False)
         root.destroy()
 
     def choose_equipment_launcher():
-        _save_listing_enabled_preference(_current_listing_enabled())
         cleanup_f9_listener()
         _close_launcher_counter()
         result[0] = ("equipment_launcher", False)
@@ -229,6 +216,261 @@ def show_launcher():
         else:
             listing_button.configure(state="disabled", cursor="arrow")
 
+    def open_settings_window():
+        settings_window = tk.Toplevel(root)
+        settings_window.title("参数设置")
+        settings_window.configure(bg="#101217")
+        settings_window.resizable(False, False)
+        settings_window.transient(root)
+        settings_window.grab_set()
+        settings_window.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: (settings_window.grab_release(), settings_window.destroy()),
+        )
+
+        window_width = 560
+        window_height = 560
+        root.update_idletasks()
+        pos_x = root.winfo_rootx() + (root.winfo_width() - window_width) // 2
+        pos_y = root.winfo_rooty() + (root.winfo_height() - window_height) // 2
+        settings_window.geometry(f"{window_width}x{window_height}+{pos_x}+{pos_y}")
+
+        outer = tk.Frame(settings_window, bg="#151922", padx=24, pady=20)
+        outer.pack(fill="both", expand=True, padx=1, pady=1)
+
+        listing_var = tk.BooleanVar(master=settings_window, value=_current_listing_enabled())
+        mode_var = tk.StringVar(
+            master=settings_window,
+            value=str(settings[0].get("stone_purchase_price_mode") or STONE_PRICE_MODE_PREFIX),
+        )
+        fixed_min_var = tk.StringVar(
+            master=settings_window,
+            value=str(settings[0].get("stone_fixed_price_min_inclusive") or ""),
+        )
+        fixed_max_var = tk.StringVar(
+            master=settings_window,
+            value=str(settings[0].get("stone_fixed_price_max_inclusive") or ""),
+        )
+        equipment_min_var = tk.StringVar(
+            master=settings_window,
+            value=str(settings[0].get("equipment_price_min_exclusive") or ""),
+        )
+        equipment_max_var = tk.StringVar(
+            master=settings_window,
+            value=str(settings[0].get("equipment_price_max_exclusive") or ""),
+        )
+
+        def create_section(parent, title):
+            section = tk.Frame(
+                parent,
+                bg="#1b2130",
+                highlightthickness=1,
+                highlightbackground="#2d3548",
+                padx=16,
+                pady=14,
+            )
+            title_label = tk.Label(
+                section,
+                text=title,
+                bg="#1b2130",
+                fg="#ffffff",
+                font=("Microsoft YaHei UI", 11, "bold"),
+                anchor="w",
+            )
+            title_label.pack(anchor="w")
+            return section
+
+        global_section = create_section(outer, "全局设置")
+        global_section.pack(fill="x")
+        listing_check = tk.Checkbutton(
+            global_section,
+            text="启用上架",
+            variable=listing_var,
+            bg="#1b2130",
+            fg="#ffffff",
+            activebackground="#1b2130",
+            activeforeground="#ffffff",
+            selectcolor="#202635",
+            font=("Microsoft YaHei UI", 10, "bold"),
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+        )
+        listing_check.pack(anchor="w", pady=(12, 0))
+
+        stone_section = create_section(outer, "石头设置")
+        stone_section.pack(fill="x", pady=(16, 0))
+
+        radio_frame = tk.Frame(stone_section, bg="#1b2130")
+        radio_frame.pack(fill="x", pady=(12, 0))
+        prefix_radio = tk.Radiobutton(
+            radio_frame,
+            text="前缀抢购",
+            variable=mode_var,
+            value=STONE_PRICE_MODE_PREFIX,
+            bg="#1b2130",
+            fg="#ffffff",
+            activebackground="#1b2130",
+            activeforeground="#ffffff",
+            selectcolor="#202635",
+            font=("Microsoft YaHei UI", 10, "bold"),
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+        )
+        prefix_radio.pack(side="left")
+        fixed_radio = tk.Radiobutton(
+            radio_frame,
+            text="固定上下限抢购",
+            variable=mode_var,
+            value=STONE_PRICE_MODE_FIXED_RANGE,
+            bg="#1b2130",
+            fg="#ffffff",
+            activebackground="#1b2130",
+            activeforeground="#ffffff",
+            selectcolor="#202635",
+            font=("Microsoft YaHei UI", 10, "bold"),
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+        )
+        fixed_radio.pack(side="left", padx=(26, 0))
+
+        price_frame = tk.Frame(stone_section, bg="#1b2130")
+        price_frame.pack(fill="x", pady=(16, 0))
+        price_label = tk.Label(
+            price_frame,
+            text="石头价格",
+            bg="#1b2130",
+            fg="#d8dee9",
+            font=("Microsoft YaHei UI", 10, "bold"),
+            anchor="w",
+        )
+        price_label.grid(row=0, column=0, sticky="w", padx=(0, 12))
+        min_entry = tk.Entry(
+            price_frame,
+            textvariable=fixed_min_var,
+            width=14,
+            bg="#101217",
+            fg="#ffffff",
+            insertbackground="#ffffff",
+            relief="flat",
+            font=("Microsoft YaHei UI", 10),
+        )
+        min_entry.grid(row=0, column=1, sticky="w")
+        range_label = tk.Label(
+            price_frame,
+            text="到",
+            bg="#1b2130",
+            fg="#d8dee9",
+            font=("Microsoft YaHei UI", 10),
+        )
+        range_label.grid(row=0, column=2, padx=10)
+        max_entry = tk.Entry(
+            price_frame,
+            textvariable=fixed_max_var,
+            width=14,
+            bg="#101217",
+            fg="#ffffff",
+            insertbackground="#ffffff",
+            relief="flat",
+            font=("Microsoft YaHei UI", 10),
+        )
+        max_entry.grid(row=0, column=3, sticky="w")
+
+        def sync_price_entry_state(*_args):
+            entry_state = "normal" if mode_var.get() == STONE_PRICE_MODE_FIXED_RANGE else "disabled"
+            min_entry.configure(state=entry_state)
+            max_entry.configure(state=entry_state)
+
+        mode_var.trace_add("write", sync_price_entry_state)
+        sync_price_entry_state()
+
+        equipment_section = create_section(outer, "装备设置")
+        equipment_section.pack(fill="x", pady=(16, 0))
+        equipment_price_frame = tk.Frame(equipment_section, bg="#1b2130")
+        equipment_price_frame.pack(fill="x", pady=(12, 0))
+        equipment_price_label = tk.Label(
+            equipment_price_frame,
+            text="装备价格",
+            bg="#1b2130",
+            fg="#d8dee9",
+            font=("Microsoft YaHei UI", 10, "bold"),
+            anchor="w",
+        )
+        equipment_price_label.grid(row=0, column=0, sticky="w", padx=(0, 12))
+        equipment_min_entry = tk.Entry(
+            equipment_price_frame,
+            textvariable=equipment_min_var,
+            width=14,
+            bg="#101217",
+            fg="#ffffff",
+            insertbackground="#ffffff",
+            relief="flat",
+            font=("Microsoft YaHei UI", 10),
+        )
+        equipment_min_entry.grid(row=0, column=1, sticky="w")
+        equipment_range_label = tk.Label(
+            equipment_price_frame,
+            text="到",
+            bg="#1b2130",
+            fg="#d8dee9",
+            font=("Microsoft YaHei UI", 10),
+        )
+        equipment_range_label.grid(row=0, column=2, padx=10)
+        equipment_max_entry = tk.Entry(
+            equipment_price_frame,
+            textvariable=equipment_max_var,
+            width=14,
+            bg="#101217",
+            fg="#ffffff",
+            insertbackground="#ffffff",
+            relief="flat",
+            font=("Microsoft YaHei UI", 10),
+        )
+        equipment_max_entry.grid(row=0, column=3, sticky="w")
+
+        footer = tk.Frame(outer, bg="#151922")
+        footer.pack(side="bottom", fill="x", pady=(20, 0))
+
+        def save_settings():
+            payload = {
+                "listing_enabled": bool(listing_var.get()),
+                "stone_purchase_price_mode": mode_var.get(),
+                "stone_fixed_price_min_inclusive": fixed_min_var.get(),
+                "stone_fixed_price_max_inclusive": fixed_max_var.get(),
+                "equipment_price_min_exclusive": equipment_min_var.get(),
+                "equipment_price_max_exclusive": equipment_max_var.get(),
+            }
+            try:
+                saved_settings = save_launcher_settings(payload)
+            except Exception as exc:
+                messagebox.showerror("保存失败", str(exc), parent=settings_window)
+                return
+
+            settings[0] = saved_settings
+            listing_enabled_var.set(bool(saved_settings["listing_enabled"]))
+            sync_listing_button_state()
+            settings_window.grab_release()
+            settings_window.destroy()
+
+        save_button = tk.Button(
+            footer,
+            text="保存",
+            width=10,
+            height=2,
+            bg="#2563eb",
+            fg="#ffffff",
+            activebackground="#1d4ed8",
+            activeforeground="#ffffff",
+            font=("Microsoft YaHei UI", 10, "bold"),
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            command=save_settings,
+        )
+        save_button.pack(side="right")
+
     launcher_button = create_mode_button("正常启动", choose_launcher, is_primary=True)
     launcher_button.pack(fill="x")
 
@@ -247,22 +489,8 @@ def show_launcher():
     equipment_button = create_mode_button("装备抢购", choose_equipment_launcher)
     equipment_button.pack(fill="x", pady=(10, 0))
 
-    listing_check = tk.Checkbutton(
-        panel,
-        text="上架",
-        variable=listing_enabled_var,
-        command=sync_listing_button_state,
-        bg="#151922",
-        fg="#ffffff",
-        activebackground="#151922",
-        activeforeground="#ffffff",
-        selectcolor="#202635",
-        font=("Microsoft YaHei UI", 10, "bold"),
-        relief="flat",
-        bd=0,
-        cursor="hand2",
-    )
-    listing_check.pack(anchor="w", pady=(12, 0))
+    settings_button = create_mode_button("功能设置", open_settings_window)
+    settings_button.pack(fill="x", pady=(10, 0))
     sync_listing_button_state()
 
     root.mainloop()

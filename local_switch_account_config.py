@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 
 import config
 from live_paths import (
@@ -13,8 +14,17 @@ from live_paths import (
 _PURCHASE_PRICE_RULE_CONFIG_CACHE = None
 _PURCHASE_PRICE_RULE_CONFIG_SOURCE_PATH = ""
 _PURCHASE_PRICE_RULE_CONFIG_LOGGED = False
+_EQUIPMENT_PRICE_RULE_CONFIG_CACHE = None
+_EQUIPMENT_PRICE_RULE_CONFIG_SOURCE_PATH = ""
+_EQUIPMENT_PRICE_RULE_CONFIG_LOGGED = False
 _EXECUTION_SLOT_CONFIG_CACHE = None
 _EXECUTION_SLOT_CONFIG_SOURCE_PATH = ""
+STONE_PRICE_MODE_PREFIX = "prefix"
+STONE_PRICE_MODE_FIXED_RANGE = "fixed_range"
+STONE_PRICE_MODE_LABELS = {
+    STONE_PRICE_MODE_PREFIX: "前缀抢购",
+    STONE_PRICE_MODE_FIXED_RANGE: "固定上下限抢购",
+}
 
 
 def _read_json(path):
@@ -64,6 +74,64 @@ def _normalize_required_int(value, field_name):
     if not raw_value.isdigit():
         raise ValueError(f"{field_name} 必须为纯数字整数，当前值: {value!r}")
     return int(raw_value)
+
+
+def _normalize_optional_bool(value, field_name, default):
+    if value in (None, ""):
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+
+    raw_value = str(value).strip().lower()
+    if raw_value in ("true", "1", "yes", "on", "启用", "开启"):
+        return True
+    if raw_value in ("false", "0", "no", "off", "禁用", "关闭"):
+        return False
+    raise ValueError(f"{field_name} 必须是布尔值 true/false，当前值: {value!r}")
+
+
+def _normalize_optional_price_bound(value, field_name, default):
+    if value in (None, ""):
+        return int(default)
+    raw_value = str(value).strip()
+    if not raw_value.isdigit():
+        raise ValueError(f"{field_name} 必须为纯数字整数，当前值: {value!r}")
+    return int(raw_value)
+
+
+def _normalize_stone_purchase_price_mode(value):
+    if value in (None, ""):
+        return STONE_PRICE_MODE_PREFIX
+    mode = str(value).strip()
+    if mode not in (STONE_PRICE_MODE_PREFIX, STONE_PRICE_MODE_FIXED_RANGE):
+        raise ValueError(
+            "stone_purchase_price_mode 只能是 prefix 或 fixed_range，"
+            f"当前值: {value!r}"
+        )
+    return mode
+
+
+def _load_legacy_listing_enabled_preference(source_path):
+    legacy_path = os.path.join(os.path.dirname(source_path), "launcher_preferences.json")
+    try:
+        data = _read_json(legacy_path)
+    except FileNotFoundError:
+        return True, ""
+    except Exception as exc:
+        print(f"[启动器] 旧上架勾选记录读取失败：{exc}")
+        return True, ""
+
+    if isinstance(data, dict) and isinstance(data.get("listing_enabled"), bool):
+        return bool(data["listing_enabled"]), legacy_path
+    return True, ""
+
+
+def _resolve_listing_enabled_setting(data, source_path):
+    if "listing_enabled" in data:
+        return _normalize_optional_bool(data.get("listing_enabled"), "listing_enabled", True), source_path
+    return _load_legacy_listing_enabled_preference(source_path)
 
 
 def _normalize_purchase_price_prefixes(value, field_name):
@@ -378,8 +446,28 @@ def _build_purchase_price_rule_config(data):
             "purchase_price_min_exclusive 必须小于 purchase_price_max_exclusive，"
             f"当前值: {min_exclusive} >= {max_exclusive}"
         )
+    fixed_min_inclusive = _normalize_optional_price_bound(
+        data.get("stone_fixed_price_min_inclusive"),
+        "stone_fixed_price_min_inclusive",
+        min_exclusive + 1,
+    )
+    fixed_max_inclusive = _normalize_optional_price_bound(
+        data.get("stone_fixed_price_max_inclusive"),
+        "stone_fixed_price_max_inclusive",
+        max_exclusive - 1,
+    )
+    if fixed_min_inclusive > fixed_max_inclusive:
+        raise ValueError(
+            "stone_fixed_price_min_inclusive 必须小于或等于 stone_fixed_price_max_inclusive，"
+            f"当前值: {fixed_min_inclusive} > {fixed_max_inclusive}"
+        )
 
     rule_config = {
+        "stone_purchase_price_mode": _normalize_stone_purchase_price_mode(
+            data.get("stone_purchase_price_mode")
+        ),
+        "stone_fixed_price_min_inclusive": fixed_min_inclusive,
+        "stone_fixed_price_max_inclusive": fixed_max_inclusive,
         "min_exclusive": min_exclusive,
         "max_exclusive": max_exclusive,
         "direct_accept_prefixes": _normalize_purchase_price_prefixes(
@@ -463,6 +551,28 @@ def _build_purchase_price_rule_config(data):
     return rule_config
 
 
+def _build_equipment_price_rule_config(data):
+    min_exclusive = _normalize_optional_price_bound(
+        data.get("equipment_price_min_exclusive"),
+        "equipment_price_min_exclusive",
+        config.EQUIPMENT_PRICE_MIN_EXCLUSIVE,
+    )
+    max_exclusive = _normalize_optional_price_bound(
+        data.get("equipment_price_max_exclusive"),
+        "equipment_price_max_exclusive",
+        config.EQUIPMENT_PRICE_MAX_EXCLUSIVE,
+    )
+    if min_exclusive >= max_exclusive:
+        raise ValueError(
+            "equipment_price_min_exclusive 必须小于 equipment_price_max_exclusive，"
+            f"当前值: {min_exclusive} >= {max_exclusive}"
+        )
+    return {
+        "equipment_price_min_exclusive": min_exclusive,
+        "equipment_price_max_exclusive": max_exclusive,
+    }
+
+
 def _format_prefixes_for_log(prefixes):
     return "无" if not prefixes else "/".join(prefixes)
 
@@ -482,19 +592,150 @@ def load_purchase_price_rule_config(force_reload=False):
 
     if not _PURCHASE_PRICE_RULE_CONFIG_LOGGED or force_reload:
         _PURCHASE_PRICE_RULE_CONFIG_LOGGED = True
-        print(
-            "[抢购价格规则] 已加载："
-            f"完整价格>{rule_config['min_exclusive']} 且 <{rule_config['max_exclusive']}，"
-            f"直接抢前缀={_format_prefixes_for_log(rule_config['direct_accept_prefixes'])}，"
-            f"跳过商品点击前缀={_format_prefixes_for_log(rule_config['skip_item_click_prefixes'])}，"
-            f"直接不抢前缀={_format_prefixes_for_log(rule_config['direct_reject_prefixes'])}，"
-            f"指定走完整价格前缀={_format_prefixes_for_log(rule_config['full_check_prefixes'])}，"
-            f"来源={source_path}"
-        )
+        mode_label = STONE_PRICE_MODE_LABELS.get(rule_config["stone_purchase_price_mode"], "未知模式")
+        if rule_config["stone_purchase_price_mode"] == STONE_PRICE_MODE_FIXED_RANGE:
+            print(
+                "[抢购价格规则] 已加载："
+                f"模式={mode_label}，"
+                f"石头价格>={rule_config['stone_fixed_price_min_inclusive']} "
+                f"且 <={rule_config['stone_fixed_price_max_inclusive']}，"
+                f"来源={source_path}"
+            )
+        else:
+            print(
+                "[抢购价格规则] 已加载："
+                f"模式={mode_label}，"
+                f"完整价格>{rule_config['min_exclusive']} 且 <{rule_config['max_exclusive']}，"
+                f"直接抢前缀={_format_prefixes_for_log(rule_config['direct_accept_prefixes'])}，"
+                f"跳过商品点击前缀={_format_prefixes_for_log(rule_config['skip_item_click_prefixes'])}，"
+                f"直接不抢前缀={_format_prefixes_for_log(rule_config['direct_reject_prefixes'])}，"
+                f"指定走完整价格前缀={_format_prefixes_for_log(rule_config['full_check_prefixes'])}，"
+                f"来源={source_path}"
+            )
         for redundant_message in rule_config["redundant_prefix_messages"]:
             print(f"[抢购价格规则] 冗余提示：{redundant_message}")
 
     return rule_config, source_path
+
+
+def load_equipment_price_rule_config(force_reload=False):
+    global _EQUIPMENT_PRICE_RULE_CONFIG_CACHE
+    global _EQUIPMENT_PRICE_RULE_CONFIG_SOURCE_PATH
+    global _EQUIPMENT_PRICE_RULE_CONFIG_LOGGED
+
+    if _EQUIPMENT_PRICE_RULE_CONFIG_CACHE is not None and not force_reload:
+        return _EQUIPMENT_PRICE_RULE_CONFIG_CACHE, _EQUIPMENT_PRICE_RULE_CONFIG_SOURCE_PATH
+
+    data, source_path = _load_local_switch_account_config()
+    rule_config = _build_equipment_price_rule_config(data)
+    _EQUIPMENT_PRICE_RULE_CONFIG_CACHE = rule_config
+    _EQUIPMENT_PRICE_RULE_CONFIG_SOURCE_PATH = source_path
+
+    if not _EQUIPMENT_PRICE_RULE_CONFIG_LOGGED or force_reload:
+        _EQUIPMENT_PRICE_RULE_CONFIG_LOGGED = True
+        print(
+            "[装备价格规则] 已加载："
+            f"装备价格>{rule_config['equipment_price_min_exclusive']} "
+            f"且 <{rule_config['equipment_price_max_exclusive']}，"
+            f"来源={source_path}"
+        )
+
+    return rule_config, source_path
+
+
+def load_launcher_settings():
+    data, source_path = _load_local_switch_account_config()
+    rule_config = _build_purchase_price_rule_config(data)
+    equipment_rule_config = _build_equipment_price_rule_config(data)
+    listing_enabled, listing_source_path = _resolve_listing_enabled_setting(data, source_path)
+    return {
+        "listing_enabled": listing_enabled,
+        "listing_enabled_source_path": listing_source_path,
+        "stone_purchase_price_mode": rule_config["stone_purchase_price_mode"],
+        "stone_fixed_price_min_inclusive": rule_config["stone_fixed_price_min_inclusive"],
+        "stone_fixed_price_max_inclusive": rule_config["stone_fixed_price_max_inclusive"],
+        "equipment_price_min_exclusive": equipment_rule_config["equipment_price_min_exclusive"],
+        "equipment_price_max_exclusive": equipment_rule_config["equipment_price_max_exclusive"],
+        "source_path": source_path,
+    }
+
+
+def save_launcher_settings(settings):
+    global _PURCHASE_PRICE_RULE_CONFIG_CACHE
+    global _PURCHASE_PRICE_RULE_CONFIG_SOURCE_PATH
+    global _PURCHASE_PRICE_RULE_CONFIG_LOGGED
+    global _EQUIPMENT_PRICE_RULE_CONFIG_CACHE
+    global _EQUIPMENT_PRICE_RULE_CONFIG_SOURCE_PATH
+    global _EQUIPMENT_PRICE_RULE_CONFIG_LOGGED
+
+    resolved_source_path = resolve_local_switch_account_config_path()
+    source_path = resolved_source_path.path
+    data = _read_json(source_path)
+    if not isinstance(data, dict):
+        raise ValueError("本机换号配置文件格式错误，根节点必须是 JSON 对象")
+
+    listing_enabled = _normalize_optional_bool(settings.get("listing_enabled"), "listing_enabled", True)
+    mode = _normalize_stone_purchase_price_mode(settings.get("stone_purchase_price_mode"))
+    min_exclusive = _normalize_required_int(
+        data.get("purchase_price_min_exclusive"),
+        "purchase_price_min_exclusive",
+    )
+    max_exclusive = _normalize_required_int(
+        data.get("purchase_price_max_exclusive"),
+        "purchase_price_max_exclusive",
+    )
+    fixed_min = _normalize_optional_price_bound(
+        settings.get("stone_fixed_price_min_inclusive"),
+        "stone_fixed_price_min_inclusive",
+        min_exclusive + 1,
+    )
+    fixed_max = _normalize_optional_price_bound(
+        settings.get("stone_fixed_price_max_inclusive"),
+        "stone_fixed_price_max_inclusive",
+        max_exclusive - 1,
+    )
+    if fixed_min > fixed_max:
+        raise ValueError("固定价格下限不能大于上限")
+    equipment_min = _normalize_optional_price_bound(
+        settings.get("equipment_price_min_exclusive"),
+        "equipment_price_min_exclusive",
+        config.EQUIPMENT_PRICE_MIN_EXCLUSIVE,
+    )
+    equipment_max = _normalize_optional_price_bound(
+        settings.get("equipment_price_max_exclusive"),
+        "equipment_price_max_exclusive",
+        config.EQUIPMENT_PRICE_MAX_EXCLUSIVE,
+    )
+    if equipment_min >= equipment_max:
+        raise ValueError("装备价格下限必须小于上限")
+
+    data["_comment_listing_enabled"] = "启动器参数设置：全局上架总开关。false 时本次启动内所有场景都跳过上架，且上架模式按钮不可点击。"
+    data["listing_enabled"] = listing_enabled
+    data["_comment_stone_purchase_price_mode"] = "启动器参数设置：石头抢购方式。prefix=前缀抢购；fixed_range=固定上下限抢购。"
+    data["stone_purchase_price_mode"] = mode
+    data["_comment_stone_fixed_price_min_inclusive"] = "固定上下限抢购：石头价格下限，含等于。"
+    data["stone_fixed_price_min_inclusive"] = fixed_min
+    data["_comment_stone_fixed_price_max_inclusive"] = "固定上下限抢购：石头价格上限，含等于。"
+    data["stone_fixed_price_max_inclusive"] = fixed_max
+    data["_comment_equipment_price_min_exclusive"] = "装备设置：装备抢购价格下限，不含等于。"
+    data["equipment_price_min_exclusive"] = equipment_min
+    data["_comment_equipment_price_max_exclusive"] = "装备设置：装备抢购价格上限，不含等于。"
+    data["equipment_price_max_exclusive"] = equipment_max
+    data["_comment_launcher_settings_updated_at"] = "启动器参数设置最近保存时间。"
+    data["launcher_settings_updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    _build_purchase_price_rule_config(data)
+    _build_equipment_price_rule_config(data)
+    with open(source_path, "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=2)
+
+    _PURCHASE_PRICE_RULE_CONFIG_CACHE = None
+    _PURCHASE_PRICE_RULE_CONFIG_SOURCE_PATH = ""
+    _PURCHASE_PRICE_RULE_CONFIG_LOGGED = False
+    _EQUIPMENT_PRICE_RULE_CONFIG_CACHE = None
+    _EQUIPMENT_PRICE_RULE_CONFIG_SOURCE_PATH = ""
+    _EQUIPMENT_PRICE_RULE_CONFIG_LOGGED = False
+    return load_launcher_settings()
 
 
 def load_boundary_switch_accounts():

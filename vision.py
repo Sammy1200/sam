@@ -7,10 +7,10 @@ import re
 import time
 import unicodedata
 import state
-from local_switch_account_config import load_purchase_price_rule_config
+from local_switch_account_config import load_equipment_price_rule_config, load_purchase_price_rule_config
 from config import (
     MONITOR_PRICE, MONITOR_PRICE_SECONDARY, MONITOR_CAPACITY, MONITOR_BALANCE, ACCESSORY_MONITOR_BALANCE,
-    EQUIPMENT_PRICE_MIN_EXCLUSIVE, EQUIPMENT_PRICE_MAX_EXCLUSIVE, EQUIPMENT_PRICE_MONITOR,
+    EQUIPMENT_PRICE_MONITOR,
     UPSCALE, STANDARD_W, STANDARD_H, TEMPLATE_DIR,
     BALANCE_TEMPLATE_DIR, BALANCE_TEMPLATE_MATCH_THRESHOLD, BALANCE_TEMPLATE_DUPLICATE_GAP,
     BALANCE_TEMPLATE_DOT_MATCH_THRESHOLD, BALANCE_TEMPLATE_UNIT_MATCH_THRESHOLD,
@@ -52,6 +52,19 @@ _BALANCE_TEMPLATE_LOAD_ATTEMPTED = False
 _LISTING_TIMER_TEMPLATES = None
 _LISTING_TIMER_TEMPLATE_LOAD_ATTEMPTED = False
 PURCHASE_PRICE_RULE_CONFIG = load_purchase_price_rule_config()[0]
+EQUIPMENT_PRICE_RULE_CONFIG = load_equipment_price_rule_config()[0]
+
+
+def _get_purchase_price_rule_config():
+    global PURCHASE_PRICE_RULE_CONFIG
+    PURCHASE_PRICE_RULE_CONFIG = load_purchase_price_rule_config()[0]
+    return PURCHASE_PRICE_RULE_CONFIG
+
+
+def _get_equipment_price_rule_config():
+    global EQUIPMENT_PRICE_RULE_CONFIG
+    EQUIPMENT_PRICE_RULE_CONFIG = load_equipment_price_rule_config()[0]
+    return EQUIPMENT_PRICE_RULE_CONFIG
 
 
 def crop_frame(frame, monitor):
@@ -77,14 +90,23 @@ def is_image_present(frame, monitor, template, threshold=0.8):
         return False
 
 
-def get_number(frame, templates, monitor=MONITOR_PRICE, source_key="primary"):
+def _is_stone_price_guard_present(frame):
     try:
         pixel_color = frame[207, 1320]
         target_bgr = [51, 205, 255]
         color_diff = (abs(int(pixel_color[0]) - target_bgr[0]) +
                       abs(int(pixel_color[1]) - target_bgr[1]) +
                       abs(int(pixel_color[2]) - target_bgr[2]))
-        if color_diff > 45:
+        return color_diff <= 45
+    except:
+        return False
+
+
+def get_number(frame, templates, monitor=MONITOR_PRICE, source_key="primary", price_guard_present=None):
+    try:
+        if price_guard_present is None:
+            price_guard_present = _is_stone_price_guard_present(frame)
+        if not price_guard_present:
             return None
         cropped = crop_frame(frame, monitor)
         gray = cv2.cvtColor(cropped, cv2.COLOR_BGRA2GRAY)
@@ -171,6 +193,10 @@ def _cache_price_decision(roi_bytes, decision, price_value, price_text, source_k
 
 
 def _get_price_prefix_decision(gray, templates):
+    rule_config = _get_purchase_price_rule_config()
+    if rule_config.get("stone_purchase_price_mode") != "prefix":
+        return None, None
+
     digit_hits = _match_digit_hits(gray, templates, range(0, 10))
     if not digit_hits:
         return None, None
@@ -179,35 +205,32 @@ def _get_price_prefix_decision(gray, templates):
     two_digit_prefix = f"{digit_hits[0][1]}{digit_hits[1][1]}" if len(digit_hits) >= 2 else None
 
     if two_digit_prefix:
-        if two_digit_prefix in PURCHASE_PRICE_RULE_CONFIG["direct_accept_prefixes_2digit"]:
+        if two_digit_prefix in rule_config["direct_accept_prefixes_2digit"]:
             return "accept", two_digit_prefix
-        if two_digit_prefix in PURCHASE_PRICE_RULE_CONFIG["skip_item_click_prefixes_2digit"]:
+        if two_digit_prefix in rule_config["skip_item_click_prefixes_2digit"]:
             return "accept_skip_item_click", two_digit_prefix
-        if two_digit_prefix in PURCHASE_PRICE_RULE_CONFIG["direct_reject_prefixes_2digit"]:
+        if two_digit_prefix in rule_config["direct_reject_prefixes_2digit"]:
             return "reject", two_digit_prefix
-        if two_digit_prefix in PURCHASE_PRICE_RULE_CONFIG["full_check_prefixes_2digit"]:
+        if two_digit_prefix in rule_config["full_check_prefixes_2digit"]:
             return None, two_digit_prefix
 
-    if first_digit in PURCHASE_PRICE_RULE_CONFIG["direct_accept_prefixes_1digit"]:
+    if first_digit in rule_config["direct_accept_prefixes_1digit"]:
         return "accept", first_digit
-    if first_digit in PURCHASE_PRICE_RULE_CONFIG["skip_item_click_prefixes_1digit"]:
+    if first_digit in rule_config["skip_item_click_prefixes_1digit"]:
         return "accept_skip_item_click", first_digit
-    if first_digit in PURCHASE_PRICE_RULE_CONFIG["direct_reject_prefixes_1digit"]:
+    if first_digit in rule_config["direct_reject_prefixes_1digit"]:
         return "reject", first_digit
-    if first_digit in PURCHASE_PRICE_RULE_CONFIG["full_check_prefixes_1digit"]:
+    if first_digit in rule_config["full_check_prefixes_1digit"]:
         return None, first_digit
 
     return None, two_digit_prefix or first_digit
 
 
-def _get_price_decision_for_monitor(frame, templates, monitor, source_key):
+def _get_price_decision_for_monitor(frame, templates, monitor, source_key, price_guard_present=None):
     try:
-        pixel_color = frame[207, 1320]
-        target_bgr = [51, 205, 255]
-        color_diff = (abs(int(pixel_color[0]) - target_bgr[0]) +
-                      abs(int(pixel_color[1]) - target_bgr[1]) +
-                      abs(int(pixel_color[2]) - target_bgr[2]))
-        if color_diff > 45:
+        if price_guard_present is None:
+            price_guard_present = _is_stone_price_guard_present(frame)
+        if not price_guard_present:
             return "unknown", None, None, source_key
 
         cropped = crop_frame(frame, monitor)
@@ -226,17 +249,27 @@ def _get_price_decision_for_monitor(frame, templates, monitor, source_key):
             _cache_price_decision(roi_bytes, prefix_decision, None, prefix_text, source_key)
             return prefix_decision, None, prefix_text, source_key
 
-        price_value = get_number(frame, templates, monitor, source_key)
+        price_value = get_number(frame, templates, monitor, source_key, price_guard_present=price_guard_present)
         if price_value is None:
             _cache_price_decision(roi_bytes, "unknown", None, None, source_key)
             return "unknown", None, None, source_key
 
         price_text = str(price_value)
-        if (
-            PURCHASE_PRICE_RULE_CONFIG["min_exclusive"]
-            < price_value
-            < PURCHASE_PRICE_RULE_CONFIG["max_exclusive"]
-        ):
+        rule_config = _get_purchase_price_rule_config()
+        if rule_config.get("stone_purchase_price_mode") == "fixed_range":
+            matched = (
+                rule_config["stone_fixed_price_min_inclusive"]
+                <= price_value
+                <= rule_config["stone_fixed_price_max_inclusive"]
+            )
+        else:
+            matched = (
+                rule_config["min_exclusive"]
+                < price_value
+                < rule_config["max_exclusive"]
+            )
+
+        if matched:
             decision = "accept"
         else:
             decision = "reject"
@@ -247,11 +280,24 @@ def _get_price_decision_for_monitor(frame, templates, monitor, source_key):
 
 
 def get_price_decision(frame, templates):
-    primary_result = _get_price_decision_for_monitor(frame, templates, MONITOR_PRICE, "primary")
+    price_guard_present = _is_stone_price_guard_present(frame)
+    primary_result = _get_price_decision_for_monitor(
+        frame,
+        templates,
+        MONITOR_PRICE,
+        "primary",
+        price_guard_present=price_guard_present,
+    )
     if primary_result[0] in ("accept", "accept_skip_item_click"):
         return primary_result
 
-    secondary_result = _get_price_decision_for_monitor(frame, templates, MONITOR_PRICE_SECONDARY, "secondary")
+    secondary_result = _get_price_decision_for_monitor(
+        frame,
+        templates,
+        MONITOR_PRICE_SECONDARY,
+        "secondary",
+        price_guard_present=price_guard_present,
+    )
     if secondary_result[0] != "unknown":
         return secondary_result
 
@@ -284,7 +330,12 @@ def get_equipment_price_decision(frame, templates):
             _cache_price_decision(roi_bytes, "unknown", None, None, source_key)
             return "unknown", None, None, source_key
 
-        if EQUIPMENT_PRICE_MIN_EXCLUSIVE < price_value < EQUIPMENT_PRICE_MAX_EXCLUSIVE:
+        equipment_rule_config = _get_equipment_price_rule_config()
+        if (
+            equipment_rule_config["equipment_price_min_exclusive"]
+            < price_value
+            < equipment_rule_config["equipment_price_max_exclusive"]
+        ):
             decision = "accept_skip_item_click"
         else:
             decision = "reject"
