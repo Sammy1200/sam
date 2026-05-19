@@ -168,6 +168,7 @@ ROUND_STATUS_LIMITED = "\u8d26\u53f7\u9650\u5236"
 ROUND_STATUS_BALANCE_LOW = "\u4f59\u989d\u4e0d\u8db3"
 ROUND_STATUS_RUNTIME_REACHED = "\u62a2\u8d2d\u65f6\u957f\u5df2\u5230"
 ROUND_STATUS_READY = "\u5df2\u51c6\u5907"
+ROUND_STATUS_FORBIDDEN = "\u7981\u6b62"
 ROUND_STATUS_NORMAL_END = "\u6b63\u5e38\u7ed3\u675f"
 ROUND_STATUS_UNKNOWN = "\u672a\u77e5\u5f02\u5e38"
 ROUND_STATUS_MANUAL_PAUSE = "\u4eba\u5de5\u6682\u505c"
@@ -179,6 +180,7 @@ ROUND_STATUS_VALUES = (
     ROUND_STATUS_BALANCE_LOW,
     ROUND_STATUS_RUNTIME_REACHED,
     ROUND_STATUS_READY,
+    ROUND_STATUS_FORBIDDEN,
     ROUND_STATUS_UNKNOWN,
     ROUND_STATUS_MANUAL_PAUSE,
 )
@@ -188,6 +190,7 @@ ROUND_STATUS_VALUE_ALIASES = {
     ROUND_STATUS_BALANCE_LOW: ROUND_STATUS_BALANCE_LOW,
     ROUND_STATUS_RUNTIME_REACHED: ROUND_STATUS_RUNTIME_REACHED,
     ROUND_STATUS_READY: ROUND_STATUS_READY,
+    ROUND_STATUS_FORBIDDEN: ROUND_STATUS_FORBIDDEN,
     ROUND_STATUS_NORMAL_END: ROUND_STATUS_MANUAL_PAUSE,
     ROUND_STATUS_UNKNOWN: ROUND_STATUS_UNKNOWN,
     ROUND_STATUS_MANUAL_PAUSE: ROUND_STATUS_MANUAL_PAUSE,
@@ -200,6 +203,8 @@ ROUND_STATUS_VALUE_ALIASES = {
     "insufficient_balance": ROUND_STATUS_BALANCE_LOW,
     "runtime_reached": ROUND_STATUS_RUNTIME_REACHED,
     "ready": ROUND_STATUS_READY,
+    "forbidden": ROUND_STATUS_FORBIDDEN,
+    "disabled": ROUND_STATUS_FORBIDDEN,
     "normal_end": ROUND_STATUS_MANUAL_PAUSE,
     "unknown": ROUND_STATUS_UNKNOWN,
     "unknown_error": ROUND_STATUS_UNKNOWN,
@@ -1246,13 +1251,9 @@ def _canonical_status_schema_requires_rebuild(conn, table_name):
     create_sql = _fetch_table_sql(conn, table_name)
     if not create_sql:
         return False
-    return (
-        ROUND_STATUS_LEGACY_MANUAL_END in create_sql
-        or ROUND_STATUS_NORMAL_END in create_sql
-        or ROUND_STATUS_MANUAL_PAUSE not in create_sql
-        or ROUND_STATUS_RUNTIME_REACHED not in create_sql
-        or ROUND_STATUS_READY not in create_sql
-    )
+    if ROUND_STATUS_LEGACY_MANUAL_END in create_sql or ROUND_STATUS_NORMAL_END in create_sql:
+        return True
+    return any(status_value not in create_sql for status_value in ROUND_STATUS_VALUES)
 
 
 def _ensure_stone_inventory_split_columns(conn, table_name):
@@ -2323,6 +2324,44 @@ def read_preferred_canonical_account_stats_record_by_execution_slot(
         return _row_to_account_stats_record(seed_fallback_row)
     finally:
         conn.close()
+
+
+def read_execution_slot_round_status_for_mode(
+    db_mode,
+    execution_slot,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+):
+    """按本机库模式读取执行位账号状态；库缺失时视为无状态。"""
+    normalized_mode = normalize_account_db_mode(db_mode)
+    try:
+        slot_value = int(execution_slot)
+    except (TypeError, ValueError):
+        return None
+
+    database_path, resolved_table_name = find_account_stats_store_for_mode(normalized_mode, table_name)
+    if not database_path:
+        return None
+
+    record = read_preferred_canonical_account_stats_record_by_execution_slot(
+        database_path,
+        slot_value,
+        resolved_table_name or table_name,
+    )
+    if record is None:
+        return None
+    return normalize_round_status_value(record.round_status)
+
+
+def is_execution_slot_forbidden_for_mode(
+    db_mode,
+    execution_slot,
+    table_name=CANONICAL_ACCOUNT_STATS_TABLE,
+):
+    return read_execution_slot_round_status_for_mode(
+        db_mode,
+        execution_slot,
+        table_name,
+    ) == ROUND_STATUS_FORBIDDEN
 
 
 def save_canonical_account_stats_record(

@@ -35,10 +35,12 @@ from account_db import (
     ACCOUNT_DB_MODE_ACCESSORY,
     ACCOUNT_DB_MODE_STONE,
     CANONICAL_ACCOUNT_STATS_TABLE,
+    ROUND_STATUS_FORBIDDEN,
     ROUND_STATUS_RUNNING,
     ensure_account_stats_store_for_mode,
     find_account_stats_store_for_mode,
     find_canonical_account_stats_store,
+    is_execution_slot_forbidden_for_mode,
     read_preferred_canonical_account_stats_record_by_execution_slot,
     restore_ready_account_status_if_needed,
     update_canonical_account_status_fields,
@@ -233,6 +235,13 @@ def wait_for_verified_slot_cooldown_before_launch(
         if sync_running_status_after_wait:
             _sync_verified_slot_status_to_running(slot_number)
         return True
+    if str(record.round_status or "").strip() == ROUND_STATUS_FORBIDDEN:
+        logger.warning("[冷却等待] 执行位 %s 当前状态为禁止，停止本次启动。", slot_number)
+        _apply_verified_slot_record_to_state(record, allow_start_time=datetime.now(), allow_purchase=False)
+        state.account_read_status = "forbidden"
+        state.account_read_error = "当前执行位已禁止。"
+        state.overlay_status = "禁止"
+        return False
 
     state.account_db_path = database_path
     state.account_db_table_name = table_name
@@ -301,6 +310,14 @@ def wait_for_verified_slot_cooldown_before_launch(
         record = restored_record
     elif restore_result.status not in ("skipped", "account_not_found"):
         logger.warning("[冷却等待] 等待结束后恢复“已准备”失败：%s", restore_result.reason)
+
+    if str(record.round_status or "").strip() == ROUND_STATUS_FORBIDDEN:
+        logger.warning("[冷却等待] 执行位 %s 等待结束后状态为禁止，停止本次启动。", slot_number)
+        _apply_verified_slot_record_to_state(record, allow_start_time=datetime.now(), allow_purchase=False)
+        state.account_read_status = "forbidden"
+        state.account_read_error = "当前执行位已禁止。"
+        state.overlay_status = "禁止"
+        return False
 
     _apply_verified_slot_record_to_state(record, allow_start_time=datetime.now(), allow_purchase=True)
     update_overlay_mini("冷却结束")
@@ -944,26 +961,40 @@ def resolve_execution_slot_transition(current_execution_slot):
     except Exception:
         raise
 
-    next_slot = execution_slot_config["next_slot_map"].get(current_slot)
-    if next_slot is None:
+    next_allowed_result = resolve_next_allowed_execution_slot(
+        current_slot,
+        include_current=False,
+        account_db_mode=_get_active_account_db_mode(),
+    )
+    if next_allowed_result.get("status") == "no_available_slot":
+        return {
+            "current_slot": current_slot,
+            "next_slot": None,
+            "account_id": None,
+            "server_coord_index": None,
+            "requires_account_switch": False,
+            "config_error": "所有可切换执行位都处于禁止状态。",
+            "skipped_forbidden_slots": next_allowed_result.get("skipped_forbidden_slots") or [],
+            "no_available_slot": True,
+        }
+    if next_allowed_result.get("status") != "success":
         return None
+    next_slot = next_allowed_result["target_slot"]
 
     slot_index = next_slot - 1
     server_coord_indexes = execution_slot_config["server_coord_indexes"]
     if slot_index < 0 or slot_index >= len(server_coord_indexes):
         return None
 
-    requires_account_switch = current_slot in execution_slot_config["switch_targets"]
+    requires_account_switch = (
+        resolve_execution_slot_account_index(current_slot)
+        != resolve_execution_slot_account_index(next_slot)
+    )
     account_id = None
     config_error = ""
 
     if requires_account_switch:
-        try:
-            account_id = _get_boundary_switch_accounts().get(current_slot)
-        except Exception as exc:
-            config_error = f"本机换号配置读取失败：{exc}"
-        if not config_error and not account_id:
-            config_error = f"本机换号配置缺少执行位 {current_slot} 的换号账号。"
+        account_id, config_error = _resolve_account_id_for_execution_slot_group(next_slot)
 
     return {
         "current_slot": current_slot,
@@ -972,6 +1003,8 @@ def resolve_execution_slot_transition(current_execution_slot):
         "server_coord_index": server_coord_indexes[slot_index],
         "requires_account_switch": requires_account_switch,
         "config_error": config_error,
+        "skipped_forbidden_slots": next_allowed_result.get("skipped_forbidden_slots") or [],
+        "no_available_slot": False,
     }
 
 
@@ -1050,6 +1083,129 @@ def _build_temporary_target_transition(target_execution_slot):
         "server_coord_index": server_coord_indexes[target_slot - 1],
         "config_error": config_error,
     }
+
+
+def _get_active_account_db_mode():
+    return ACCOUNT_DB_MODE_ACCESSORY if getattr(state, "accessory_purchase_mode", False) else ACCOUNT_DB_MODE_STONE
+
+
+def _is_forbidden_execution_slot(slot_number, account_db_mode=None):
+    mode = account_db_mode or _get_active_account_db_mode()
+    try:
+        return is_execution_slot_forbidden_for_mode(mode, slot_number)
+    except Exception as exc:
+        logger.warning("[线程6] 执行位 %s 禁止状态读取失败：%s", slot_number, exc)
+        return False
+
+
+def resolve_next_allowed_execution_slot(current_execution_slot, include_current=False, account_db_mode=None):
+    """从当前执行位开始解析下一个非禁止执行位。"""
+    try:
+        current_slot = int(current_execution_slot)
+    except (TypeError, ValueError):
+        return {
+            "status": "invalid_current_slot",
+            "target_slot": None,
+            "skipped_forbidden_slots": [],
+        }
+
+    try:
+        execution_slot_config, _ = load_execution_slot_config()
+    except Exception as exc:
+        return {
+            "status": "config_error",
+            "target_slot": None,
+            "skipped_forbidden_slots": [],
+            "detail": str(exc),
+        }
+
+    slot_count = int(execution_slot_config["count"])
+    next_slot_map = execution_slot_config["next_slot_map"]
+    if current_slot < 1 or current_slot > slot_count:
+        return {
+            "status": "invalid_current_slot",
+            "target_slot": None,
+            "skipped_forbidden_slots": [],
+        }
+
+    skipped_forbidden_slots = []
+    candidate_slot = current_slot if include_current else next_slot_map.get(current_slot)
+    visited_slots = set()
+    while candidate_slot is not None and candidate_slot not in visited_slots:
+        visited_slots.add(candidate_slot)
+        if not _is_forbidden_execution_slot(candidate_slot, account_db_mode=account_db_mode):
+            if not include_current and candidate_slot == current_slot:
+                break
+            return {
+                "status": "success",
+                "target_slot": candidate_slot,
+                "skipped_forbidden_slots": skipped_forbidden_slots,
+            }
+
+        skipped_forbidden_slots.append(candidate_slot)
+        candidate_slot = next_slot_map.get(candidate_slot)
+
+    return {
+        "status": "no_available_slot",
+        "target_slot": None,
+        "skipped_forbidden_slots": skipped_forbidden_slots,
+    }
+
+
+def select_launcher_execution_slot(camera, target_execution_slot, current_execution_slot=None):
+    """启动页上只切到目标执行位并停留选区页，不启动游戏。"""
+    try:
+        target_slot = int(target_execution_slot)
+    except (TypeError, ValueError):
+        return {"status": "failed", "detail": "目标执行位不是有效整数。", "target_slot": None}
+
+    try:
+        server_coord_indexes = get_execution_slot_server_coord_indexes()
+    except Exception as exc:
+        return {"status": "failed", "detail": f"本机执行位配置读取失败：{exc}", "target_slot": target_slot}
+
+    if target_slot < 1 or target_slot > len(server_coord_indexes):
+        return {"status": "failed", "detail": f"目标执行位 {target_slot} 超出有效范围。", "target_slot": target_slot}
+
+    current_slot = None
+    try:
+        if current_execution_slot is not None:
+            current_slot = int(current_execution_slot)
+    except (TypeError, ValueError):
+        current_slot = None
+
+    requires_account_switch = (
+        current_slot is not None
+        and resolve_execution_slot_account_index(current_slot) != resolve_execution_slot_account_index(target_slot)
+    )
+    if requires_account_switch:
+        account_id, config_error = _resolve_account_id_for_execution_slot_group(target_slot)
+        if config_error:
+            return {"status": "failed", "detail": config_error, "target_slot": target_slot}
+        switched, switch_detail = _switch_account_for_slot_nonblocking(camera, account_id)
+        if not switched:
+            return {"status": "failed", "detail": switch_detail, "target_slot": target_slot}
+
+    if not _step02_server_list(camera, suppress_failure_output=True):
+        return {"status": "failed", "detail": "未能打开大区列表。", "target_slot": target_slot}
+
+    server_coord_index = server_coord_indexes[target_slot - 1]
+    if not _step03_select(camera, server_coord_index, suppress_failure_output=True):
+        return {"status": "failed", "detail": f"未能切换到执行位 {target_slot} 对应大区。", "target_slot": target_slot}
+
+    verified, verify_detail = _verify_startup_listing_slot_nonblocking(
+        camera,
+        target_slot,
+        server_coord_index,
+    )
+    if not verified:
+        return {"status": "failed", "detail": verify_detail, "target_slot": target_slot}
+
+    state.current_execution_slot = target_slot
+    state.current_server_index = server_coord_index
+    state.current_account_index = resolve_execution_slot_account_index(target_slot)
+    state.current_nickname = str(target_slot)
+    return {"status": "success", "detail": "", "target_slot": target_slot}
 
 
 def _digits_only(value):

@@ -13,6 +13,7 @@ from account_db import (
     MACHINE_DAILY_SUMMARY_EVENT_PURCHASE_SUCCESS,
     ROUND_STATUS_BALANCE_LOW,
     ROUND_STATUS_LIMITED,
+    ROUND_STATUS_FORBIDDEN,
     ROUND_STATUS_MANUAL_PAUSE,
     ROUND_STATUS_READY,
     ROUND_STATUS_RUNTIME_REACHED,
@@ -721,6 +722,8 @@ def _normalize_round_status(raw_status, is_final):
         return ROUND_STATUS_RUNTIME_REACHED
     if normalized == ROUND_STATUS_READY:
         return ROUND_STATUS_READY
+    if normalized == ROUND_STATUS_FORBIDDEN:
+        return ROUND_STATUS_FORBIDDEN
     if normalized in ("\u624b\u52a8\u7ed3\u675f", "\u4eba\u5de5\u6682\u505c"):
         return ROUND_STATUS_MANUAL_PAUSE
     if normalized == "\u672a\u77e5\u5f02\u5e38":
@@ -754,6 +757,13 @@ def _build_record(is_final, round_status):
         )
 
     effective_round_status = _normalize_round_status(round_status, is_final)
+    existing_record = read_canonical_account_stats_record(
+        state.account_db_path,
+        nickname,
+        state.account_db_table_name or CANONICAL_ACCOUNT_STATS_TABLE,
+    )
+    if existing_record is not None and str(existing_record.round_status or "").strip() == ROUND_STATUS_FORBIDDEN:
+        effective_round_status = ROUND_STATUS_FORBIDDEN
     last_limit_time = state.last_limit_time
     if state.account_limit_reached_at is not None:
         last_limit_time = state.account_limit_reached_at
@@ -926,6 +936,8 @@ def persist_startup_listing_mode_account_snapshot(
         normalized_status = str(existing_record.round_status or "").strip() or ROUND_STATUS_READY
     else:
         normalized_status = _normalize_round_status(round_status, True)
+    if str(existing_record.round_status or "").strip() == ROUND_STATUS_FORBIDDEN:
+        normalized_status = ROUND_STATUS_FORBIDDEN
     write_time = datetime.now()
     normalized_limit_time = existing_record.last_limit_time
     if update_last_limit_time:

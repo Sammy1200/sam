@@ -8,6 +8,7 @@ from account_view_repo import get_account_view_rows
 from local_switch_account_config import get_execution_slot_count
 from account_db import (
     CANONICAL_ACCOUNT_STATS_TABLE,
+    ROUND_STATUS_FORBIDDEN,
     ROUND_STATUS_LIMITED,
     ROUND_STATUS_READY,
     ROUND_STATUS_UNKNOWN,
@@ -123,10 +124,14 @@ def select_normal_mode_handoff_target():
 
     runtime_candidates = []
     cooldown_candidates = []
+    available_slots = []
     for slot_number in range(1, int(get_execution_slot_count()) + 1):
         row = rows_by_slot.get(slot_number)
         if row is None:
             continue
+        if str(row.get("round_status") or "").strip() == ROUND_STATUS_FORBIDDEN:
+            continue
+        available_slots.append((slot_number, row))
 
         runtime_minutes = _build_runtime_minutes_candidate(row)
         if runtime_minutes is not None:
@@ -154,10 +159,19 @@ def select_normal_mode_handoff_target():
             "selection_value": cooldown_seconds,
         }
 
+    if available_slots:
+        target_slot, row = available_slots[0]
+        return {
+            "target_slot": target_slot,
+            "nickname": str(row.get("nickname") or "").strip(),
+            "selection_mode": "fallback_first_allowed",
+            "selection_value": None,
+        }
+
     return {
-        "target_slot": 1,
+        "target_slot": None,
         "nickname": "",
-        "selection_mode": "fallback_slot_1",
+        "selection_mode": "no_available_slot",
         "selection_value": None,
     }
 
@@ -199,6 +213,16 @@ def _is_limited_slot_record(record):
     return str(record.round_status or "").strip() == ROUND_STATUS_LIMITED
 
 
+def _is_forbidden_slot_record(record):
+    if record is None:
+        return False
+    return str(record.round_status or "").strip() == ROUND_STATUS_FORBIDDEN
+
+
+def _is_unavailable_slot_record(record):
+    return _is_limited_slot_record(record) or _is_forbidden_slot_record(record)
+
+
 def _find_next_candidate(processed_slots, skipped_slots=None):
     ignored_slots = set(processed_slots or ())
     ignored_slots.update(skipped_slots or ())
@@ -210,7 +234,7 @@ def _find_next_candidate(processed_slots, skipped_slots=None):
         if record is None:
             continue
 
-        if _is_limited_slot_record(record):
+        if _is_unavailable_slot_record(record):
             continue
 
         balance_text = str(record.current_balance or "").strip()
@@ -445,7 +469,7 @@ def _push_final_summary(summary_entries, skipped_limited_slots=None):
         content = "本轮未找到符合条件的账号。"
     if skipped_limited_slots:
         skipped_slots_text = ",".join(str(slot) for slot in sorted(skipped_limited_slots))
-        content += f"\n跳过限制执行位：{skipped_slots_text}"
+        content += f"\n跳过不可用执行位：{skipped_slots_text}"
     async_push_msg("【上架汇总】执行完成", content)
 
 
@@ -506,6 +530,11 @@ def run_startup_listing_mode(camera):
                 ui_print(f"限号跳过{slot_number}", save_log=True)
                 logger.info("[上架模式] 执行位 %s 当前状态为账号限制，进场前跳过。", slot_number)
                 continue
+            if latest_record is not None and _is_forbidden_slot_record(latest_record):
+                skipped_limited_slots.add(slot_number)
+                ui_print(f"禁号跳过{slot_number}", save_log=True)
+                logger.info("[上架模式] 执行位 %s 当前状态为禁止，进场前跳过。", slot_number)
+                continue
 
             record = latest_record or candidate["record"]
             expected_balance_text = str(record.current_balance or "").strip() or candidate["balance_text"]
@@ -555,6 +584,19 @@ def run_startup_listing_mode(camera):
                         async_push_msg(
                             "【启动页上架】限号跳过失败",
                             f"执行位：{slot_number}\n结束原因：账号限制后跳过时未能正常下号\n失败原因：{exit_result['detail']}",
+                        )
+                        return {"status": "failed", "detail": exit_result["detail"], "target_slot": slot_number}
+                    already_at_launcher = True
+                    continue
+                if _is_forbidden_slot_record(loaded_record):
+                    skipped_limited_slots.add(slot_number)
+                    ui_print(f"禁号跳过{slot_number}", save_log=True)
+                    logger.info("[上架模式] 执行位 %s 进场后读库命中禁止，跳过本号上架。", slot_number)
+                    exit_result = exit_to_launcher_for_startup_listing(camera)
+                    if exit_result["status"] != "success":
+                        async_push_msg(
+                            "【启动页上架】禁号跳过失败",
+                            f"执行位：{slot_number}\n结束原因：禁止后跳过时未能正常下号\n失败原因：{exit_result['detail']}",
                         )
                         return {"status": "failed", "detail": exit_result["detail"], "target_slot": slot_number}
                     already_at_launcher = True

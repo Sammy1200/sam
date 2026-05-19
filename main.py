@@ -73,7 +73,6 @@ except ImportError:
     sys.exit()
 
 
-import dxcam
 import config
 import state
 from launcher_gui import show_launcher
@@ -91,6 +90,7 @@ from account_db import (
     ACCOUNT_DB_MODE_STONE,
     CANONICAL_ACCOUNT_STATS_TABLE,
     CANONICAL_RESET_MODE_AGGRESSIVE,
+    ROUND_STATUS_FORBIDDEN,
     ROUND_STATUS_MANUAL_PAUSE,
     ensure_canonical_account_stats_table,
     ensure_canonical_execution_slot_seed_records,
@@ -119,7 +119,7 @@ from round_persistence import (
     restore_runtime_window_state,
     resolve_shutdown_final_status,
 )
-from utils import safe_sleep, safe_get_frame, safe_imread, fast_click, gc_checkpoint
+from utils import safe_sleep, safe_get_frame, safe_imread, fast_click, gc_checkpoint, create_recoverable_camera
 from utils import async_push_msg, logger
 from vision import is_image_present, load_digit_templates
 from overlay import hide_overlay_until_hidden, shutdown_overlay, start_overlay, ui_print, update_score_text
@@ -134,6 +134,8 @@ from switch import (
     prepare_equipment_detail_and_filter_from_current_scene,
     refresh_latest_balance_route,
     resolve_execution_slot_transition,
+    resolve_next_allowed_execution_slot,
+    select_launcher_execution_slot,
     switch_account_for_temporary_target_slot,
     switch_server_within_account_after_slot_boundary,
     startup_temporary_from_qidong,
@@ -245,7 +247,7 @@ def run_automation():
         ui_print("容量识别：文字识别模式")
 
     try:
-        camera = dxcam.create(output_color="BGRA")
+        camera = create_recoverable_camera(output_color="BGRA")
         camera.start(target_fps=144)
     except Exception as e:
         ui_print(f"截图引擎启动失败: {e}")
@@ -370,7 +372,46 @@ def _prepare_default_launcher_start(camera):
     if detected_slot is None:
         return False
 
-    state.current_nickname = str(detected_slot)
+    account_db_mode = ACCOUNT_DB_MODE_ACCESSORY if state.accessory_purchase_mode else ACCOUNT_DB_MODE_STONE
+    allowed_result = resolve_next_allowed_execution_slot(
+        detected_slot,
+        include_current=True,
+        account_db_mode=account_db_mode,
+    )
+    if allowed_result.get("status") == "no_available_slot":
+        ui_print("无可用号", save_log=True)
+        logger.error("[启动] 所有执行位均为禁止状态，无法启动。")
+        return False
+    if allowed_result.get("status") != "success":
+        ui_print("执行位异常", save_log=True)
+        logger.error("[启动] 解析可用执行位失败：%s", allowed_result)
+        return False
+
+    target_slot = int(allowed_result["target_slot"])
+    skipped_slots = allowed_result.get("skipped_forbidden_slots") or []
+    if target_slot != int(detected_slot):
+        ui_print("跳过禁号", save_log=True)
+        logger.info(
+            "[启动] 当前执行位 %s 为禁止状态，跳过到执行位 %s；跳过列表=%s。",
+            detected_slot,
+            target_slot,
+            skipped_slots,
+        )
+        select_result = select_launcher_execution_slot(
+            camera,
+            target_slot,
+            current_execution_slot=detected_slot,
+        )
+        if select_result.get("status") != "success":
+            ui_print("禁号切换失败", save_log=True)
+            logger.error(
+                "[启动] 禁止执行位跳过失败：目标执行位=%s 原因=%s",
+                target_slot,
+                select_result.get("detail"),
+            )
+            return False
+
+    state.current_nickname = str(target_slot)
     return _prepare_launcher_start_context_from_nickname()
 
 
@@ -817,6 +858,16 @@ def _load_current_account_context():
         print(f"[账号数据] 读取账号后自动恢复“已准备”失败：{restore_result.reason}")
         logger.warning("[账号数据] 读取账号后自动恢复“已准备”失败：%s", restore_result.reason)
 
+    if str(record.round_status or "").strip() == ROUND_STATUS_FORBIDDEN:
+        state.account_read_status = "forbidden"
+        state.account_read_error = f"执行位 {record.current_execution_slot} 当前状态为禁止。"
+        state.account_db_path = database_path
+        state.account_db_table_name = table_name
+        state.overlay_status = "禁止"
+        print(f"[账号数据] 读取停止：{state.account_read_error}")
+        logger.warning("[账号数据] 读取停止：%s", state.account_read_error)
+        return False
+
     state.current_nickname = record.nickname
     state.baseline_item_count = record.baseline_item_count
     state.locked_item_count = record.locked_item_count
@@ -1156,6 +1207,19 @@ def _handle_execution_slot_dispatch(camera):
             pause_thread6_failure("解析下一目标执行位", f"当前执行位 {state.current_execution_slot} 无效，无法解析下一目标执行位。")
             state.need_switch_server = False
             return "abort"
+        if transition.get("no_available_slot"):
+            skipped_slots = transition.get("skipped_forbidden_slots") or []
+            pause_thread6_failure(
+                "解析下一目标执行位",
+                f"无可用执行位：跳过的禁止执行位={skipped_slots}。",
+            )
+            state.need_switch_server = False
+            return "abort"
+
+        skipped_slots = transition.get("skipped_forbidden_slots") or []
+        if skipped_slots:
+            ui_print("跳过禁号", save_log=True)
+            logger.info("[线程6调度] 已跳过禁止执行位：%s", skipped_slots)
 
         ui_print(
             f"线程6调度：执行位 {transition['current_slot']} 本轮结束，下一执行位 {transition['next_slot']}。",
@@ -1591,7 +1655,7 @@ def main():
 
         camera = None
         try:
-            camera = dxcam.create(output_color="BGRA")
+            camera = create_recoverable_camera(output_color="BGRA")
             camera.start(target_fps=144)
         except Exception as e:
             ui_print(f"截图引擎启动失败: {e}")

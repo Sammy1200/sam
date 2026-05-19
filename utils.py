@@ -356,6 +356,123 @@ def safe_sleep(seconds):
         remaining -= step
 
 
+class RecoverableDXCamera:
+    """dxcam 截图封装：截图线程因远程连接等显示切换中断时自动重建。"""
+
+    def __init__(self, **create_kwargs):
+        self._create_kwargs = dict(create_kwargs)
+        self._camera = None
+        self._lock = threading.RLock()
+        self._start_kwargs = {}
+        self._started = False
+        self._recovering = False
+        self._recovery_attempts = 3
+        self._recovery_delay = 1.0
+        self._stale_frame_seconds = 2.0
+        self._last_recovery_log_at = 0.0
+
+    def _create_camera_locked(self):
+        import dxcam
+
+        self._camera = dxcam.create(**self._create_kwargs)
+
+    def _stop_camera_locked(self):
+        camera = self._camera
+        self._camera = None
+        if camera is None:
+            return
+        try:
+            camera.stop()
+        except Exception:
+            logger.exception("停止旧截图引擎失败")
+
+    def _start_camera_locked(self):
+        if self._camera is None:
+            self._create_camera_locked()
+        self._camera.start(**self._start_kwargs)
+        self._started = True
+
+    def _capture_thread_dead_locked(self):
+        camera = self._camera
+        if camera is None:
+            return True
+        if not bool(getattr(camera, "is_capturing", False)):
+            return True
+        thread = getattr(camera, "_DXCamera__thread", None)
+        return thread is not None and not thread.is_alive()
+
+    def _recover_locked(self, reason):
+        if self._recovering:
+            return
+        self._recovering = True
+        try:
+            now = time.monotonic()
+            if now - self._last_recovery_log_at >= 5.0:
+                logger.warning("截图恢复中：%s", reason)
+                self._last_recovery_log_at = now
+            self._stop_camera_locked()
+            last_error = None
+            for attempt in range(1, self._recovery_attempts + 1):
+                try:
+                    time.sleep(self._recovery_delay)
+                    self._create_camera_locked()
+                    self._camera.start(**self._start_kwargs)
+                    logger.info("截图已恢复")
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning("截图恢复失败 %s/%s：%s", attempt, self._recovery_attempts, exc)
+                    self._stop_camera_locked()
+            if last_error is not None:
+                logger.error("截图恢复失败：%s", last_error)
+        finally:
+            self._recovering = False
+
+    def start(self, **start_kwargs):
+        with self._lock:
+            self._start_kwargs = dict(start_kwargs)
+            self._start_camera_locked()
+
+    def stop(self):
+        with self._lock:
+            self._started = False
+            self._stop_camera_locked()
+
+    def get_latest_frame(self, copy=True, with_timestamp=False):
+        for _ in range(self._recovery_attempts + 1):
+            with self._lock:
+                if not self._started:
+                    return None
+                if self._capture_thread_dead_locked():
+                    self._recover_locked("线程已停止")
+                    continue
+                camera = self._camera
+                try:
+                    latest = camera.get_latest_frame(copy=copy, with_timestamp=True)
+                except Exception as exc:
+                    logger.warning("截图读取失败：%s", exc)
+                    self._recover_locked("读取异常")
+                    continue
+
+                if latest is None:
+                    self._recover_locked("无画面")
+                    continue
+
+                frame, frame_time = latest
+                if frame_time is not None and time.perf_counter() - frame_time > self._stale_frame_seconds:
+                    self._recover_locked("画面停滞")
+                    continue
+
+                if with_timestamp:
+                    return frame, frame_time
+                return frame
+        return None
+
+
+def create_recoverable_camera(**create_kwargs):
+    return RecoverableDXCamera(**create_kwargs)
+
+
 def safe_get_frame(camera_obj):
     frame = camera_obj.get_latest_frame()
     if frame is not None:
