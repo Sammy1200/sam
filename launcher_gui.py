@@ -120,6 +120,7 @@ def show_launcher():
         ("temporary_launcher", True/False)  — 启动页临时抢购模式，第二项表示是否启用上架
         ("brutal_launcher", False)          — 暴力模式
         ("accessory_launcher", False)       — 饰品抢购模式
+        ("equipment_launcher", False)       — 装备抢购模式
     """
     result = [None]
     root = tk.Tk()
@@ -128,7 +129,7 @@ def show_launcher():
     root.resizable(False, False)
 
     window_width = 360
-    window_height = 390
+    window_height = 450
     screen_width = root.winfo_screenwidth()
     screen_height = root.winfo_screenheight()
     pos_x = (screen_width - window_width) // 2
@@ -193,6 +194,13 @@ def show_launcher():
         result[0] = ("accessory_launcher", False)
         root.destroy()
 
+    def choose_equipment_launcher():
+        _save_listing_enabled_preference(_current_listing_enabled())
+        cleanup_f9_listener()
+        _close_launcher_counter()
+        result[0] = ("equipment_launcher", False)
+        root.destroy()
+
     def create_mode_button(text, command, is_primary=False):
         bg = "#2563eb" if is_primary else "#202635"
         hover_bg = "#1d4ed8" if is_primary else "#293145"
@@ -235,6 +243,9 @@ def show_launcher():
 
     accessory_button = create_mode_button("饰品抢购", choose_accessory_launcher)
     accessory_button.pack(fill="x", pady=(10, 0))
+
+    equipment_button = create_mode_button("装备抢购", choose_equipment_launcher)
+    equipment_button.pack(fill="x", pady=(10, 0))
 
     listing_check = tk.Checkbutton(
         panel,

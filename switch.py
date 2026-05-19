@@ -5,6 +5,8 @@ Public APIs:
   startup_from_launcher(camera, server_index)
   startup_accessory_from_server_list(camera, server_index)
   enter_accessory_trade_from_current_scene(camera)
+  prepare_equipment_detail_and_filter_from_current_scene(camera)
+  refresh_equipment_filter_from_detail(camera)
   full_switch_server(camera, server_index)
   is_at_gumu(camera)
   navigate_to_trade(camera)
@@ -74,6 +76,8 @@ from utils import (
 _TPL_CACHE = {}
 _ACCESSORY_DIANPU_TEMPLATE = None
 _ACCESSORY_TRADE_PAGE_TEMPLATE = None
+_EQUIPMENT_DIANPU_TEMPLATE = None
+_EQUIPMENT_TEMPLATE_CACHE = {}
 _TPL_FILES = {
     "f4": "f4queding.png",
     "qd": "qidong.png",
@@ -424,6 +428,29 @@ def _accessory_trade_page_tpl():
             logger.error("[饰品抢购] 模板缺失：%s", path)
         _ACCESSORY_TRADE_PAGE_TEMPLATE = img
     return _ACCESSORY_TRADE_PAGE_TEMPLATE
+
+
+def _equipment_dianpu_tpl():
+    """按需加载装备模式店铺模板。"""
+    global _EQUIPMENT_DIANPU_TEMPLATE
+    if _EQUIPMENT_DIANPU_TEMPLATE is None:
+        path = os.path.join("logo", "tezhengtu", "dianpu.png")
+        img = cv2.imread(path)
+        if img is None:
+            logger.error("[装备抢购] 模板缺失：%s", path)
+        _EQUIPMENT_DIANPU_TEMPLATE = img
+    return _EQUIPMENT_DIANPU_TEMPLATE
+
+
+def _equipment_tpl(name):
+    """按需加载装备筛选模板。"""
+    if name not in _EQUIPMENT_TEMPLATE_CACHE:
+        path = os.path.join("logo", "zhuangbeimoshi", f"{name}.png")
+        img = cv2.imread(path)
+        if img is None:
+            logger.error("[装备抢购] 模板缺失：%s", path)
+        _EQUIPMENT_TEMPLATE_CACHE[name] = img
+    return _EQUIPMENT_TEMPLATE_CACHE[name]
 
 
 def _normalize_match_image(img):
@@ -1843,6 +1870,210 @@ def _step10_trade(camera):
     pyautogui.click(1850, 350)
     time.sleep(config.SWITCH_TRADE_THIRD_CLICK_WAIT_SECONDS)
     restore_overlay()
+    return True
+
+
+def _wait_equipment_template_center(camera, template, region, timeout_seconds):
+    end_time = time.time() + float(timeout_seconds)
+    while time.time() < end_time:
+        center = _match_image_center(
+            camera,
+            template,
+            region,
+            threshold=config.EQUIPMENT_MATCH_THRESHOLD,
+        )
+        if center is not None:
+            return center
+        safe_sleep(config.EQUIPMENT_ACTION_DELAY_SECONDS)
+    return None
+
+
+def _is_equipment_selected_filter_ready(camera):
+    return _match_image(
+        camera,
+        _equipment_tpl("shaixuan-3"),
+        config.EQUIPMENT_SELECTED_FILTER_REGION,
+        threshold=config.EQUIPMENT_MATCH_THRESHOLD,
+    )
+
+
+def _open_equipment_detail_once(camera):
+    dianpu_center = _wait_equipment_template_center(
+        camera,
+        _equipment_dianpu_tpl(),
+        config.EQUIPMENT_DIANPU_REGION,
+        config.EQUIPMENT_READY_TIMEOUT_SECONDS,
+    )
+    if dianpu_center is None:
+        logger.info("[装备抢购] 未识别到交易行店铺入口。")
+        return False
+
+    fast_click(dianpu_center)
+    safe_sleep(config.EQUIPMENT_DETAIL_OPEN_WAIT_SECONDS)
+    ready_center = _wait_equipment_template_center(
+        camera,
+        _equipment_tpl("shaixuan-1"),
+        config.EQUIPMENT_DETAIL_READY_REGION,
+        config.EQUIPMENT_READY_TIMEOUT_SECONDS,
+    )
+    if ready_center is None:
+        logger.info("[装备抢购] 点击店铺入口后未识别到装备详情页筛选按钮。")
+        return False
+    return True
+
+
+def _enter_equipment_detail_from_current_scene(camera):
+    update_overlay_mini("装备进场")
+    for retry_index in range(1, config.EQUIPMENT_REENTER_RETRY_COUNT + 1):
+        if _open_equipment_detail_once(camera):
+            return True
+
+        if retry_index < config.EQUIPMENT_REENTER_RETRY_COUNT:
+            ui_print(f"装备重进{retry_index}", save_log=True)
+            logger.info("[装备抢购] 进入装备详情页失败，准备返回古墓大厅后重试（%s/%s）。", retry_index, config.EQUIPMENT_REENTER_RETRY_COUNT)
+            if not try_return_to_gumu(camera, retry_count=config.SWITCH_RETURN_GUMU_RETRY_COUNT):
+                return False
+            if not _step10_trade(camera):
+                return False
+
+    ui_print("装备进场失败", save_log=True)
+    return False
+
+
+def _select_equipment_filter_option(camera):
+    if _is_equipment_selected_filter_ready(camera):
+        return True
+
+    fast_click(config.EQUIPMENT_FILTER_DROPDOWN_POS)
+    safe_sleep(config.EQUIPMENT_ACTION_DELAY_SECONDS)
+    pyautogui.moveTo(*config.EQUIPMENT_FILTER_SCROLL_POS)
+    safe_sleep(config.EQUIPMENT_ACTION_DELAY_SECONDS)
+
+    for _ in range(config.EQUIPMENT_INITIAL_SCROLL_COUNT):
+        pyautogui.scroll(config.EQUIPMENT_SCROLL_DELTA)
+        safe_sleep(config.EQUIPMENT_SCROLL_INTERVAL_SECONDS)
+
+    option_center = _match_image_center(
+        camera,
+        _equipment_tpl("shaixuan-4"),
+        config.EQUIPMENT_FILTER_OPTION_REGION,
+        threshold=config.EQUIPMENT_MATCH_THRESHOLD,
+    )
+    if option_center is None:
+        for retry_index in range(1, config.EQUIPMENT_OPTION_SEARCH_RETRY_COUNT + 1):
+            pyautogui.scroll(config.EQUIPMENT_SCROLL_DELTA)
+            safe_sleep(config.EQUIPMENT_SCROLL_INTERVAL_SECONDS)
+            option_center = _match_image_center(
+                camera,
+                _equipment_tpl("shaixuan-4"),
+                config.EQUIPMENT_FILTER_OPTION_REGION,
+                threshold=config.EQUIPMENT_MATCH_THRESHOLD,
+            )
+            if option_center is not None:
+                logger.info("[装备抢购] 筛选项第 %s 次滚动重试后命中。", retry_index)
+                break
+
+    if option_center is None:
+        logger.error("[装备抢购] 多次滚动后仍未识别到目标筛选项。")
+        return False
+
+    fast_click(option_center)
+    safe_sleep(config.EQUIPMENT_ACTION_DELAY_SECONDS)
+    selected_center = _wait_equipment_template_center(
+        camera,
+        _equipment_tpl("shaixuan-3"),
+        config.EQUIPMENT_SELECTED_FILTER_REGION,
+        config.EQUIPMENT_SELECTED_CONFIRM_TIMEOUT_SECONDS,
+    )
+    return selected_center is not None
+
+
+def prepare_equipment_detail_and_filter_from_current_scene(camera):
+    """装备抢购第一阶段：进入装备详情页，选中目标筛选项并保存。"""
+    state.equipment_purchase_mode = True
+    state.listing_enabled = False
+    state.listing_disabled_for_session = True
+
+    if not _enter_equipment_detail_from_current_scene(camera):
+        return False
+
+    update_overlay_mini("装备筛选")
+    filter_button_center = _wait_equipment_template_center(
+        camera,
+        _equipment_tpl("shaixuan-1"),
+        config.EQUIPMENT_DETAIL_READY_REGION,
+        config.EQUIPMENT_READY_TIMEOUT_SECONDS,
+    )
+    if filter_button_center is None:
+        ui_print("筛选按钮缺失", save_log=True)
+        return False
+
+    fast_click(config.EQUIPMENT_FILTER_BUTTON_CLICK_POS)
+    safe_sleep(config.EQUIPMENT_FILTER_OPEN_WAIT_SECONDS)
+    popup_center = _wait_equipment_template_center(
+        camera,
+        _equipment_tpl("shaixuan-2"),
+        config.EQUIPMENT_FILTER_POPUP_REGION,
+        config.EQUIPMENT_FILTER_POPUP_TIMEOUT_SECONDS,
+    )
+    if popup_center is None:
+        ui_print("筛选框缺失", save_log=True)
+        logger.error("[装备抢购] 点击筛选按钮后未识别到筛选框。")
+        return False
+
+    if not _select_equipment_filter_option(camera):
+        ui_print("筛选项失败", save_log=True)
+        return False
+
+    safe_sleep(config.EQUIPMENT_INITIAL_SAVE_BEFORE_PRICE_DELAY_SECONDS)
+    fast_click(config.EQUIPMENT_FILTER_SAVE_POS)
+    safe_sleep(config.EQUIPMENT_SAVE_TO_PRICE_DELAY_SECONDS)
+    ui_print("装备筛选完成", save_log=True)
+    restore_overlay()
+    return True
+
+
+def reenter_equipment_detail_and_filter_via_gumu(camera):
+    """先返回古墓大厅，再回交易行并重新进入装备详情页筛选。"""
+    if not try_return_to_gumu(camera, retry_count=config.SWITCH_RETURN_GUMU_RETRY_COUNT):
+        return False
+    if not _step10_trade(camera):
+        return False
+    return prepare_equipment_detail_and_filter_from_current_scene(camera)
+
+
+def refresh_equipment_filter_from_detail(camera):
+    """装备详情页内刷新筛选结果，保存后不等待，交给价格识别抢时间。"""
+    refresh_started_at = time.perf_counter()
+    update_overlay_mini("装备刷新")
+    safe_sleep(config.EQUIPMENT_RETRY_BEFORE_FILTER_SECONDS)
+    filter_button_center = _wait_equipment_template_center(
+        camera,
+        _equipment_tpl("shaixuan-1"),
+        config.EQUIPMENT_DETAIL_READY_REGION,
+        config.EQUIPMENT_READY_TIMEOUT_SECONDS,
+    )
+    if filter_button_center is None:
+        ui_print("筛选按钮缺失", save_log=True)
+        return False
+
+    fast_click(config.EQUIPMENT_FILTER_BUTTON_CLICK_POS)
+    safe_sleep(config.EQUIPMENT_FILTER_OPEN_WAIT_SECONDS)
+    if not _is_equipment_selected_filter_ready(camera):
+        ui_print("筛选项缺失", save_log=True)
+        return False
+
+    post_save_budget = (
+        config.EQUIPMENT_SAVE_TO_PRICE_DELAY_SECONDS
+        + config.EQUIPMENT_POST_SAVE_GUARD_TIMEOUT_SECONDS
+        + config.EQUIPMENT_POST_SAVE_PRICE_SCAN_SECONDS
+    )
+    remaining = config.EQUIPMENT_LOOP_RETRY_WAIT_SECONDS - post_save_budget - (time.perf_counter() - refresh_started_at)
+    if remaining > 0:
+        safe_sleep(remaining)
+    fast_click(config.EQUIPMENT_FILTER_SAVE_POS)
+    safe_sleep(config.EQUIPMENT_SAVE_TO_PRICE_DELAY_SECONDS)
+    ui_print("装备已刷新", is_replace=True)
     return True
 
 

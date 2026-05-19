@@ -131,6 +131,7 @@ from switch import (
     enter_accessory_trade_from_current_scene,
     enter_startup_listing_target_slot,
     pause_thread6_failure,
+    prepare_equipment_detail_and_filter_from_current_scene,
     refresh_latest_balance_route,
     resolve_execution_slot_transition,
     switch_account_for_temporary_target_slot,
@@ -981,6 +982,30 @@ def _run_accessory_account_flow(
     return True
 
 
+def _run_equipment_account_flow(
+    camera,
+    reset_runtime_before_purchase=False,
+    reset_reason="装备抢购前清空当前账号运行态",
+    purchase_reset_reason="开始装备抢购账号流程",
+    enter_detail=False,
+):
+    state.equipment_purchase_mode = True
+    state.accessory_purchase_mode = False
+    state.listing_enabled = False
+    state.listing_disabled_for_session = True
+    if not _load_current_account_context():
+        return False
+    if reset_runtime_before_purchase:
+        reset_round_runtime_state(reset_reason, reset_purchase_runtime=False, reset_round_counters=False)
+        reset_purchase_counters(purchase_reset_reason)
+    if not _wait_until_account_ready():
+        return False
+    state.overlay_status = "装备筛选中"
+    if enter_detail and not prepare_equipment_detail_and_filter_from_current_scene(camera):
+        return False
+    return True
+
+
 def _run_direct_account_flow(camera):
     if not _load_current_account_context():
         return False
@@ -1189,6 +1214,19 @@ def _handle_execution_slot_dispatch(camera):
             ):
                 if not state.switch_flow_paused:
                     pause_thread6_failure("切换后饰品衔接", "线程 6 切换完成后未能进入饰品交易行。")
+                return "abort"
+            return "continue"
+
+        if state.equipment_purchase_mode:
+            if not _run_equipment_account_flow(
+                camera,
+                reset_runtime_before_purchase=True,
+                reset_reason="换号后装备抢购前清空当前账号运行态",
+                purchase_reset_reason="换号后开始装备抢购账号流程",
+                enter_detail=True,
+            ):
+                if not state.switch_flow_paused:
+                    pause_thread6_failure("切换后装备衔接", "线程 6 切换完成后未能完成装备详情页筛选。")
                 return "abort"
             return "continue"
 
@@ -1477,6 +1515,7 @@ def main():
     state.listing_global_skip_logged = False
     state.brutal_purchase_mode = mode == "brutal_launcher"
     state.accessory_purchase_mode = mode == "accessory_launcher"
+    state.equipment_purchase_mode = mode == "equipment_launcher"
     if not state.brutal_purchase_mode:
         state.brutal_purchase_limit = 0
         state.brutal_purchase_limit_enabled = False
@@ -1562,6 +1601,7 @@ def main():
         try:
             if mode == "launcher":
                 state.accessory_purchase_mode = False
+                state.equipment_purchase_mode = False
                 if not _prepare_default_launcher_start(camera):
                     _pause_after_launcher_start_failure()
                     return
@@ -1584,6 +1624,7 @@ def main():
                     return
             elif mode == "listing_launcher":
                 state.accessory_purchase_mode = False
+                state.equipment_purchase_mode = False
                 if not _is_listing_enabled_for_session():
                     _log_listing_disabled_once()
                     return
@@ -1599,6 +1640,7 @@ def main():
                     return
             elif mode == "temporary_launcher":
                 state.accessory_purchase_mode = False
+                state.equipment_purchase_mode = False
                 ui_print("临时抢购模式在 1 秒后启动...")
                 safe_sleep(1.0)
                 if not startup_temporary_from_qidong(camera):
@@ -1629,6 +1671,7 @@ def main():
                     return
             elif mode == "accessory_launcher":
                 state.accessory_purchase_mode = True
+                state.equipment_purchase_mode = False
                 state.listing_enabled = False
                 state.listing_disabled_for_session = True
                 state.accessory_item_index = 0
@@ -1653,8 +1696,36 @@ def main():
                     enter_trade=False,
                 ):
                     return
+            elif mode == "equipment_launcher":
+                state.accessory_purchase_mode = False
+                state.equipment_purchase_mode = True
+                state.listing_enabled = False
+                state.listing_disabled_for_session = True
+                ui_print("装备抢购启动", save_log=True)
+                if not _prepare_default_launcher_start(camera):
+                    _pause_after_launcher_start_failure()
+                    return
+                if not wait_for_verified_slot_cooldown_before_launch(
+                    state.current_execution_slot,
+                    sync_running_status_after_wait=False,
+                ):
+                    _pause_after_launcher_start_failure()
+                    return
+                if not startup_from_server_list(camera, state.current_server_index):
+                    _pause_after_launcher_start_failure()
+                    return
+                if not _run_equipment_account_flow(
+                    camera,
+                    reset_runtime_before_purchase=True,
+                    reset_reason="启动后装备抢购前清空当前账号运行态",
+                    purchase_reset_reason="启动后开始装备抢购账号流程",
+                    enter_detail=True,
+                ):
+                    pause_thread6_failure("启动后装备衔接", "启动后未能完成装备详情页筛选。")
+                    return
             elif mode == "brutal_launcher":
                 state.accessory_purchase_mode = False
+                state.equipment_purchase_mode = False
                 state.listing_enabled = False
                 state.listing_disabled_for_session = True
                 state.account_record_loaded = False

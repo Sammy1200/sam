@@ -10,6 +10,7 @@ import state
 from local_switch_account_config import load_purchase_price_rule_config
 from config import (
     MONITOR_PRICE, MONITOR_PRICE_SECONDARY, MONITOR_CAPACITY, MONITOR_BALANCE, ACCESSORY_MONITOR_BALANCE,
+    EQUIPMENT_PRICE_MIN_EXCLUSIVE, EQUIPMENT_PRICE_MAX_EXCLUSIVE, EQUIPMENT_PRICE_MONITOR,
     UPSCALE, STANDARD_W, STANDARD_H, TEMPLATE_DIR,
     BALANCE_TEMPLATE_DIR, BALANCE_TEMPLATE_MATCH_THRESHOLD, BALANCE_TEMPLATE_DUPLICATE_GAP,
     BALANCE_TEMPLATE_DOT_MATCH_THRESHOLD, BALANCE_TEMPLATE_UNIT_MATCH_THRESHOLD,
@@ -255,6 +256,42 @@ def get_price_decision(frame, templates):
         return secondary_result
 
     return primary_result
+
+
+def get_equipment_price_decision(frame, templates):
+    """装备模式专用价格识别：只读第二识别区，不使用颜色守卫和前缀规则。"""
+    source_key = "equipment_secondary"
+    try:
+        cropped = crop_frame(frame, EQUIPMENT_PRICE_MONITOR)
+        gray = cv2.cvtColor(cropped, cv2.COLOR_BGRA2GRAY)
+        roi_bytes = (source_key, gray.tobytes())
+        if state.price_decision_cache_bytes == roi_bytes:
+            return (
+                state.price_decision_cache_decision,
+                state.price_decision_cache_value,
+                state.price_decision_cache_text,
+                state.price_decision_cache_source,
+            )
+
+        digit_hits = _match_digit_hits(gray, templates, range(0, 10))
+        if not digit_hits:
+            _cache_price_decision(roi_bytes, "unknown", None, None, source_key)
+            return "unknown", None, None, source_key
+
+        price_text = "".join([item[1] for item in digit_hits])
+        price_value = int(price_text) if len(price_text) >= 5 else None
+        if price_value is None:
+            _cache_price_decision(roi_bytes, "unknown", None, None, source_key)
+            return "unknown", None, None, source_key
+
+        if EQUIPMENT_PRICE_MIN_EXCLUSIVE < price_value < EQUIPMENT_PRICE_MAX_EXCLUSIVE:
+            decision = "accept_skip_item_click"
+        else:
+            decision = "reject"
+        _cache_price_decision(roi_bytes, decision, price_value, price_text, source_key)
+        return decision, price_value, price_text, source_key
+    except:
+        return "unknown", None, None, source_key
 
 
 def read_text_from_area(frame, monitor, is_number_mode=False):

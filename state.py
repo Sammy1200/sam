@@ -17,6 +17,7 @@ brutal_purchase_mode = False
 brutal_purchase_limit = 0
 brutal_purchase_limit_enabled = False
 accessory_purchase_mode = False
+equipment_purchase_mode = False
 accessory_item_index = 0
 accessory_item_click_started_at = None
 accessory_skip_trade_ready_wait_once = False

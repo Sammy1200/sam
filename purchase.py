@@ -16,6 +16,14 @@ from config import (
     CONFIRM_DELAY,
     CONFIRM_POS,
     DIYICI_CLICK_POS,
+    EQUIPMENT_BUY_GUARD_POS,
+    EQUIPMENT_BUY_GUARD_RGB,
+    EQUIPMENT_LOOP_RETRY_WAIT_SECONDS,
+    EQUIPMENT_POST_SAVE_GUARD_POS,
+    EQUIPMENT_POST_SAVE_GUARD_RGB,
+    EQUIPMENT_POST_SAVE_GUARD_TIMEOUT_SECONDS,
+    EQUIPMENT_POST_SAVE_PRICE_SCAN_SECONDS,
+    EQUIPMENT_SUCCESS_TO_REENTER_DELAY_SECONDS,
     EXIT_DELAY,
     FIX_SHOP_POS1,
     FIX_SHOP_POS2,
@@ -45,6 +53,9 @@ from round_persistence import (
     record_daily_purchase_success,
 )
 from switch import (
+    prepare_equipment_detail_and_filter_from_current_scene,
+    reenter_equipment_detail_and_filter_via_gumu,
+    refresh_equipment_filter_from_detail,
     is_at_gumu,
     navigate_to_trade,
     refresh_latest_balance_route,
@@ -62,7 +73,7 @@ from utils import (
     safe_get_frame,
     smart_wait,
 )
-from vision import get_balance_recognition, get_price_decision, is_image_present
+from vision import get_balance_recognition, get_equipment_price_decision, get_price_decision, is_image_present
 
 
 _LISTING_PAGE_TEMPLATE = None
@@ -376,6 +387,308 @@ def _check_brutal_purchase_limit():
     return True
 
 
+def _equipment_pause_for_manual(reason):
+    state.overlay_status = "未知异常"
+    state.need_switch_server = False
+    if not state.account_round_end_status:
+        state.account_round_end_status = "未知异常"
+    ui_print(reason, save_log=True)
+    logger.error("[装备抢购] %s，已暂停等待人工处理。", reason)
+    if not state.IS_PAUSED:
+        toggle_pause()
+
+
+def _equipment_refresh_filter_or_reenter(camera):
+    if refresh_equipment_filter_from_detail(camera):
+        return True
+    logger.warning("[装备抢购] 详情页刷新筛选失败，尝试重新进入装备详情页。")
+    return prepare_equipment_detail_and_filter_from_current_scene(camera)
+
+
+def _equipment_click_purchase_buttons():
+    buy_click_end_time = time.perf_counter() + 0.02
+    while time.perf_counter() < buy_click_end_time:
+        fast_click(BUY_POS)
+        precise_sleep(0.002)
+    precise_sleep(CONFIRM_DELAY)
+    confirm_click_end_time = time.perf_counter() + 0.05
+    while time.perf_counter() < confirm_click_end_time:
+        fast_click(CONFIRM_POS)
+        precise_sleep(0.005)
+
+
+def _get_frame_rgb(frame, pos):
+    if frame is None:
+        return None
+    x, y = pos
+    if y < 0 or x < 0 or y >= frame.shape[0] or x >= frame.shape[1]:
+        return None
+    b, g, r = (int(value) for value in frame[y, x][:3])
+    return r, g, b
+
+
+def _get_equipment_buy_guard_rgb(frame):
+    return _get_frame_rgb(frame, EQUIPMENT_BUY_GUARD_POS)
+
+
+def _is_equipment_buy_guard_ready(frame):
+    return _get_equipment_buy_guard_rgb(frame) == tuple(int(value) for value in EQUIPMENT_BUY_GUARD_RGB)
+
+
+def _clear_price_decision_cache():
+    state.price_decision_cache_bytes = None
+    state.price_decision_cache_decision = None
+    state.price_decision_cache_value = None
+    state.price_decision_cache_text = None
+    state.price_decision_cache_source = None
+
+
+def _scan_equipment_post_save_price(camera, templates):
+    guard_target = tuple(int(value) for value in EQUIPMENT_POST_SAVE_GUARD_RGB)
+    guard_deadline = time.perf_counter() + EQUIPMENT_POST_SAVE_GUARD_TIMEOUT_SECONDS
+    last_guard_rgb = None
+    _clear_price_decision_cache()
+
+    while time.perf_counter() < guard_deadline:
+        frame = safe_get_frame(camera)
+        if frame is None:
+            continue
+
+        guard_rgb = _get_frame_rgb(frame, EQUIPMENT_POST_SAVE_GUARD_POS)
+        last_guard_rgb = guard_rgb
+        if guard_rgb != guard_target:
+            continue
+
+        logger.info("[装备抢购] 保存后守卫命中：guard_rgb=%s", guard_rgb)
+        price_deadline = time.perf_counter() + EQUIPMENT_POST_SAVE_PRICE_SCAN_SECONDS
+        while time.perf_counter() < price_deadline:
+            price_frame = safe_get_frame(camera)
+            if price_frame is None:
+                continue
+            price_guard_rgb = _get_frame_rgb(price_frame, EQUIPMENT_POST_SAVE_GUARD_POS)
+            _clear_price_decision_cache()
+            price_action, price_value, price_text, _price_source = get_equipment_price_decision(price_frame, templates)
+            if price_action == "accept_skip_item_click":
+                price = price_text if price_value is not None else "--"
+                return "matched", price, price_frame, price_guard_rgb
+
+        logger.info("[装备抢购] 守卫命中后价格连识别未命中：last_guard_rgb=%s", last_guard_rgb)
+        return "no_price", None, None, last_guard_rgb
+
+    logger.info("[装备抢购] 保存后守卫超时：last_guard_rgb=%s", last_guard_rgb)
+    return "guard_timeout", None, None, last_guard_rgb
+
+def _handle_equipment_retry(camera, reason):
+    ui_print(reason, is_replace=True, save_log=True, show_console=False)
+    if not _equipment_refresh_filter_or_reenter(camera):
+        _equipment_pause_for_manual("装备刷新失败")
+        return False
+    _clear_price_decision_cache()
+    return True
+
+
+def _handle_equipment_success(camera):
+    stone_inventory_result = record_stone_purchase_success_for_current_account()
+    if stone_inventory_result.status not in ("success", "skipped"):
+        logger.warning("[装备抢购] 抢购成功后库存写入失败：%s", stone_inventory_result.reason)
+        ui_print("库存写入失败", save_log=True)
+        if not state.IS_PAUSED:
+            toggle_pause()
+        return False
+
+    sync_result = persist_minimal_item_balance_sync()
+    if sync_result.status not in ("success", "skipped"):
+        ui_print(f"库存同步失败：{sync_result.reason}", save_log=True)
+
+    if not prepare_equipment_detail_and_filter_from_current_scene(camera):
+        _equipment_pause_for_manual("装备重进失败")
+        return False
+    return True
+
+
+def run_equipment_purchase_loop(camera, templates, temp_success, temp_meihuo):
+    """装备抢购模式：只用第二价格区，无颜色守卫，跳过商品点击。"""
+    state.equipment_purchase_mode = True
+    state.listing_enabled = False
+    state.listing_disabled_for_session = True
+    state.overlay_status = "装备抢购中"
+    state.purchase_timer_active = True
+    if not state.IS_PAUSED:
+        state.last_resume_time = time.time()
+    else:
+        state.last_resume_time = None
+    ensure_active_runtime_window_state()
+    mature_stone_unlocks_for_current_account("装备抢购开始前")
+
+    last_runtime_state_check = 0.0
+    last_frame = None
+    last_frame_time = time.time()
+
+    def clear_equipment_frame_cache():
+        nonlocal last_frame, last_frame_time
+        last_frame = None
+        last_frame_time = 0.0
+        _clear_price_decision_cache()
+
+    def handle_equipment_price_match(price, frame, guard_rgb=None):
+        if guard_rgb is None:
+            guard_rgb = _get_equipment_buy_guard_rgb(frame)
+        _equipment_click_purchase_buttons()
+        logger.info("[装备抢购] 价格命中已执行购买确认：price=%s guard_rgb=%s", price, guard_rgb)
+        time.sleep(0.6)
+
+        frame_after = safe_get_frame(camera)
+        purchase_succeeded = frame_after is not None and is_image_present(frame_after, MONITOR_SUCCESS, temp_success)
+        if purchase_succeeded:
+            state.success_count += 1
+            state.round_purchase_success_count += 1
+            record_daily_purchase_success()
+            if state.overlay_root:
+                state.overlay_root.after(0, update_score_text)
+            ui_print(f"装备抢购成功：{price}", save_log=True, show_console=False)
+            precise_sleep(0.15)
+            fast_click(SUCCESS_CONFIRM_POS)
+            precise_sleep(0.15)
+            fast_click(SUCCESS_CONFIRM_POS)
+            time.sleep(EQUIPMENT_SUCCESS_TO_REENTER_DELAY_SECONDS)
+            if not _handle_equipment_success(camera):
+                return False
+            clear_equipment_frame_cache()
+        else:
+            state.fail_count += 1
+            state.round_purchase_fail_count += 1
+            record_daily_purchase_fail()
+            if state.overlay_root:
+                state.overlay_root.after(0, update_score_text)
+            ui_print(f"装备抢购失败：{price}", save_log=True, show_console=False)
+            if not _handle_equipment_retry(camera, "装备失败刷新"):
+                return False
+            clear_equipment_frame_cache()
+            return scan_post_save_and_buy()
+        return True
+
+    def scan_post_save_and_buy():
+        scan_result = _scan_equipment_post_save_price(camera, templates)
+        status, price, scan_frame, guard_rgb = scan_result
+        if status == "matched":
+            return handle_equipment_price_match(price, scan_frame, guard_rgb)
+        if status == "guard_timeout":
+            ui_print("装备守卫超时", is_replace=True, save_log=True, show_console=False)
+            if not reenter_equipment_detail_and_filter_via_gumu(camera):
+                _equipment_pause_for_manual("装备重进失败")
+                return False
+            clear_equipment_frame_cache()
+            return True
+        return True
+
+    gc.disable()
+    try:
+        while True:
+            if state.target_stop_seconds > 0 and get_current_elapsed() >= state.target_stop_seconds:
+                state.target_stop_seconds = 0
+                if not state.IS_PAUSED:
+                    toggle_pause()
+                continue
+
+            if state.IS_PAUSED:
+                gc_checkpoint()
+                time.sleep(0.5)
+                last_frame = None
+                continue
+
+            current_time = time.time()
+            if current_time - last_runtime_state_check >= 1.0:
+                ensure_active_runtime_window_state()
+                persist_account_limit_reached_if_needed()
+                last_runtime_state_check = current_time
+
+            if get_current_elapsed() >= ACCOUNT_MAX_PURCHASE_SECONDS:
+                persist_account_limit_reached_if_needed()
+                state.overlay_status = "抢购时长已到"
+                state.account_round_end_status = "抢购时长已到"
+                clear_live_round_triplet_for_account_switch("装备抢购时长已到触发换号前")
+                state.need_switch_server = True
+                return
+
+            raw_frame = safe_get_frame(camera)
+            if raw_frame is None:
+                if last_frame is not None and (time.time() - last_frame_time) < FRAME_MAX_AGE:
+                    frame = last_frame
+                else:
+                    continue
+            else:
+                frame = raw_frame
+                last_frame = frame
+                last_frame_time = time.time()
+
+            price_action, price_value, price_text, _price_source = get_equipment_price_decision(frame, templates)
+            price = price_text if price_value is not None else "--"
+
+            if price_action == "accept_skip_item_click":
+                state.limit_count = 0
+                state.unknown_page_count = 0
+                guard_rgb = _get_equipment_buy_guard_rgb(frame)
+                if not handle_equipment_price_match(price, frame, guard_rgb):
+                    return
+                continue
+                _equipment_click_purchase_buttons()
+                logger.info("[装备抢购] 价格命中已执行购买确认：price=%s guard_rgb=%s", price, guard_rgb)
+                time.sleep(0.6)
+
+                frame_after = safe_get_frame(camera)
+                purchase_succeeded = frame_after is not None and is_image_present(frame_after, MONITOR_SUCCESS, temp_success)
+                if purchase_succeeded:
+                    state.success_count += 1
+                    state.round_purchase_success_count += 1
+                    record_daily_purchase_success()
+                    if state.overlay_root:
+                        state.overlay_root.after(0, update_score_text)
+                    ui_print(f"装备抢购成功：{price}", save_log=True, show_console=False)
+                    precise_sleep(0.15)
+                    fast_click(SUCCESS_CONFIRM_POS)
+                    precise_sleep(0.15)
+                    fast_click(SUCCESS_CONFIRM_POS)
+                    time.sleep(EQUIPMENT_SUCCESS_TO_REENTER_DELAY_SECONDS)
+                    if not _handle_equipment_success(camera):
+                        return
+                    clear_equipment_frame_cache()
+                else:
+                    state.fail_count += 1
+                    state.round_purchase_fail_count += 1
+                    record_daily_purchase_fail()
+                    if state.overlay_root:
+                        state.overlay_root.after(0, update_score_text)
+                    ui_print(f"装备抢购失败：{price}", save_log=True, show_console=False)
+                    if not _handle_equipment_retry(camera, "装备失败刷新"):
+                        return
+                    clear_equipment_frame_cache()
+                continue
+
+            if price_action == "reject":
+                if not _handle_equipment_retry(camera, f"装备价不符：{price}"):
+                    return
+                clear_equipment_frame_cache()
+                if not scan_post_save_and_buy():
+                    return
+                continue
+
+            if is_image_present(frame, MONITOR_MEIHUO, temp_meihuo):
+                if not _handle_equipment_retry(camera, "装备已售空"):
+                    return
+                clear_equipment_frame_cache()
+                if not scan_post_save_and_buy():
+                    return
+                continue
+
+            if not _handle_equipment_retry(camera, "装备价未知"):
+                return
+            clear_equipment_frame_cache()
+            if not scan_post_save_and_buy():
+                return
+    finally:
+        gc.enable()
+
+
 def run_brutal_purchase_loop(camera, temp_success, temp_shop, temp_goumai, temp_meihuo, temp_diyici):
     """暴力抢购模式：跳过价格识别，不写库，不接换号链路。"""
     state.brutal_purchase_mode = True
@@ -544,6 +857,9 @@ def run_purchase_loop(camera, templates, temp_success, temp_shop,
 
     if state.accessory_purchase_mode:
         run_accessory_purchase_loop(camera, temp_success)
+        return
+    if state.equipment_purchase_mode:
+        run_equipment_purchase_loop(camera, templates, temp_success, temp_meihuo)
         return
 
     state.overlay_status = "抢购中"
