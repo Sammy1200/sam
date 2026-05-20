@@ -67,6 +67,7 @@ from utils import (
     fast_click,
     gc_checkpoint,
     get_current_elapsed,
+    get_push_machine_label,
     logger,
     precise_sleep,
     safe_imread,
@@ -351,8 +352,61 @@ def wait_and_recognize_balance(wait_time, camera, start_total=None):
     return True
 
 
-def _wait_trade_without_balance(wait_time, camera):
-    """暴力模式：只等待回到交易行，不识别余额、不写库。"""
+def _build_brutal_end_summary(reason, balance_text=None):
+    machine_label = get_push_machine_label()
+    latest_balance_text = str(balance_text or get_latest_runtime_balance_text() or "").strip() or "未识别"
+    success_count = int(state.round_purchase_success_count)
+    fail_count = int(state.round_purchase_fail_count)
+    return (
+        f"机器：{machine_label}\n"
+        f"结束原因：{reason}\n"
+        f"抢购总道具数量：{success_count}\n"
+        f"抢购成功次数：{success_count}\n"
+        f"抢购失败次数：{fail_count}\n"
+        f"当前余额：{latest_balance_text}"
+    )
+
+
+def _recover_brutal_shop_from_trade_page():
+    ui_print("店铺异常", is_replace=True)
+    fast_click(FIX_SHOP_POS1)
+    precise_sleep(1.0)
+    fast_click(FIX_SHOP_POS2)
+
+
+def _check_brutal_balance_limit(frame, camera=None, finish_callback=None):
+    balance_info = _update_balance_state_from_recognition(get_balance_recognition(frame))
+    effective_balance_text = balance_info["effective_text"]
+    effective_balance_value = balance_info["effective_value"]
+
+    if effective_balance_value is None:
+        return True
+    if effective_balance_value >= BALANCE_INSUFFICIENT_THRESHOLD:
+        return True
+
+    final_balance_text = effective_balance_text
+    if camera is not None:
+        refresh_result = refresh_latest_balance_route(camera)
+        if refresh_result["status"] == "success":
+            refreshed_balance = recognize_latest_balance_at_trade(camera)
+            if refreshed_balance is not None:
+                final_balance_text = refreshed_balance["text"]
+                if refreshed_balance["value"] >= BALANCE_INSUFFICIENT_THRESHOLD:
+                    state.overlay_status = "暴力抢购"
+                    ui_print("余额恢复", save_log=True)
+                    return True
+
+    state.account_round_end_status = "余额不足"
+    state.overlay_status = "余额不足"
+    state.need_switch_server = False
+    ui_print("余额不足", save_log=True)
+    if finish_callback is not None:
+        finish_callback("余额不足", final_balance_text)
+    return False
+
+
+def _wait_trade_without_balance(wait_time, camera, finish_callback=None):
+    """暴力模式：等待回到交易行并识别余额，不写库、不换号。"""
     gc_checkpoint()
     start_total = time.time()
     while time.time() - start_total < 1.4:
@@ -361,6 +415,8 @@ def _wait_trade_without_balance(wait_time, camera):
 
         frame = safe_get_frame(camera)
         if frame is not None and is_image_present(frame, MONITOR_JIAOYIHANG, state.temp_jiaoyi, threshold=0.7):
+            if not _check_brutal_balance_limit(frame, camera=camera, finish_callback=finish_callback):
+                return False
             break
         time.sleep(0.05)
 
@@ -371,7 +427,7 @@ def _wait_trade_without_balance(wait_time, camera):
     return True
 
 
-def _check_brutal_purchase_limit():
+def _check_brutal_purchase_limit(finish_callback=None):
     if not getattr(state, "brutal_purchase_limit_enabled", False):
         return False
     limit = int(getattr(state, "brutal_purchase_limit", 0) or 0)
@@ -382,6 +438,9 @@ def _check_brutal_purchase_limit():
 
     ui_print(f"暴力上限{limit}", save_log=True)
     state.overlay_status = "暴力暂停"
+    state.need_switch_server = False
+    if finish_callback is not None:
+        finish_callback("抢购上限")
     if not state.IS_PAUSED:
         toggle_pause()
     return True
@@ -701,6 +760,18 @@ def run_brutal_purchase_loop(camera, temp_success, temp_shop, temp_goumai, temp_
     last_frame_time = time.time()
     last_abnormal_print_sec = 0
     waiting_detail_after_refresh = False
+    brutal_end_push_sent = False
+
+    def finish_brutal_mode(reason, balance_text=None):
+        nonlocal brutal_end_push_sent
+        state.account_round_end_status = reason
+        state.overlay_status = reason
+        state.need_switch_server = False
+        if not brutal_end_push_sent:
+            brutal_end_push_sent = True
+            async_push_msg(f"【暴力模式】{reason}", _build_brutal_end_summary(reason, balance_text))
+        if not state.IS_PAUSED:
+            toggle_pause()
 
     gc.disable()
 
@@ -713,7 +784,7 @@ def run_brutal_purchase_loop(camera, temp_success, temp_shop, temp_goumai, temp_
                 last_frame = None
                 continue
 
-            if _check_brutal_purchase_limit():
+            if _check_brutal_purchase_limit(finish_callback=finish_brutal_mode):
                 continue
 
             try:
@@ -730,15 +801,30 @@ def run_brutal_purchase_loop(camera, temp_success, temp_shop, temp_goumai, temp_
 
                 is_trade_page = is_image_present(frame, MONITOR_JIAOYIHANG, state.temp_jiaoyi)
                 if is_trade_page:
-                    state.limit_count = 0
                     state.unknown_page_count = 0
+                    if not _check_brutal_balance_limit(frame, camera=camera, finish_callback=finish_brutal_mode):
+                        waiting_detail_after_refresh = False
+                        last_refresh = time.time()
+                        continue
                     if not is_image_present(frame, MONITOR_SHOP, temp_shop):
-                        ui_print("店铺异常", is_replace=True)
-                        fast_click(REFRESH_POS)
+                        _recover_brutal_shop_from_trade_page()
                         last_refresh = time.time()
                         waiting_detail_after_refresh = False
                         time.sleep(0.05)
                         continue
+
+                    if waiting_detail_after_refresh:
+                        if time.time() - last_refresh <= 1.5:
+                            time.sleep(0.05)
+                            continue
+                        state.limit_count += 1
+                        ui_print(f"暂无道具{state.limit_count}/{ACCOUNT_LIMIT_THRESHOLD}", is_replace=True)
+                        if state.limit_count >= ACCOUNT_LIMIT_THRESHOLD:
+                            state.limit_count = 0
+                            finish_brutal_mode("账号限制")
+                            waiting_detail_after_refresh = False
+                            last_refresh = time.time()
+                            continue
 
                     fast_click(REFRESH_POS)
                     last_refresh = time.time()
@@ -747,11 +833,12 @@ def run_brutal_purchase_loop(camera, temp_success, temp_shop, temp_goumai, temp_
                     continue
 
                 if waiting_detail_after_refresh:
+                    state.limit_count = 0
                     state.unknown_page_count = 0
                     if is_image_present(frame, MONITOR_MEIHUO, temp_meihuo):
                         ui_print("已售空", is_replace=True)
                         click_exit()
-                        if _wait_trade_without_balance(EXIT_DELAY, camera):
+                        if _wait_trade_without_balance(EXIT_DELAY, camera, finish_callback=finish_brutal_mode):
                             fast_click(REFRESH_POS)
                             last_refresh = time.time()
                             waiting_detail_after_refresh = True
@@ -760,7 +847,7 @@ def run_brutal_purchase_loop(camera, temp_success, temp_shop, temp_goumai, temp_
                         continue
 
                     waiting_detail_after_refresh = False
-                    buy_click_end_time = time.perf_counter() + 0.012
+                    buy_click_end_time = time.perf_counter() + 0.022
                     while time.perf_counter() < buy_click_end_time:
                         fast_click(BUY_POS)
                         precise_sleep(0.002)
@@ -782,7 +869,7 @@ def run_brutal_purchase_loop(camera, temp_success, temp_shop, temp_goumai, temp_
                         fast_click(SUCCESS_CONFIRM_POS)
                         precise_sleep(0.15)
                         fast_click(SUCCESS_CONFIRM_POS)
-                        if _check_brutal_purchase_limit():
+                        if _check_brutal_purchase_limit(finish_callback=finish_brutal_mode):
                             continue
                     else:
                         state.fail_count += 1
@@ -792,7 +879,7 @@ def run_brutal_purchase_loop(camera, temp_success, temp_shop, temp_goumai, temp_
                         ui_print("暴力失败", save_log=True, show_console=False)
                         click_exit()
 
-                    if _wait_trade_without_balance(EXIT_DELAY, camera):
+                    if _wait_trade_without_balance(EXIT_DELAY, camera, finish_callback=finish_brutal_mode):
                         fast_click(REFRESH_POS)
                         last_refresh = time.time()
                         waiting_detail_after_refresh = True
@@ -813,9 +900,7 @@ def run_brutal_purchase_loop(camera, temp_success, temp_shop, temp_goumai, temp_
                             is_image_present(frame, MONITOR_JIAOYIHANG, state.temp_jiaoyi, threshold=0.6)
                             and not is_image_present(frame, MONITOR_SHOP, temp_shop, threshold=0.6)
                         ):
-                            fast_click(FIX_SHOP_POS1)
-                            precise_sleep(1.0)
-                            fast_click(FIX_SHOP_POS2)
+                            _recover_brutal_shop_from_trade_page()
                         elif is_at_gumu(camera):
                             navigate_to_trade(camera)
                         elif try_return_to_gumu(camera, retry_count=3):
@@ -824,10 +909,8 @@ def run_brutal_purchase_loop(camera, temp_success, temp_shop, temp_goumai, temp_
                             is_unknown_page = True
                             state.unknown_page_count += 1
                             if state.unknown_page_count >= 5:
-                                state.overlay_status = "未知异常"
                                 state.unknown_page_count = 0
-                                if not state.IS_PAUSED:
-                                    toggle_pause()
+                                finish_brutal_mode("未知异常")
                             else:
                                 last_refresh = time.time()
                                 last_abnormal_print_sec = 0

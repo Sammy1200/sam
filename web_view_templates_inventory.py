@@ -427,6 +427,8 @@ def _build_list_form_values(row, edit_result):
         ),
         "round_status": str(row.get("round_status") or "").strip(),
         "current_balance_wan": str(row.get("current_balance_wan") or "").strip(),
+        "cooldown_remaining_text": _format_cooldown_remaining_time(row.get("cooldown_remaining_seconds")),
+        "cooldown_remaining_touched": "0",
         "db_mode": str(row.get("db_mode") or "stone").strip() or "stone",
     }
     if _is_active_edit_row(row, edit_result):
@@ -519,6 +521,7 @@ def _render_home_table_layout_style():
 .page-shell-home .stage-primary .account-table-local .inventory-value,
 .page-shell-home .stage-primary .account-table-local .readonly-value,
 .page-shell-home .stage-primary .account-table-local .inline-balance input,
+.page-shell-home .stage-primary .account-table-local .cooldown-input,
 .page-shell-home .stage-primary .account-table-local .inline-field select,
 .page-shell-home .stage-primary .account-table-local .unit-tag,
 .page-shell-home .stage-primary .account-table-local .inline-save button {
@@ -544,6 +547,7 @@ def _render_home_table_layout_style():
 }
 .page-shell-home .stage-primary .account-table-local .inventory-input,
 .page-shell-home .stage-primary .account-table-local .inline-balance input,
+.page-shell-home .stage-primary .account-table-local .cooldown-input,
 .page-shell-home .stage-primary .account-table-local .inline-field select {
   padding-top: 0;
   padding-bottom: 0;
@@ -955,17 +959,20 @@ def _render_local_read_only_cells(row, db_mode="stone"):
 
 def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
     if row.get("is_temporary_account"):
-        return _render_local_read_only_cells(row, "accessory")
+        inventory_cell, balance_cell, status_cell, action_cell = _render_local_read_only_cells(row, "accessory")
+        cooldown_cell = _render_home_display_field(_format_cooldown_remaining_time(row.get("cooldown_remaining_seconds")), "meta")
+        return inventory_cell, balance_cell, status_cell, cooldown_cell, action_cell
 
     nickname = str(row.get("nickname") or "").strip()
     if not nickname:
         muted_html = '<span class="muted-text">缺少昵称，暂不可编辑</span>'
-        return muted_html, muted_html, muted_html, muted_html
+        return muted_html, muted_html, muted_html, muted_html, muted_html
 
     edit_meta = edit_meta or {}
     db_mode = str(edit_meta.get("db_mode") or "stone").strip() or "stone"
     detail_query = f"/account?nickname={nickname}&db={db_mode}"
     form_id = f"inline-edit-form-{row_index}"
+    cooldown_touched_id = f"cooldown-touched-{row_index}"
     field_errors = (edit_result or {}).get("field_errors") if _is_active_edit_row(row, edit_result) else {}
     form_values = _build_list_form_values(row, edit_result)
     status_options = list(edit_meta.get("status_options") or [])
@@ -1027,6 +1034,12 @@ def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
   {_render_field_error(field_errors, "round_status")}
 </div>
 """
+    cooldown_cell = f"""
+<div class="inline-field">
+  <input class="cooldown-input" form="{escape(form_id, quote=True)}" type="text" name="cooldown_remaining_text" value="{escape(str(form_values.get('cooldown_remaining_text') or ''), quote=True)}" oninput="document.getElementById('{escape(cooldown_touched_id, quote=True)}').value='1'">
+  {_render_field_error(field_errors, "cooldown_remaining_text")}
+</div>
+"""
     action_cell = f"""
 <div class="inline-save">
   <form id="{escape(form_id, quote=True)}" method="post" action="/account/update" data-preserve-scroll="true">
@@ -1035,6 +1048,7 @@ def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
     <input type="hidden" name="return_to" value="index">
     <input type="hidden" name="scroll_x" value="">
     <input type="hidden" name="scroll_y" value="">
+    <input type="hidden" id="{escape(cooldown_touched_id, quote=True)}" name="cooldown_remaining_touched" value="{escape(str(form_values.get('cooldown_remaining_touched') or '0'), quote=True)}">
   </form>
   <div class="inline-save-main">
     <button type="submit" form="{escape(form_id, quote=True)}">保存</button>
@@ -1043,7 +1057,7 @@ def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
   {_render_inline_row_result(row, edit_result)}
 </div>
 """
-    return inventory_cell, balance_cell, status_cell, action_cell
+    return inventory_cell, balance_cell, status_cell, cooldown_cell, action_cell
 
 
 def _build_account_list_rows(rows, edit_meta=None, edit_result=None, read_only_mode=False):
@@ -1056,8 +1070,9 @@ def _build_account_list_rows(rows, edit_meta=None, edit_result=None, read_only_m
     for row_index, row in enumerate(effective_rows, start=1):
         if using_demo_rows or read_only_mode:
             inventory_cell, balance_cell, status_cell, action_cell = _render_local_read_only_cells(row, db_mode)
+            cooldown_cell = _format_cooldown_remaining_time(row.get("cooldown_remaining_seconds"))
         else:
-            inventory_cell, balance_cell, status_cell, action_cell = _render_inline_edit_cells(
+            inventory_cell, balance_cell, status_cell, cooldown_cell, action_cell = _render_inline_edit_cells(
                 row,
                 row_index,
                 edit_meta=edit_meta,
@@ -1072,7 +1087,7 @@ def _build_account_list_rows(rows, edit_meta=None, edit_result=None, read_only_m
             _format_runtime_remaining_text(row.get("runtime_window_remaining_text")),
             status_cell,
             _format_value(row.get("allow_purchase")),
-            _format_cooldown_remaining_time(row.get("cooldown_remaining_seconds")),
+            cooldown_cell,
             action_cell,
         )
         if row.get("is_temporary_account"):
@@ -1521,7 +1536,7 @@ def render_index_page(
                     row[3],
                     _render_home_display_field(row[4], "meta"),
                     row[5],
-                    _render_home_display_field(row[7], "meta"),
+                    row[7],
                     row[8],
                 ),
                 _table_row_class(raw_row),

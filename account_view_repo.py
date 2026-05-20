@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 import os
+import re
 import sqlite3
 import subprocess
 
@@ -17,6 +18,7 @@ from account_db import (
     CANONICAL_ACCOUNT_STATS_TABLE,
     MACHINE_DAILY_SUMMARY_TABLE,
     ROUND_STATUS_BALANCE_LOW,
+    ROUND_STATUS_FORBIDDEN,
     ROUND_STATUS_LIMITED,
     ROUND_STATUS_MANUAL_PAUSE,
     ROUND_STATUS_READY,
@@ -307,8 +309,44 @@ def _format_duration_text(total_seconds):
     return f"{seconds}秒"
 
 
+def _format_cooldown_input_text(seconds_value):
+    try:
+        remaining_seconds = max(0, int(seconds_value or 0))
+    except (TypeError, ValueError):
+        remaining_seconds = 0
+
+    total_minutes = remaining_seconds // 60
+    if total_minutes < 60:
+        return f"{total_minutes}分钟"
+
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    return f"{hours}小时{minutes}分"
+
+
+def _parse_cooldown_remaining_input(raw_text):
+    text = str(raw_text or "").strip()
+    minute_match = re.fullmatch(r"(\d+)分钟", text)
+    if minute_match:
+        return int(minute_match.group(1)) * 60
+
+    hour_match = re.fullmatch(r"(\d+)小时(\d+)分", text)
+    if hour_match:
+        hours = int(hour_match.group(1))
+        minutes = int(hour_match.group(2))
+        if minutes >= 60:
+            raise ValueError("冷却剩余时间格式必须为“数字分钟”或“数字小时数字分”，分钟需小于 60。")
+        return (hours * 60 + minutes) * 60
+
+    raise ValueError("冷却剩余时间格式必须沿用页面现有格式。")
+
+
 def _is_forced_limit_status(round_status):
     return round_status in (ROUND_STATUS_BALANCE_LOW, ROUND_STATUS_LIMITED, ROUND_STATUS_RUNTIME_REACHED)
+
+
+def _is_forbidden_status(round_status):
+    return round_status == ROUND_STATUS_FORBIDDEN
 
 
 def _resolve_cooldown_anchor_time(round_status, last_limit_time, updated_at):
@@ -504,6 +542,13 @@ def _account_stats_record_to_view_record(record, now):
             now,
         )
     )
+    if _is_forbidden_status(view_record["round_status"]):
+        view_record["allow_purchase"] = False
+        view_record["cooldown_remaining_seconds"] = None
+        view_record["cooldown_remaining_text"] = "-"
+        view_record["runtime_window_remaining_seconds"] = None
+        view_record["runtime_window_remaining_text"] = "-"
+        view_record["runtime_window_source"] = "forbidden"
     view_record.setdefault("inventory_quantity", 0)
     view_record.setdefault("updated_at_relative", "")
     view_record.setdefault("runtime_window_remaining_text", _format_duration_text(0))
@@ -830,6 +875,8 @@ def _build_edit_meta(record=None, db_mode=ACCOUNT_DB_MODE_STONE):
             "tradable_item_count": str(default_tradable),
             "round_status": str(record.get("round_status") or ""),
             "current_balance_wan": str(record.get("current_balance_wan") or ""),
+            "cooldown_remaining_text": _format_cooldown_input_text(record.get("cooldown_remaining_seconds")),
+            "cooldown_remaining_touched": "0",
         },
     }
 
@@ -1222,10 +1269,13 @@ def update_account_view_record(
     db_mode=ACCOUNT_DB_MODE_STONE,
     locked_item_count_text=None,
     tradable_item_count_text=None,
+    cooldown_remaining_text=None,
+    cooldown_remaining_touched_text="0",
 ):
-    """最小单账号写接口：仅允许更新道具库存、状态和余额。"""
+    """最小单账号写接口：仅允许更新库存、状态、余额和冷却剩余时间。"""
     normalized_mode = normalize_account_db_mode(db_mode)
     normalized_nickname = str(nickname or "").strip()
+    cooldown_remaining_touched = str(cooldown_remaining_touched_text or "").strip() == "1"
     form_values = {
         "nickname": normalized_nickname,
         "baseline_item_count": str(baseline_item_count_text or "").strip(),
@@ -1233,6 +1283,8 @@ def update_account_view_record(
         "tradable_item_count": str(tradable_item_count_text or "").strip(),
         "round_status": str(round_status or "").strip(),
         "current_balance_wan": str(balance_wan_text or "").strip(),
+        "cooldown_remaining_text": str(cooldown_remaining_text or "").strip(),
+        "cooldown_remaining_touched": "1" if cooldown_remaining_touched else "0",
         "db_mode": normalized_mode,
     }
     result = {
@@ -1309,6 +1361,19 @@ def update_account_view_record(
     else:
         form_values["current_balance_wan"] = normalized_balance_wan
 
+    desired_cooldown_remaining_seconds = None
+    if cooldown_remaining_touched:
+        try:
+            desired_cooldown_remaining_seconds = _parse_cooldown_remaining_input(cooldown_remaining_text)
+        except ValueError as exc:
+            result["field_errors"]["cooldown_remaining_text"] = str(exc)
+        else:
+            form_values["cooldown_remaining_text"] = _format_cooldown_input_text(desired_cooldown_remaining_seconds)
+            if not _is_forced_limit_status(normalized_round_status) and desired_cooldown_remaining_seconds > 0:
+                result["field_errors"]["cooldown_remaining_text"] = (
+                    "只有余额不足、账号限制、时长已到状态可以保存非 0 冷却。"
+                )
+
     if result["field_errors"]:
         result["message"] = "提交失败，请先修正表单输入。"
         result["detail_result"] = get_account_view_detail(nickname=normalized_nickname, db_mode=normalized_mode)
@@ -1356,6 +1421,7 @@ def update_account_view_record(
         runtime_window_start_time=current_record.runtime_window_start_time,
         round_status=normalized_round_status,
     )
+    now = datetime.now()
     if normalized_round_status == ROUND_STATUS_READY:
         updated_record.last_limit_time = None
         updated_record.purchase_running_seconds = 0
@@ -1363,6 +1429,25 @@ def update_account_view_record(
     elif _is_forced_limit_status(normalized_round_status):
         updated_record.purchase_running_seconds = 0
         updated_record.runtime_window_start_time = None
+        if cooldown_remaining_touched:
+            updated_record.last_limit_time = (
+                now
+                + timedelta(seconds=desired_cooldown_remaining_seconds or 0)
+                - timedelta(seconds=ACCOUNT_LIMIT_COOLDOWN_SECONDS)
+            )
+        else:
+            current_cooldown_fields = _build_cooldown_fields(
+                normalized_round_status,
+                current_record.last_limit_time,
+                current_record.updated_at,
+                now,
+            )
+            if _parse_int(current_cooldown_fields.get("cooldown_remaining_seconds")) <= 0:
+                updated_record.last_limit_time = now
+    elif _is_forbidden_status(normalized_round_status):
+        pass
+    elif cooldown_remaining_touched and desired_cooldown_remaining_seconds == 0:
+        updated_record.last_limit_time = None
 
     try:
         save_canonical_account_stats_record(database_path, updated_record, table_name)
@@ -1397,6 +1482,8 @@ def update_account_view_record(
         "tradable_item_count": str(tradable_item_count),
         "round_status": normalized_round_status,
         "current_balance_wan": normalized_balance_wan,
+        "cooldown_remaining_text": form_values["cooldown_remaining_text"],
+        "cooldown_remaining_touched": form_values["cooldown_remaining_touched"],
         "db_mode": normalized_mode,
     }
     return result

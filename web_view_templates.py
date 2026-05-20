@@ -149,7 +149,7 @@ def _render_edit_notice():
     return """
 <div class="edit-notice">
   <strong>当前详情页支持最小编辑：</strong>
-  仅允许修改 3 个字段：道具基数、账号状态、余额（万）。
+  仅允许修改库存、账号状态、余额（万）和冷却剩余时间。
   不支持批量编辑，不支持自动刷新，也不会改动辅助快照逻辑。
 </div>
 """
@@ -296,6 +296,8 @@ def _build_list_form_values(row, edit_result):
         "baseline_item_delta": "",
         "round_status": str(row.get("round_status") or "").strip(),
         "current_balance_wan": str(row.get("current_balance_wan") or "").strip(),
+        "cooldown_remaining_text": _format_cooldown_remaining_time(row.get("cooldown_remaining_seconds")),
+        "cooldown_remaining_touched": "0",
     }
     if _is_active_edit_row(row, edit_result):
         form_values.update(edit_result.get("form_values") or {})
@@ -329,6 +331,7 @@ def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
 
     edit_meta = edit_meta or {}
     form_id = f"inline-edit-form-{row_index}"
+    cooldown_touched_id = f"cooldown-touched-{row_index}"
     field_errors = (edit_result or {}).get("field_errors") if _is_active_edit_row(row, edit_result) else {}
     form_values = _build_list_form_values(row, edit_result)
     status_options = list(edit_meta.get("status_options") or [])
@@ -368,17 +371,24 @@ def _render_inline_edit_cells(row, row_index, edit_meta=None, edit_result=None):
   {_render_field_error(field_errors, "current_balance_wan")}
 </div>
 """
+    cooldown_cell = f"""
+<div class="inline-field">
+  <input form="{escape(form_id, quote=True)}" type="text" name="cooldown_remaining_text" value="{escape(str(form_values.get('cooldown_remaining_text') or ''), quote=True)}" oninput="document.getElementById('{escape(cooldown_touched_id, quote=True)}').value='1'">
+  {_render_field_error(field_errors, "cooldown_remaining_text")}
+</div>
+"""
     action_cell = f"""
 <div class="inline-save">
   <form id="{escape(form_id, quote=True)}" method="post" action="/account/update">
     <input type="hidden" name="nickname" value="{escape(nickname, quote=True)}">
     <input type="hidden" name="return_to" value="index">
+    <input type="hidden" id="{escape(cooldown_touched_id, quote=True)}" name="cooldown_remaining_touched" value="{escape(str(form_values.get('cooldown_remaining_touched') or '0'), quote=True)}">
   </form>
   <button type="submit" form="{escape(form_id, quote=True)}">保存</button>
   {_render_inline_row_result(row, edit_result)}
 </div>
 """
-    return item_cell, baseline_delta_cell, status_cell, balance_cell, action_cell
+    return item_cell, baseline_delta_cell, status_cell, balance_cell, cooldown_cell, action_cell
 
 
 def _render_account_edit_form(record, edit_meta=None, edit_result=None):
@@ -391,6 +401,7 @@ def _render_account_edit_form(record, edit_meta=None, edit_result=None):
     status_options = list(edit_meta.get("status_options") or [])
     balance_input_unit = str(edit_meta.get("balance_input_unit") or "万")
     column_mapping = edit_meta.get("column_mapping") or {}
+    cooldown_touched_id = "detail-cooldown-touched"
 
     option_html = []
     current_status = str(form_values.get("round_status") or "")
@@ -403,13 +414,14 @@ def _render_account_edit_form(record, edit_meta=None, edit_result=None):
     return f"""
 <div class="section">
   <h2>最小编辑</h2>
-  <p>仅开放 3 个字段。余额输入单位固定为“{escape(balance_input_unit)}”，账号状态只能从现有合法枚举中选择。</p>
+  <p>仅开放库存、账号状态、余额与冷却剩余时间。余额输入单位固定为“{escape(balance_input_unit)}”，账号状态只能从现有合法枚举中选择。</p>
   <p>字段映射：道具基数 → <code>{escape(str(column_mapping.get("baseline_item_count") or "-"))}</code>，
   账号状态 → <code>{escape(str(column_mapping.get("round_status") or "-"))}</code>，
   余额（{escape(balance_input_unit)}） → <code>{escape(str(column_mapping.get("current_balance_wan") or "-"))}</code>。</p>
   <form method="post" action="/account/update" class="edit-form">
     <input type="hidden" name="nickname" value="{escape(str(record.get("nickname") or ""), quote=True)}">
     <input type="hidden" name="return_to" value="detail">
+    <input type="hidden" id="{escape(cooldown_touched_id, quote=True)}" name="cooldown_remaining_touched" value="{escape(str(form_values.get('cooldown_remaining_touched') or '0'), quote=True)}">
     <label>
       <span>道具基数</span>
       <input type="number" name="baseline_item_count" step="1" min="0" required value="{escape(str(form_values.get('baseline_item_count') or ''), quote=True)}">
@@ -433,8 +445,14 @@ def _render_account_edit_form(record, edit_meta=None, edit_result=None):
       <small>页面输入和展示都按“万”为单位；提交时会按主库当前存储口径写入。</small>
       {_render_field_error(field_errors, "current_balance_wan")}
     </label>
+    <label>
+      <span>冷却剩余时间</span>
+      <input type="text" name="cooldown_remaining_text" value="{escape(str(form_values.get('cooldown_remaining_text') or ''), quote=True)}" oninput="document.getElementById('{escape(cooldown_touched_id, quote=True)}').value='1'">
+      <small>未修改输入框时保存不会改冷却；修改后只接受页面现有格式。</small>
+      {_render_field_error(field_errors, "cooldown_remaining_text")}
+    </label>
     <div class="form-actions">
-      <button type="submit">保存这 3 个字段</button>
+      <button type="submit">保存这些字段</button>
     </div>
   </form>
 </div>
@@ -461,6 +479,8 @@ def _format_balance_wan_display(balance_wan_text):
 
 
 def _format_cooldown_remaining_time(seconds_value):
+    if seconds_value is None:
+        return "-"
     try:
         remaining_seconds = max(0, int(seconds_value or 0))
     except (TypeError, ValueError):
@@ -489,11 +509,12 @@ def _build_account_list_rows(rows, edit_meta=None, edit_result=None):
             baseline_delta_cell = '<span class="muted-text">演示数据，不可编辑</span>'
             status_cell = _format_value(row.get("round_status"))
             balance_cell = _format_balance_wan_display(row.get("current_balance_wan"))
+            cooldown_cell = _format_cooldown_remaining_time(row.get("cooldown_remaining_seconds"))
             action_cell = '<span class="muted-text">不可保存</span>'
         else:
             detail_url = f"/account?nickname={nickname}" if nickname else f"/account?execution_slot={slot}"
             detail_cell = f"<a href=\"{escape(detail_url, quote=True)}\">查看详情</a>"
-            item_cell, baseline_delta_cell, status_cell, balance_cell, action_cell = _render_inline_edit_cells(
+            item_cell, baseline_delta_cell, status_cell, balance_cell, cooldown_cell, action_cell = _render_inline_edit_cells(
                 row,
                 row_index,
                 edit_meta=edit_meta,
@@ -509,7 +530,7 @@ def _build_account_list_rows(rows, edit_meta=None, edit_result=None):
                 balance_cell,
                 _format_value(row.get("allow_purchase")),
                 _format_value(row.get("runtime_window_remaining_text")),
-                _format_cooldown_remaining_time(row.get("cooldown_remaining_seconds")),
+                cooldown_cell,
                 detail_cell,
                 action_cell,
             )

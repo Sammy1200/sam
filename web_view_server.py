@@ -322,6 +322,8 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
         tradable_item_count = ((form.get("tradable_item_count") or [""])[0] or "").strip()
         round_status = ((form.get("round_status") or [""])[0] or "").strip()
         current_balance_wan = ((form.get("current_balance_wan") or [""])[0] or "").strip()
+        cooldown_remaining_text = ((form.get("cooldown_remaining_text") or [""])[0] or "").strip()
+        cooldown_remaining_touched = ((form.get("cooldown_remaining_touched") or ["0"])[0] or "0").strip()
         db_mode = self._parse_db_mode(form)
         return_to = ((form.get("return_to") or ["detail"])[0] or "detail").strip().lower()
         scroll_x = self._parse_scroll_value((form.get("scroll_x") or [""])[0])
@@ -337,6 +339,8 @@ class ReadOnlyViewHandler(BaseHTTPRequestHandler):
             db_mode=db_mode,
             locked_item_count_text=locked_item_count,
             tradable_item_count_text=tradable_item_count,
+            cooldown_remaining_text=cooldown_remaining_text,
+            cooldown_remaining_touched_text=cooldown_remaining_touched,
         )
         update_result["scope"] = "local"
         status_code = 200 if update_result.get("status") == "success" else 400
