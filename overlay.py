@@ -11,6 +11,7 @@ import unicodedata
 from datetime import datetime, timedelta
 
 import state
+from machine_sync_config import get_machine_sync_runtime_context
 from round_persistence import (
     get_runtime_window_remaining_seconds,
     persist_pause_snapshot,
@@ -73,6 +74,7 @@ _pause_hotkey_listener_started = False
 _overlay_shutdown_requested = False
 _overlay_closed_event = threading.Event()
 _pause_auto_resume_lock = threading.Lock()
+_overlay_machine_label_cache = None
 
 
 def fit_overlay_to_content(position_override=None):
@@ -124,17 +126,19 @@ def _get_overlay_status_text():
     return status_text or DEFAULT_OVERLAY_STATUS_TEXT
 
 
-def _get_balance_display_text():
-    balance_text = str(state.round_current_balance or "").strip()
-    if not balance_text:
-        balance_text = str(state.current_balance or "").strip()
-    if not balance_text:
-        return "待确认"
+def _get_machine_display_label():
+    global _overlay_machine_label_cache
+    if _overlay_machine_label_cache:
+        return _overlay_machine_label_cache
 
-    mode = str(getattr(state, "balance_display_mode", "") or "").strip()
-    if mode in ("新", "沿"):
-        return f"{mode}{balance_text}"
-    return balance_text
+    try:
+        runtime_context = get_machine_sync_runtime_context()
+        machine_label = str(runtime_context.get("machine_display_name") or "").strip()
+    except Exception:
+        machine_label = ""
+
+    _overlay_machine_label_cache = machine_label or "本机"
+    return _overlay_machine_label_cache
 
 
 def _get_current_inventory():
@@ -323,27 +327,29 @@ def _create_score_panel(root):
             ipady=OVERLAY_SCORE_ITEM_PAD_Y_FIRST_ROW if row_index == 0 else OVERLAY_SCORE_ITEM_PAD_Y,
         )
 
-    balance_row = tk.Frame(body, bg=OVERLAY_SCORE_MAIN_BG, bd=0, highlightthickness=0)
-    balance_row.grid(
+    machine_row = tk.Frame(body, bg=OVERLAY_SCORE_MAIN_BG, bd=0, highlightthickness=0)
+    machine_row.grid(
         row=len(row_specs),
         column=0,
         sticky="ew",
         padx=OVERLAY_SCORE_MAIN_PAD_X,
         pady=(0, OVERLAY_SCORE_MAIN_PAD_Y),
     )
-    balance_row.grid_columnconfigure(0, weight=1)
+    machine_row.grid_columnconfigure(0, weight=1)
 
-    balance_item = _build_score_item(
-        balance_row,
-        title="余额",
-        value_key="balance",
+    machine_item = _build_score_item(
+        machine_row,
+        title="",
+        value_key="machine_label",
         value_width=10,
         value_font=OVERLAY_SCORE_VALUE_FONT,
         value_fg=OVERLAY_SCORE_VALUE_FG,
-        value_padx=OVERLAY_SCORE_VALUE_GAP,
+        value_padx=0,
+        value_anchor="center",
+        value_sticky="ew",
         score_vars=panel._overlay_score_value_vars,
     )
-    balance_item.grid(
+    machine_item.grid(
         row=0,
         column=0,
         sticky="ew",
@@ -431,7 +437,7 @@ def update_score_text():
     remaining_text = _format_duration(get_runtime_window_remaining_seconds())
     slot_text = str(state.current_execution_slot or "--")
     current_inventory = _get_current_inventory()
-    balance_text = _get_balance_display_text()
+    machine_label = _get_machine_display_label()
     values = {
         "slot": slot_text,
         "status": _format_overlay_value(state.overlay_status, fallback="暴力"),
@@ -440,7 +446,7 @@ def update_score_text():
         "inventory": current_inventory,
         "purchase_success": state.round_purchase_success_count,
         "purchase_fail": state.round_purchase_fail_count,
-        "balance": balance_text,
+        "machine_label": machine_label,
     }
     try:
         if state.score_var is not None:
@@ -455,8 +461,8 @@ def update_score_text():
                         f"抢成{state.round_purchase_success_count} 抢失{state.round_purchase_fail_count}",
                     ),
                     _format_score_rolling_line(
-                        f"余额 {balance_text}",
-                        f"余{balance_text}",
+                        machine_label,
+                        machine_label,
                     ),
                 ]
             else:
@@ -474,8 +480,8 @@ def update_score_text():
                         f"抢成{state.round_purchase_success_count} 抢失{state.round_purchase_fail_count}",
                     ),
                     _format_score_rolling_line(
-                        f"余额 {balance_text}",
-                        f"余{balance_text}",
+                        machine_label,
+                        machine_label,
                     ),
                 ]
             state.score_var.set(

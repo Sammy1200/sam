@@ -98,8 +98,18 @@ def _format_editor_execution_slot():
     return "--"
 
 
+def _format_editor_context_label():
+    if getattr(state, "brutal_purchase_mode", False):
+        return "暴力模式"
+    if getattr(state, "temporary_purchase_mode", False):
+        return "临时模式"
+    if getattr(state, "startup_listing_mode_active", False):
+        return "上架模式"
+    return _format_editor_execution_slot()
+
+
 def _build_editor_title_text():
-    return f" {_format_editor_machine_label()} - {_format_editor_execution_slot()}"
+    return f" {_format_editor_machine_label()}-{_format_editor_context_label()}"
 
 
 def _format_duration(seconds):

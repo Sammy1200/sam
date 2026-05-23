@@ -383,6 +383,11 @@ def _check_brutal_balance_limit(frame, camera=None, finish_callback=None):
         return True
     if effective_balance_value >= BALANCE_INSUFFICIENT_THRESHOLD:
         return True
+    if (
+        getattr(state, "brutal_purchase_limit_enabled", False)
+        and int(getattr(state, "brutal_purchase_limit", 0) or 0) > 0
+    ):
+        return True
 
     final_balance_text = effective_balance_text
     if camera is not None:
